@@ -82,8 +82,8 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         overrides.setdefault("semantic_captions", False)
         overrides.setdefault("query_rewriting", True)
         overrides.setdefault("top", 5)
-        overrides.setdefault("minimum_search_score", 0.2)
-        overrides.setdefault("minimum_reranker_score", 0.1)
+        overrides.setdefault("minimum_search_score", 0.0)
+        overrides.setdefault("minimum_reranker_score", 0.0)
 
         if use_agentic_retrieval:
             extra_info = await self.run_agentic_retrieval_approach(messages, overrides, auth_claims)
