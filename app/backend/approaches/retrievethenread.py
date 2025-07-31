@@ -126,7 +126,7 @@ class RetrieveThenReadApproach(Approach):
         use_semantic_ranker = True if overrides.get("semantic_ranker") else False
         use_query_rewriting = True if overrides.get("query_rewriting") else False
         use_semantic_captions = True if overrides.get("semantic_captions") else False
-        top = overrides.get("top", 3)
+        top = overrides.get("top", 10)
         minimum_search_score = overrides.get("minimum_search_score", 0.0)
         minimum_reranker_score = overrides.get("minimum_reranker_score", 0.0)
         filter = self.build_filter(overrides, auth_claims)
@@ -184,7 +184,7 @@ class RetrieveThenReadApproach(Approach):
     ):
         minimum_reranker_score = overrides.get("minimum_reranker_score", 0)
         search_index_filter = self.build_filter(overrides, auth_claims)
-        top = overrides.get("top", 3)
+        top = overrides.get("top", 10)
         max_subqueries = overrides.get("max_subqueries", 10)
         results_merge_strategy = overrides.get("results_merge_strategy", "interleaved")
         # 50 is the amount of documents that the reranker can process per query
