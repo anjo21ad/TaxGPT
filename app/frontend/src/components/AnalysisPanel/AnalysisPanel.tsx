@@ -32,28 +32,29 @@ export const AnalysisPanel = ({ answer, activeTab, activeCitation, citationHeigh
     const client = useLogin ? useMsal().instance : undefined;
     const { t } = useTranslation();
 
-    const fetchCitation = async () => {
-        const token = client ? await getToken(client) : undefined;
-        if (activeCitation) {
-            // Get hash from the URL as it may contain #page=N
-            // which helps browser PDF renderer jump to correct page N
-            const originalHash = activeCitation.indexOf("#") ? activeCitation.split("#")[1] : "";
-            const response = await fetch(activeCitation, {
-                method: "GET",
-                headers: await getHeaders(token)
-            });
-            const citationContent = await response.blob();
-            let citationObjectUrl = URL.createObjectURL(citationContent);
-            // Add hash back to the new blob URL
-            if (originalHash) {
-                citationObjectUrl += "#" + originalHash;
-            }
-            setCitation(citationObjectUrl);
-        }
-    };
     useEffect(() => {
+        const fetchCitation = async () => {
+            const token = client ? await getToken(client) : undefined;
+            if (activeCitation) {
+                // Get hash from the URL as it may contain #page=N
+                // which helps browser PDF renderer jump to correct page N
+                const originalHash = activeCitation.indexOf("#") ? activeCitation.split("#")[1] : "";
+                const response = await fetch(activeCitation, {
+                    method: "GET",
+                    headers: await getHeaders(token)
+                });
+                const citationContent = await response.blob();
+                let citationObjectUrl = URL.createObjectURL(citationContent);
+                // Add hash back to the new blob URL
+                if (originalHash) {
+                    citationObjectUrl += "#" + originalHash;
+                }
+                setCitation(citationObjectUrl);
+            }
+        };
+        
         fetchCitation();
-    }, []);
+    }, [activeCitation, client]);
 
     const renderFileViewer = () => {
         if (!activeCitation) {

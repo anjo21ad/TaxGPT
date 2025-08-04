@@ -1,0 +1,387 @@
+ BH40200: PROCEDURE OPTIONS(MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');       
+ /********************************************************************* 
+ *                                                                     *
+ * FORMÅL :                                                            *
+ * Programmet skal udtrække alle med CPTYPSLUT = '4' fra BQ30000T og   *
+ * BQ31000T.  Dette lagres på dataset.                                 *
+ * herefter hentes følgende felter og samtlige data gemmes på dataset  *
+ * (denne del mangler endnu)                                           *
+ * Der ønskes en fil med CPENSNED1, CSTIBLB, BPENSNED og               *
+ * personens alder som skal beregnes ud fra personnummer.              *
+ *                                                                     *
+ * INPUT  : BQ30000T BQ31000T                                          *
+ *                                                                     *
+ * OUTPUT : Fil med udtrukne personer                                  *
+ *                                                                     *
+ * PROGRAMMØR: Lene Maj Jensen, QLE  2016                              *
+ * RETTET:                                                             *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+                                                                        
+ /**********************************************************************
+ *                       DECLARE AF REGISTRE                           *
+ **********************************************************************/
+ DCL     BH4021O FILE RECORD OUTPUT;     /* Udtræk af personer        */
+ DCL     BH4022I FILE RECORD INPUT;      /* Udtræk benyttes som input */
+ DCL     BH4023O FILE RECORD OUTPUT;     /* Endeligt udtræk */          
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /**********************************************************************
+ *       DECLARE AF RECORDS                                            *
+ **********************************************************************/
+ DCL     UDDATA_EJER         CHAR(376);                                 
+ DCL     1 EJER_STRUK_OUT BASED     (ADDR(UDDATA_EJER)),                
+        %INCLUDE BH40200N;                                              
+                                                                        
+ DCL     INDDATA_EJER         CHAR(376);                                
+ DCL     1 EJER_STRUK_IN BASED     (ADDR(INDDATA_EJER)),                
+        %INCLUDE BH40210N;                                              
+                                                                        
+ DCL     UDDATA_OEVR         CHAR(1138);                                
+ DCL     1 OEVR_STRUK_OUT BASED     (ADDR(UDDATA_OEVR)),                
+        %INCLUDE BH40220N;                                              
+                                                                        
+ /**********************************************************************
+ *               DECLARE AF DIV. TÆLLEVÆRKER                           *
+ **********************************************************************/
+                                                                        
+ DCL     ANT_UDTR_PART1    FIXED DEC(15,0)    INIT(0);                  
+ DCL     ANT_LAEST        FIXED DEC(15,0)    INIT(0);                   
+ DCL     ANT_ENDELIGT     FIXED DEC(15,0)    INIT(0);                   
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /********************************************************************* 
+ *       DECLARE AF DIV. FÆLLESMACROER                                * 
+ *********************************************************************/ 
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+                                                                        
+ DCL     JA              BIT       (1)     INIT('1'B);                  
+ DCL     NEJ             BIT       (1)     INIT('0'B);                  
+ DCL     EOF_BH4022I     BIT       (1)     INIT('0'B);                  
+ DCL     WS_CTYPSLUT     CHAR      (254);                               
+ DCL     SQLKODE         PIC '9999';                                    
+ DCL     HJ_INDKOMSTAAR  CHAR      (4);                                 
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ABEND_STR               CHAR (56) BASED(ADDR(ABEND_STRUK));    
+ DCL     1 ABEND_STRUK,                                                 
+          2 MODULNAVN            CHAR (07) INIT ('BH40200'),            
+          2 HFILL1               CHAR (01) INIT (' '),                  
+          2 MEDDELNR             CHAR (02) INIT ('**'),                 
+          2 HFILL2               CHAR (01) INIT (' '),                  
+          2 MEDDELTXT            CHAR (45) INIT ('');                   
+                                                                        
+ DCL     FEJLTEKST       CHAR (20)        INIT(' ');                    
+ DCL     ABENDMEDD       CHAR (56)        INIT(' ');                    
+ /**********************************************************************
+ *       DB2 DEFINITIONER                                              *
+ **********************************************************************/
+ %INCLUDE SQLCA;                                                        
+                                                                        
+         EXEC SQL INCLUDE BQ30000T;   /* EVS SLUT EJERTABEL           */
+         EXEC SQL INCLUDE BQ31000K;   /* EVS SLUT EJERFELTTABEL       */
+                                                                        
+ DCL     1 EJER_TABEL,                     /* EVS EJERSKABSTABELEN */   
+         %INCLUDE BQ30000N;;                                            
+                                                                        
+ /**********************************************************************
+  * DECLARE AF DB2 Cursor                                              *
+  *********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH40200');                 
+            END;                                                        
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         HJ_INDKOMSTAAR = BH65300M.INDKÅR1;                             
+         PUT SKIP LIST('INDKOMSTÅR : '!!HJ_INDKOMSTAAR);                
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         /* START PART 1 - Udtræk alle med CPTYPSLUT = 4 */             
+         /*                feltkode 86                   */             
+                                                                        
+         CALL HENT_CPTYP4;                                              
+                                                                        
+         /* START PART 2 - Find ønskede felter */                       
+         /* CPENSNED1/FELT759 - feltkode 110   */                       
+         /* CSTIBLB           - feltkode  90   */                       
+         /* BPENSNED          - feltkode  41   */                       
+                                                                        
+         CALL HENT_OEVR_FELTER;                                         
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Hent alle rækker med CPTYPSLUT = 4                                */
+ /*********************************************************************/
+ HENT_CPTYP4: PROC;                                                     
+                                                                        
+         ANT_UDTR_PART1 = 0;                                            
+                                                                        
+         OPEN FILE (BH4021O) TITLE ('BH40201O');                        
+                                                                        
+         CALL DECLARE_EJER_CUR;                                         
+         CALL OPEN_EJER_CUR;                                            
+         CALL FETCH_EJER_CUR;                                           
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               DO WHILE (SQLCA.SQLCODE = 0);                            
+                  CALL SKRIV_EJER;                                      
+                  CALL FETCH_EJER_CUR;                                  
+               END;                                                     
+             END;                                                       
+           WHEN (100);                                                  
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH EJER_CURSOR ';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* SELECT*/                                               
+         CALL CLOSE_EJER_CUR;                                           
+                                                                        
+         CLOSE FILE (BH4021O);                                          
+                                                                        
+ END HENT_CPTYP4;                                                       
+                                                                        
+ /*********************************************************************/
+ /* Hent Øvrige felter til record                                     */
+ /*********************************************************************/
+ HENT_OEVR_FELTER: PROC;                                                
+                                                                        
+         ANT_LAEST = 0;                                                 
+         ANT_ENDELIGT = 0;                                              
+                                                                        
+         OPEN FILE (BH4022I) TITLE ('BH40202I');                        
+         OPEN FILE (BH4023O) TITLE ('BH40203O');                        
+                                                                        
+         /* indlæg hent af felter og dan dataset */                     
+                                                                        
+         ON  ENDFILE (BH4022I)                                          
+         BEGIN;                                                         
+            EOF_BH4022I  = '1'B;                                        
+         END;                                                           
+                                                                        
+         READ FILE (BH4022I) INTO  (INDDATA_EJER);                      
+                                                                        
+         DO WHILE (^EOF_BH4022I);                                       
+            ANT_LAEST = ANT_LAEST + 1;                                  
+            OEVR_STRUK_OUT.DINDKAAR      = EJER_STRUK_IN.DINDKAAR;      
+            OEVR_STRUK_OUT.DCPRN         = EJER_STRUK_IN.DCPRN;         
+            OEVR_STRUK_OUT.EKOMNR        = EJER_STRUK_IN.EKOMNR;        
+            OEVR_STRUK_OUT.EEJDNR        = EJER_STRUK_IN.EEJDNR;        
+            OEVR_STRUK_OUT.ELBNR         = EJER_STRUK_IN.ELBNR;         
+            OEVR_STRUK_OUT.EGENNR        = EJER_STRUK_IN.EGENNR;        
+            OEVR_STRUK_OUT.DFRAGLD       = EJER_STRUK_IN.DFRAGLD;       
+            OEVR_STRUK_OUT.DTILGLD       = EJER_STRUK_IN.DTILGLD;       
+            OEVR_STRUK_OUT.DBRGN_MODT    = EJER_STRUK_IN.DBRGN_MODT;    
+            OEVR_STRUK_OUT.CSCREGISTMP   = EJER_STRUK_IN.CSCREGISTMP;   
+            OEVR_STRUK_OUT.CTYPSLUT      = EJER_STRUK_IN.CTYPSLUT;      
+            OEVR_STRUK_OUT.CPENSNED1     = 'XX1XX';                     
+            OEVR_STRUK_OUT.CSTIBLB       = 'XX2XX';                     
+            OEVR_STRUK_OUT.BPENSNED      = 'XX3XX';                     
+            WRITE FILE (BH4023O) FROM (UDDATA_OEVR);                    
+            ANT_ENDELIGT = ANT_ENDELIGT + 1;                            
+            READ FILE (BH4022I) INTO  (INDDATA_EJER);                   
+         END;                                                           
+                                                                        
+         CLOSE FILE (BH4022I);                                          
+         CLOSE FILE (BH4023O);                                          
+                                                                        
+ END HENT_OEVR_FELTER;                                                  
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF BQ30000T                            RUTINE */
+ /*********************************************************************/
+ OPEN_EJER_CUR: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN EJER_CURSOR;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN EJER_CURSOR';                           
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_EJER_CUR;                                                     
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF PERSONTABEL BQ30000T               RUTINE */
+ /*********************************************************************/
+ CLOSE_EJER_CUR: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE EJER_CURSOR;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE EJER_CURSOR';                          
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_EJER_CUR;                                                    
+ /*********************************************************************/
+ /* FIND DE EJERE DER IKKE HAR MODTAGET OPDATERING FRA CSC DE HAR     */
+ /* DBRGN_MODT = 0001-01-01-00.00.00.000000                           */
+ /*********************************************************************/
+ DECLARE_EJER_CUR: PROC;                                                
+                                                                        
+         EXEC SQL DECLARE EJER_CURSOR CURSOR FOR                        
+                                                                        
+         SELECT T1.DINDKAAR,                                            
+                T1.DCPRN,                                               
+                T1.EKOMNR,                                              
+                T1.EEJDNR,                                              
+                T1.ELBNR,                                               
+                T1.EGENNR,                                              
+                T1.DFRAGLD,                                             
+                T1.DTILGLD,                                             
+                T1.DBRGN_MODT,                                          
+                T1.CSCREGISTMP,                                         
+                T3.INDHOLD_C                                            
+         FROM BQ30000T T1, BQ31000T T3                                  
+         WHERE T1.DINDKAAR   = :HJ_INDKOMSTAAR                          
+           AND T1.DTILGLD    = '9999-12-31-23.59.59.999999'             
+           AND T1.EGENNR     = (SELECT MAX(T2.EGENNR)                   
+                                FROM BQ30000T T2                        
+                                WHERE T2.DINDKAAR      = T1.DINDKAAR    
+                                  AND T2.DCPRN         = T1.DCPRN       
+                                  AND T2.EKOMNR        = T1.EKOMNR      
+                                  AND T2.EEJDNR        = T1.EEJDNR      
+                                  AND T2.ELBNR         = T1.ELBNR)      
+           AND T3.DINDKAAR = T1.DINDKAAR                                
+           AND T3.DCPRN    = T1.DCPRN                                   
+           AND T3.EKOMNR   = T1.EKOMNR                                  
+           AND T3.EEJDNR   = T1.EEJDNR                                  
+           AND T3.ELBNR    = T1.ELBNR                                   
+           AND T3.EGENNR   = T1.EGENNR                                  
+           AND (T3.FELTKODE = 86 AND T3.INDHOLD_C IN('4'))              
+         ORDER BY T1.DCPRN,                                             
+                  T1.EKOMNR,                                            
+                  T1.EEJDNR,                                            
+                  T1.ELBNR,                                             
+                  T1.EGENNR;                                            
+                                                                        
+                                                                        
+                                                                        
+ END DECLARE_EJER_CUR;                                                  
+ /*********************************************************************/
+ FETCH_EJER_CUR: PROC;                                                  
+                                                                        
+     EJER_TABEL = '';                                                   
+     EJER_STRUK_OUT = '';                                               
+                                                                        
+         EXEC SQL FETCH EJER_CURSOR                                     
+                                                                        
+         INTO :EJER_TABEL.DINDKAAR,                                     
+              :EJER_TABEL.DCPRN,                                        
+              :EJER_TABEL.EKOMNR,                                       
+              :EJER_TABEL.EEJDNR,                                       
+              :EJER_TABEL.ELBNR,                                        
+              :EJER_TABEL.EGENNR,                                       
+              :EJER_TABEL.DFRAGLD,                                      
+              :EJER_TABEL.DTILGLD,                                      
+              :EJER_TABEL.DBRGN_MODT,                                   
+              :EJER_TABEL.CSCREGISTMP,                                  
+              :WS_CTYPSLUT;                                             
+                                                                        
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0)                                                     
+              DO;                                                       
+                EJER_STRUK_OUT.DINDKAAR      = EJER_TABEL.DINDKAAR;     
+                EJER_STRUK_OUT.DCPRN         = EJER_TABEL.DCPRN;        
+                EJER_STRUK_OUT.EKOMNR        = EJER_TABEL.EKOMNR;       
+                EJER_STRUK_OUT.EEJDNR        = EJER_TABEL.EEJDNR;       
+                EJER_STRUK_OUT.ELBNR         = EJER_TABEL.ELBNR;        
+                EJER_STRUK_OUT.EGENNR        = EJER_TABEL.EGENNR;       
+                EJER_STRUK_OUT.DFRAGLD       = EJER_TABEL.DFRAGLD;      
+                EJER_STRUK_OUT.DTILGLD       = EJER_TABEL.DTILGLD;      
+                EJER_STRUK_OUT.DBRGN_MODT    = EJER_TABEL.DBRGN_MODT;   
+                EJER_STRUK_OUT.CSCREGISTMP   = EJER_TABEL.CSCREGISTMP;  
+                EJER_STRUK_OUT.CTYPSLUT      = WS_CTYPSLUT;             
+              END;                                                      
+            WHEN(100)                                                   
+              DO;                                                       
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                FEJLTEKST  = 'FETCH EJER_CURSOR ';                      
+                CALL SQL_FEJL;                                          
+              END;                                                      
+         END; /*SELECT*/                                                
+                                                                        
+ END FETCH_EJER_CUR;                                                    
+                                                                        
+ /*********************************************************************/
+ SKRIV_EJER: PROC;                                                      
+                                                                        
+         WRITE FILE (BH4021O) FROM (UDDATA_EJER);                       
+         ANT_UDTR_PART1 = ANT_UDTR_PART1 + 1;                           
+                                                                        
+ END SKRIV_EJER;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = 'BH40200 ** 250 ' !! FEJLTEKST !! SQLKODE;         
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+       PUT SKIP LIST('ANTAL UDTRUKKET CPTYPSLUT4 : '!!ANT_UDTR_PART1);  
+       PUT SKIP LIST('ANTAL LÆST FRA 1.UDTRÆK    : '!!ANT_LAEST);       
+       PUT SKIP LIST('ANTAL I ENDELIGT UDTRÆK    : '!!ANT_ENDELIGT);    
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END  BH40200;                                                          

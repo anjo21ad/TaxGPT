@@ -1,0 +1,297 @@
+ /*********************************************************************/
+ /* DECLARES TIL MACRO BH54998M                                       */
+ /*                                                                   */
+ /* RETTET:                                                           */
+ /* SLUT 2021     Z6SEP                                    MARTS 2021 */
+ /*               Fjernes parameter 2 fra OPDATER_KØRSELSTABEL og     */
+ /*               tester nu på BH55300M.AFVIKLINGS_ID.                */
+ /*               Nyt felt DATA_ID indsat efter TIL_EVS_AAR og        */
+ /*               AFVIKLINGS_ID.                                      */
+ /*********************************************************************/
+ DCL  KOERSELDATA_FUNDET    BIT(1)    INIT ('0'B);                      
+                                                                        
+ DCL  FØRSTE_MODUL_FORSKUD    CHAR(8)    INIT ('BH84300');              
+ DCL  FØRSTE_MODUL_SLUT       CHAR(8)    INIT ('BH84300');              
+ DCL  FØRSTE_MODUL_SUPPL      CHAR(8)    INIT ('BH84300');              
+ /*********************************************************************/
+ /* declares til DB2, samt hjælpevariabler til disse                  */
+ /*********************************************************************/
+      EXEC SQL INCLUDE BQ68000T;  /* Flowtabel        */                
+      EXEC SQL INCLUDE BQ69000T;  /* Kørselstabel     */                
+                                                                        
+ DCL  1 FLOW,                                                           
+      %INCLUDE BQ6800TN;                                                
+                                                                        
+ DCL  FLOW_FUNDET           BIT(1)    INIT ('0'B);                      
+ DCL  HELP_KOERNR        BIN FIXED(15) init (0);                        
+ DCL  HELP_START_PROGRAM CHAR(8);                                       
+ DCL  KOERNR_INDIK       BIN FIXED(15);                                 
+ /*********************************************************************/
+ /* OPDATER KØRSELSTABEL         MACRO BH54998M                       */
+ /*********************************************************************/
+ OPDATER_KØRSELSTABEL: PROC(START_SLUT_MK);                             
+                                                                        
+ DCL  START_SLUT_MK      CHAR(5);  /* START='START', SLUT='SLUT' */     
+ DCL  HELP_DB2_FUNK      CHAR(1);                                       
+                                                                        
+                                                                        
+         /* FØRST SKAL FLOWTABELLEN OPDATERES */                        
+                                                                        
+         /* check om der findes en flowrække med */                     
+         /* til_evs_aar, afviklings_id for et tidligere flow */         
+         /* og hent kørselsnr                                */         
+         HELP_START_PROGRAM = ' ';                                      
+         select (BH55600M.AFVIKLINGS_ID);                               
+            when ('OPRET_EVS_FORSK')                                    
+              do;                                                       
+                 HELP_START_PROGRAM = FØRSTE_MODUL_FORSKUD;             
+              end;                                                      
+            when ('OPRET_EVS_SLUT')                                     
+              do;                                                       
+                 HELP_START_PROGRAM = FØRSTE_MODUL_SLUT;                
+              end;                                                      
+            when ('SUPPL_EVS_SLUT')                                     
+              do;                                                       
+                 HELP_START_PROGRAM = FØRSTE_MODUL_SUPPL;               
+              end;                                                      
+            otherwise                                                   
+              do;                                                       
+                ABENDTXT  = '101 PARAMETERFEJL FS_MRK';                 
+                CALL SQL_FEJL;                                          
+              end;                                                      
+         end;                                                           
+         CALL SELECT_FLOWTABEL;                                         
+                                                                        
+         IF START_SLUT_MK = 'START'                                     
+         THEN DO;                                                       
+            /* Hvis dette program er det første i kørselsrækkeflg */    
+            if HELP_START_PROGRAM = ws_programnavn                      
+            then do;                                                    
+               if flow_fundet                                           
+               then do;  /* flow har kørt før */                        
+                  HELP_KOERNR = HELP_KOERNR + 1;                        
+               end;                                                     
+               else do;  /* flow kører for første gang */               
+                  HELP_KOERNR = 1;                                      
+               end;                                                     
+               CALL INSERT_FLOWTABEL;                                   
+            end;                                                        
+         END;                                                           
+                                                                        
+         /* SÅ ER DET KØRSELSTABELLENS TUR */                           
+         IF START_SLUT_MK = 'START'                                     
+         then do;                                                       
+            HELP_DB2_FUNK = '0';                                        
+         end;                                                           
+         else do;                                                       
+            HELP_DB2_FUNK = '1';                                        
+         end;                                                           
+                                                                        
+         CALL SELECT_KØRSELSTABEL;                                      
+                                                                        
+         IF KOERSELDATA_FUNDET                                          
+         THEN DO;                                                       
+                                                                        
+            EXEC SQL                                                    
+               UPDATE BQ69000T                                          
+               SET DB2_FUNKTION = :HELP_DB2_FUNK                        
+               WHERE TIL_EVS_AAR = :DCLBQ69000T.TIL_EVS_AAR             
+               AND   AFVIKLINGS_ID = :DCLBQ69000T.AFVIKLINGS_ID         
+               AND   DATA_ID = :DCLBQ69000T.DATA_ID                     
+               AND   PROGRAMNAVN = :DCLBQ69000T.PROGRAMNAVN;            
+                                                                        
+            SELECT(SQLCA.SQLCODE);                                      
+               WHEN(0) DO;                                              
+                  EXEC SQL COMMIT;                                      
+               END;                                                     
+               OTHERWISE DO;                                            
+                  ABENDTXT  = '101 UPDATE BQ69000T';                    
+                  CALL SQL_FEJL;                                        
+               END;                                                     
+            END;                                                        
+         END;                                                           
+         ELSE DO;                                                       
+            DCLBQ69000T = '';                                           
+            DCLBQ69000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                
+            DCLBQ69000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;           
+            DCLBQ69000T.DATA_ID        = BH55600M.DATA_ID;              
+            DCLBQ69000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                
+            DCLBQ69000T.DB2_FUNKTION    = HELP_DB2_FUNK;                
+                                                                        
+            EXEC SQL                                                    
+               INSERT INTO BQ69000T                                     
+               (                                                        
+               TIL_EVS_AAR,AFVIKLINGS_ID,DATA_ID, PROGRAMNAVN,          
+               DB2_FUNKTION                                             
+               )                                                        
+               values                                                   
+               (                                                        
+                :DCLBQ69000T.TIL_EVS_AAR,                               
+                :DCLBQ69000T.AFVIKLINGS_ID,                             
+                :DCLBQ69000T.DATA_ID,                                   
+                :DCLBQ69000T.PROGRAMNAVN,                               
+                :DCLBQ69000T.DB2_FUNKTION                               
+               );                                                       
+                                                                        
+            SELECT(SQLCA.SQLCODE);                                      
+               WHEN(0) DO;                                              
+                  exec sql commit;                                      
+               END;                                                     
+               OTHERWISE DO;                                            
+                  ABENDTXT  = '101 INSERT BQ69000T';                    
+                  CALL SQL_FEJL;                                        
+               END;                                                     
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF START_SLUT_MK = 'SLUT'                                      
+         THEN DO;                                                       
+            /* update flowtabel med sluttimestamp og programnavn */     
+            if flow_fundet                                              
+            then do;                                                    
+               CALL UPDATE_FLOWTABEL;                                   
+            end;                                                        
+         END;                                                           
+                                                                        
+ END OPDATER_KØRSELSTABEL;                                              
+ /*********************************************************************/
+ /* SELECT KØRSELSTABEL          MACRO BH54998M                       */
+ /*********************************************************************/
+ SELECT_KØRSELSTABEL: PROC;                                             
+                                                                        
+         DCLBQ69000T = '';                                              
+         KOERSELDATA_FUNDET = '0'B;                                     
+                                                                        
+         EXEC SQL                                                       
+            SELECT TIL_EVS_AAR,AFVIKLINGS_ID,DATA_ID,                   
+                   PROGRAMNAVN                                          
+            INTO   :DCLBQ69000T.TIL_EVS_AAR,                            
+                   :DCLBQ69000T.AFVIKLINGS_ID,                          
+                   :DCLBQ69000T.DATA_ID,                                
+                   :DCLBQ69000T.PROGRAMNAVN                             
+            FROM BQ69000T                                               
+            WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR                         
+            AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                  
+            AND   DATA_ID = :BH55600M.DATA_ID                           
+            AND   PROGRAMNAVN   = :WS_PROGRAMNAVN;                      
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               KOERSELDATA_FUNDET = '1'B;                               
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 SELECT BQ69000T';                       
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END SELECT_KØRSELSTABEL;                                               
+ /*********************************************************************/
+ /* SELECT FLOWTABEL             MACRO BH54998M                       */
+ /*********************************************************************/
+ SELECT_FLOWTABEL: PROC;                                                
+                                                                        
+         HELP_KOERNR = 0;                                               
+         FLOW_FUNDET = '0'B;                                            
+                                                                        
+         EXEC SQL                                                       
+            SELECT max(KØRSELSNR)                                       
+            INTO   :HELP_KOERNR                                         
+                   :KOERNR_INDIK                                        
+            FROM BQ68000T                                               
+            WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR                         
+            AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                  
+            AND   DATA_ID = :BH55600M.DATA_ID                           
+            AND   START_PROGRAM   = :HELP_START_PROGRAM;                
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               if KOERNR_INDIK = -1                                     
+               then do;                                                 
+               end;                                                     
+               else do;                                                 
+                  FLOW_FUNDET = '1'B;                                   
+               end;                                                     
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 SELECT BQ68000T';                       
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END SELECT_FLOWTABEL;                                                  
+ /*********************************************************************/
+ /* INSERT RÆKKE PÅ FLOWTABEL    MACRO BH54998M                       */
+ /*********************************************************************/
+ INSERT_FLOWTABEL: PROC;                                                
+                                                                        
+         FLOW = '';                                                     
+         DCLBQ68000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                   
+         DCLBQ68000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;              
+         DCLBQ68000T.DATA_ID        = BH55600M.DATA_ID;                 
+         DCLBQ68000T.START_PROGRAM  = HELP_START_PROGRAM;               
+         DCLBQ68000T.SLUT_PROGRAM   = HELP_START_PROGRAM;               
+         DCLBQ68000T.DB2_FUNKTION   = 'I';                              
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BQ68000T                                        
+            (                                                           
+            TIL_EVS_AAR,AFVIKLINGS_ID,DATA_ID, START_PROGRAM,           
+            SLUT_PROGRAM, START_TIMESTAMP, SLUT_TIMESTAMP,              
+            KØRSELSNR,                                                  
+            DB2_FUNKTION                                                
+            )                                                           
+            values                                                      
+            (                                                           
+             :DCLBQ68000T.TIL_EVS_AAR,                                  
+             :DCLBQ68000T.AFVIKLINGS_ID,                                
+             :DCLBQ68000T.DATA_ID,                                      
+             :DCLBQ68000T.START_PROGRAM,                                
+             :DCLBQ68000T.SLUT_PROGRAM,                                 
+             current timestamp,                                         
+             '9999-12-31 00.00.00.000000',                              
+             :HELP_KOERNR,                                              
+             :DCLBQ68000T.DB2_FUNKTION                                  
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               exec sql commit;                                         
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 INSERT BQ68000T';                       
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END INSERT_FLOWTABEL;                                                  
+ /*********************************************************************/
+ /* UPDATE FLOWTABEL når et modul er kørt færdigt                     */
+ /*********************************************************************/
+  UPDATE_FLOWTABEL: PROC;                                               
+                                                                        
+         EXEC SQL                                                       
+               UPDATE BQ68000T                                          
+               SET DB2_FUNKTION = 'U',                                  
+                   SLUT_PROGRAM = :ws_programnavn,                      
+                   SLUT_TIMESTAMP = current timestamp                   
+               WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR                      
+               AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT               
+               AND   DATA_ID = :BH55600M.DATA_ID                        
+               AND   KØRSELSNR = :HELP_KOERNR;                          
+                                                                        
+            SELECT(SQLCA.SQLCODE);                                      
+               WHEN(0) DO;                                              
+                  EXEC SQL COMMIT;                                      
+               END;                                                     
+               OTHERWISE DO;                                            
+                  ABENDTXT  = '101 UPDATE BQ68000T';                    
+                  CALL SQL_FEJL;                                        
+               END;                                                     
+            END;                                                        
+                                                                        
+  END UPDATE_FLOWTABEL;                                                 
