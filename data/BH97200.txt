@@ -1,0 +1,1332 @@
+  PROCESS OPT(TIME);                                                    
+ BH97200: /* OPDATER EVS TABELLER SAMT DAN DATA TIL SLUT PÅ CSC */      
+         PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                   
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+         INIT ('COPYRIGHT KMD A/S 2010');                               
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL : OPDATER EVS SLUT TABELLER SAMT DAN DATA TIL SLUT PÅ CSC    *
+ *          I.F.M. KØRSEL LIG 'SUPPLEMENTSLEVERING'.                   *
+ *                                                                     *
+ * INPUT  : B.H96000D.SUP BEREGNINGSBÅND FRA EVS SLUT 2010 SUPPL.      *
+ *                                                                     *
+ * OUTPUT : BQ2X000T+BQ3X000T - EVS SLUT TABELLER                      *
+ *          D0311604.A782 UDTRÆK - EVS DATA TIL SLUT PÅ CSC            *
+ *          BH97210D - IKKE BEHANDLEDE SITUATIONER (CÆGTOPR/CDATAFRA)  *
+ *          BH97201Y   KØRSELSKONTROLLISTE                             *
+ *          BH97202Y   FEJL-/ANMÆRKNINGSLISTE                          *
+ *                                                                     *
+ * OBS.: B.H97280X  DATA FRA LÆS TAB'S   --> DISSE DATASÆT             *
+ *       B.H97290X  DATA FRA SKRIV TAB'S --> DANNES KUN I TEST         *
+ *                                       --> OG  K U N                 *
+ *                                       --> HVIS EXECPARM = TDB2      *
+ *                                                                     *
+ * PROGRAMMØR: AAGE RASMUSSEN  FEBRUAR   2001                          *
+ * ÅRSRUL:     AAGE RASMUSSEN  FEBRUAR   2002                          *
+ * ÅRSRUL:     AAGE RASMUSSEN  FEBRUAR   2003                          *
+ * ÅRSRUL:     AAGE RASMUSSEN  JANUAR    2004                          *
+ * ÅRSRUL:     AAGE RASMUSSEN  NOVEMBER  2004                          *
+ * ÅRSRUL:     BO SCHMIDT      NOVEMBER  2006                          *
+ * ÅRSRUL:     BO SCHMIDT      NOVEMBER  2008                          *
+ * ÅRSRUL:     GEH             OKTOBER   2010                          *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH960I FILE RECORD INPUT;      /* BEREGN.BÅND EFTER BEREGN. */ 
+ DCL     BH9720O FILE RECORD OUTPUT;    /* EVS DATA TIL SLUT PÅ CSC  */ 
+ DCL     BH9721O FILE RECORD OUTPUT;    /* EJ BEHANDLEDE SUPPL.HANDEL*/ 
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+ /* FØLGENDE 2 DATASÆT DANNES KUN EFTER BEHOV I.F.M. PROGRAM-TEST    */ 
+ DCL     BH9728O FILE RECORD OUTPUT;  /* EVS DATA FRA LÆS TABELLER   */ 
+ DCL     BH9729O FILE RECORD OUTPUT;  /* EVS DATA FRA SKRIV TABELLER */ 
+ /********************************************************************* 
+ *       DECLARE AF INPUT (BEREGNINGSBÅND)                            * 
+ *********************************************************************/ 
+ DCL     BH960_AR        CHAR      (23472) VAR;                         
+ DCL     1 BH960         BASED     (ADDR(BH960_AR)),                    
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90000N;;                                          
+ DCL     1 BH96099       BASED     (ADDR(BH960_AR)),                    
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90099N;                                           
+ /********************************************************************* 
+ *       DECLARE AF OUTPUT HERUNDER EVT. TEST IND-/UDDATA             * 
+ *********************************************************************/ 
+ DCL     1 BH972,                                                       
+           %INCLUDE BH96110N;;                                          
+                                                                        
+ DCL     1 KOM_AREAL ALIGNED,                                           
+         %INCLUDE BQ10010N;                                             
+                                                                        
+ DCL     1 BQ_IND ALIGNED,                                              
+         %INCLUDE BQ10011N;;                                            
+                                                                        
+ DCL     1 BQ_UD ALIGNED,                                               
+         %INCLUDE BQ10011N;;                                            
+                                                                        
+ /*  DCL     1 TEST ALIGNED,  */                                        
+         %INCLUDE BH97250N;;                                            
+                                                                        
+ DCL 1 STYR_FELTER,                                                     
+   5 DCPRN          DEC FIXED (11), /* PERSONNUMMER                   */
+   5 DINDKAAR       BIN FIXED (15), /* INDKOMSTÅR                     */
+   5 EKOMNR         BIN FIXED (15), /* KOMMUNENUMMER                  */
+   5 EEJDNR         BIN FIXED (31), /* EJENDOMSNUMMER                 */
+   5 ELBNR          BIN FIXED (15), /* LØBENUMMER                     */
+   5 EGENNR         BIN FIXED (15), /* GENERATIONSNUMMER              */
+   5 TYPE           BIN FIXED (15), /* TYPE                           */
+   5 STATUS         BIN FIXED (15), /* STATUS                         */
+   5 RETURKODE      BIN FIXED (15), /* RETURKODE                      */
+   5 RETURTEKST     CHAR      (70), /* RETURTEKST                     */
+   5 FEJLNR         PIC     '9999', /* FEJLNR                         */
+   5 FEJLTEKST      CHAR      (70); /* FEJLTEKST                      */
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                   /* TÆLLEVÆRKER TIL TOTALLISTEN */      
+           2 LÆS_BH960     FIXED DEC (7),                               
+           2 HANDEL        FIXED DEC (7),                               
+           2 HANDEL_OP     FIXED DEC (7),                               
+           2 LÆS_EJD       FIXED DEC (7),                               
+           2 LÆS_PERS      FIXED DEC (7),                               
+           2 SKRIV_EJD     FIXED DEC (7),                               
+           2 SKRIV_PERS    FIXED DEC (7),                               
+           2 SKREVET       FIXED DEC (7),                               
+           2 SKR_BH972     FIXED DEC (7),                               
+           2 EJ_BEHANDL    FIXED DEC (7),                               
+           2 BEREGNET      FIXED DEC (7),                               
+           2 EVS2010       FIXED DEC (15,2),                            
+           2 BPROM1        FIXED DEC (7),                               
+           2 BPROM2        FIXED DEC (7),                               
+           2 BNEDSL1       FIXED DEC (7),                               
+           2 BNEDSL2       FIXED DEC (7),                               
+           2 CPENSN1       FIXED DEC (7),                               
+           2 CPENSN2       FIXED DEC (7),                               
+           2 BFASTSTIG     FIXED DEC (7),                               
+           2 CSTIBLB(10)   FIXED DEC (7),                               
+           2 BER_BOPÆL0    FIXED DEC (7),                               
+           2 BER_BOPÆL1    FIXED DEC (7),                               
+           2 BER_BOPÆL2    FIXED DEC (7),                               
+           2 BER_BOPÆL3    FIXED DEC (7),                               
+           2 BER_BOPÆL4    FIXED DEC (7),                               
+           2 BER_BOPÆL5    FIXED DEC (7),                               
+           2 BER_BOPÆL6    FIXED DEC (7),                               
+           2 EJBEREGNET    FIXED DEC (7),                               
+           2 EJBER_BOPÆL0  FIXED DEC (7),                               
+           2 EJBER_BOPÆL1  FIXED DEC (7),                               
+           2 EJBER_BOPÆL2  FIXED DEC (7),                               
+           2 EJBER_BOPÆL3  FIXED DEC (7),                               
+           2 EJBER_BOPÆL4  FIXED DEC (7),                               
+           2 EJBER_BOPÆL5  FIXED DEC (7),                               
+           2 EJBER_BOPÆL6  FIXED DEC (7);                               
+                                                                        
+ DCL     1 LÆST_FEJLNR(4000:6000), /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+                                                                        
+ DCL     1 SKR_FEJLNR(4000:6000),  /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ DCL     1 SKR_EJBEVS(0:9),        /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ DCL     1 LÆST_BERGRL(0:9),       /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ DCL     1 LÆST_EJDTYP(0:9),       /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+                                                                        
+ DCL     TV_LÆS          FIXED     (7)       INIT      (0);             
+ DCL     TV_LÆS_EVS      FIXED     (7)       INIT      (0);             
+ DCL     TV_OVERLÆS      FIXED     (7)       INIT      (0);             
+ DCL     TV_SKRIV_EVS    FIXED     (7)       INIT      (0);             
+ DCL     TV_OPDAT_TILKØB FIXED     (7)       INIT      (0);             
+ DCL     TV_FEJL         FIXED     (7)       INIT      (0);             
+ DCL     TV_LIN          FIXED     (7)       INIT      (0);             
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     BQ10110         ENTRY;                                         
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                       /* DB2 FEJL     */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS34900         ENTRY OPTIONS (INTER ASM);   /* FAKTURERING  */
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    LIN_DEB          CHAR      (133);                               
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH97200L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (                
+           'OPDATER EVS TABELLER OG DAN DATA TIL SLUT PÅ CSC'),         
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (24)      INIT      (' ');           
+ DCL     1 LIN3,                                                        
+          2 CTL          CHAR      (1),                                 
+          2 TEKST        CHAR      (60),                                
+          2 ANT          PIC       'ZZZ.ZZZ.ZZ9',                       
+          2 REST         CHAR      (61)      INIT      (' ');           
+ DCL     1 LIN_BLANK,                                                   
+          2 CTL          CHAR      (1),                                 
+          2 F1           CHAR      (132)     INIT      (' ');           
+ DCL     1 FEJL_LIN1,                                                   
+          2 CTL           CHAR      (1),                                
+          2 RECORDNR      PIC       'ZZZZZZZZ',                         
+          2 F1            CHAR      (1),                                
+          2 DCPRN         PIC       '(10)9',                            
+          2 F2            CHAR      (1),                                
+          2 EKOMNR        PIC       '(3)9',                             
+          2 F3            CHAR      (1),                                
+          2 EEJDNR        PIC       '(7)9',                             
+          2 F4            CHAR      (1),                                
+          2 ELBNR         PIC       '999',                              
+          2 F5            CHAR      (1),                                
+          2 FEJLNR        PIC       '9999',                             
+          2 F6            CHAR      (1),                                
+          2 FEJLTEKST     CHAR      (70),                               
+          2 REST          CHAR      (21);                               
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     EOF_BH960       BIT       (1);                                 
+ DCL     EVS_OPDATERET   BIT       (1);                                 
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     INDEX           BIN FIXED (31);                                
+ DCL     I               BIN FIXED (15);                                
+                                                                        
+ DCL     HJ_FEJLNR       PIC       '(4)9';                              
+ DCL     HJ_FEJLNRC      CHAR      (4)     BASED(ADDR(HJ_FEJLNR));      
+                                                                        
+ DCL     HJ_CHAR1        CHAR      (1);                                 
+ DCL     HJ_PIC1         PIC       '9'     BASED(ADDR(HJ_CHAR1));       
+ DCL     HJ_CHAR2        CHAR      (2);                                 
+ DCL     HJ_PIC2         PIC       '99'    BASED(ADDR(HJ_CHAR2));       
+ DCL     HJ_CHAR3        CHAR      (3);                                 
+ DCL     HJ_PIC3         PIC       '999'   BASED(ADDR(HJ_CHAR3));       
+ DCL     HJ_CHAR4        CHAR      (4);                                 
+ DCL     HJ_PIC4         PIC       '(4)9'  BASED(ADDR(HJ_CHAR4));       
+ DCL     HJ_CHAR7        CHAR      (7);                                 
+ DCL     HJ_PIC7         PIC       '(7)9'  BASED(ADDR(HJ_CHAR7));       
+                                                                        
+ DCL     GL_PNR          FIXED     (11);                                
+                                                                        
+ DCL     EVS_DOVTG       FIXED     (9);                                 
+ DCL     EVS_DAFSTAA     FIXED     (9);                                 
+                                                                        
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+ DCL     HJ_TIMESTAMP    CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF HJÆLPEFELTER TIL MASKINEL AFSTEMNING              * 
+ *********************************************************************/ 
+ DCL     BH960_ANT_INDV  FIXED     (7)       INIT      (0);             
+ DCL     SWFEJL          CHAR      (1)       INIT      (' ');           
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BH960 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+               ON ERROR SYSTEM;                                         
+               PUT SKIP LIST ('PROGRAMFEJL');                           
+               CALL PLIDUMP  ('SNHOB','MODUL BH97200');                 
+            END;                                                        
+                                                                        
+         OPEN FILE (BH960I)  TITLE ('BH96000I');                        
+         OPEN FILE (BH9720O) TITLE ('BH97200O');                        
+         OPEN FILE (BH9721O) TITLE ('BH97210O');                        
+                                                                        
+         IF EX_PARM = 'TDB2'                                            
+         THEN                                                           
+            DO;                                                         
+               OPEN FILE (BH9728O) TITLE ('BH97280O');                  
+               OPEN FILE (BH9729O) TITLE ('BH97290O');                  
+               CALL ZZ20390 ('*OPEN','BH97202Y');                       
+            END;                                                        
+                                                                        
+         ON ENDFILE (BH960I)                                            
+            EOF_BH960 = JA;                                             
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH97201Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         TV = 0;                                                        
+                                                                        
+         DO INDEX = 4000 TO 6000;                                       
+            LÆST_FEJLNR(INDEX).ANTAL = 0;                               
+            SKR_FEJLNR(INDEX).ANTAL = 0;                                
+         END;                                                           
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            SKR_EJBEVS(INDEX).ANTAL = 0;                                
+         END;                                                           
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            LÆST_BERGRL(INDEX).ANTAL = 0;                               
+         END;                                                           
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            LÆST_EJDTYP(INDEX).ANTAL = 0;                               
+         END;                                                           
+                                                                        
+         GL_PNR = 0;                                                    
+                                                                        
+         EVS_OPDATERET = NEJ;                                           
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_BH960;                                                
+                                                                        
+         DO WHILE ( EOF_BH960 = NEJ );                                  
+                                                                        
+            CALL BEHANDL_PERSON;                                        
+                                                                        
+            CALL LÆS_BH960;                                             
+                                                                        
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR                                           * 
+ *********************************************************************/ 
+ LÆS_BH960:                                                             
+         PROC;                                                          
+                                                                        
+         READ FILE (BH960I) INTO (BH960_AR);                            
+                                                                        
+         IF BH960.SORT_CPR = 99999999999     /* OPTÆLL.INDV. 1 */       
+         THEN                                                           
+            DO;                                                         
+               BH960_ANT_INDV = BH96099.ANT_INDV;                       
+               READ FILE (BH960I) INTO (BH960_AR);                      
+            END;                                                        
+                                                                        
+         IF EOF_BH960 = NEJ                                             
+         THEN                                                           
+            TV.LÆS_BH960 = TV.LÆS_BH960 + 1;                            
+                                                                        
+ END LÆS_BH960;                                                         
+                                                                        
+ /********************************************************************* 
+ *       PERSONER SOM EVT. SKAL OPDATERES                             * 
+ *********************************************************************/ 
+ BEHANDL_PERSON:                                                        
+         PROC;                                                          
+                                                                        
+         EVS_OPDATERET = NEJ;                                           
+                                                                        
+         HJ_CHAR1 = BH960.EJENDOM.CEJDTYPE;                             
+         INDEX = HJ_PIC1;                                               
+         LÆST_EJDTYP(INDEX).ANTAL = LÆST_EJDTYP(INDEX).ANTAL + 1;       
+                                                                        
+         HJ_CHAR1 = BH960.EJENDOM.CBERGRL;                              
+         INDEX = HJ_PIC1;                                               
+         LÆST_BERGRL(INDEX).ANTAL = LÆST_BERGRL(INDEX).ANTAL + 1;       
+                                                                        
+         IF BH960.FEJLNR > 0                                            
+         THEN                                                           
+            DO;                                                         
+               HJ_FEJLNR = BH960.FEJLNR;                                
+               INDEX = HJ_FEJLNR;                                       
+               LÆST_FEJLNR(INDEX).ANTAL = LÆST_FEJLNR(INDEX).ANTAL + 1; 
+            END;                                                        
+                                                                        
+         IF BH960.FEJLNR = 5001 !                                       
+           (BH960.TIL_EVS.CEJBEVS = '1' & BH960.FEJLNR = 5008) !        
+            BH960.FEJLNR = 5020                                         
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS = TV_OVERLÆS + 1;                             
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF (BH960.TIL_EVS.DAFSTAA > 0 &                                
+             BH960.TIL_EVS.DAFSTAA < BH960.MT.DRGNÅRFRA) !              
+             BH960.TIL_EVS.DOVTG > BH960.MT.DRGNÅRTIL                   
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS = TV_OVERLÆS + 1;                             
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF BH960.MT.CCIVS = 'D' &                                      
+            BH960.MT.HIST_OPL(SLUTÅR).DCIÆN > 0 &   /* EJER ER DØD   */ 
+           (BH960.MT.HIST_OPL(SLUTÅR).DCIÆN <       /* FØR INDK.ÅRET */ 
+            BH960.MT.DRGNÅRFRA)                                         
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS = TV_OVERLÆS + 1;                             
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF (BH960.TIL_EVS.DAFSTAA > 0 &                                
+             BH960.TIL_EVS.DAFSTAA >= BH960.MT.DRGNÅRFRA &              
+             BH960.TIL_EVS.DAFSTAA <= BH960.MT.DRGNÅRTIL) !             
+            (BH960.TIL_EVS.DOVTG >= BH960.MT.DRGNÅRFRA &                
+             BH960.TIL_EVS.DOVTG <= BH960.MT.DRGNÅRTIL)                 
+         THEN                                                           
+            TV.HANDEL = TV.HANDEL + 1;                                  
+         ELSE                                                           
+            DO;                                                         
+               TV_OVERLÆS = TV_OVERLÆS + 1;                             
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         CALL INIT_DB2_AREALER;                                         
+         CALL OPSÆT_STYR_HANDEL;                                        
+         CALL DATA_MODUL('LÆS');                                        
+         CALL BEHANDL_HANDEL;                                           
+                                                                        
+         IF EVS_OPDATERET = JA                                          
+         THEN                                                           
+            TV.HANDEL_OP = TV.HANDEL_OP + 1;                            
+         ELSE                                                           
+            DO;                                                         
+               TV.EJ_BEHANDL = TV.EJ_BEHANDL + 1;                       
+               WRITE FILE (BH9721O) FROM (BH960_AR);                    
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF BH960.FEJLNR = 5024                                         
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         CALL DAN_DATA_TIL_SLUT;                                        
+                                                                        
+ END BEHANDL_PERSON;                                                    
+                                                                        
+ /**********************************************************************
+ **     INITIER AREALER TIL LÆS/SKRIV DB2                             **
+ **********************************************************************/
+ INIT_DB2_AREALER: PROC;                                                
+                                                                        
+         BQ_IND.PERSON = '';                                            
+         BQ_IND.EJENDOM = '';                                           
+         BQ_IND.INDK_PERS = -1;                                         
+         BQ_IND.INDK_EJD = -1;                                          
+                                                                        
+         BQ_UD.PERSON = '';                                             
+         BQ_UD.EJENDOM = '';                                            
+         BQ_UD.INDK_PERS = -1;                                          
+         BQ_UD.INDK_EJD = -1;                                           
+                                                                        
+ END INIT_DB2_AREALER;                                                  
+ /**********************************************************************
+ **     OPSÆT_STYR_FELTER TIL BEHANDL HANDELSSITUATION                **
+ **********************************************************************/
+ OPSÆT_STYR_HANDEL: PROC;                                               
+                                                                        
+         STYR_FELTER.DCPRN     = BH960.SORT_CPR;                        
+         STYR_FELTER.DINDKAAR  = 2010;                                  
+         STYR_FELTER.EKOMNR    = BH960.SORT_KOMNR;                      
+         STYR_FELTER.EEJDNR    = BH960.SORT_EJDNR;                      
+         STYR_FELTER.ELBNR     = 0;                                     
+         STYR_FELTER.TYPE      = 0;                                     
+         STYR_FELTER.RETURKODE = 0;                                     
+                                                                        
+ END OPSÆT_STYR_HANDEL;                                                 
+ /**********************************************************************
+ **     DATA_MODUL                                                    **
+ **********************************************************************/
+ DATA_MODUL: PROC (FUNKTION);                                           
+                                                                        
+         DCL FUNKTION    CHAR (10);                                     
+                                                                        
+         KOM_AREAL.KOMM         = '';                                   
+         KOM_AREAL.SØG          = '';                                   
+         KOM_AREAL.SØG.DCPRN    = STYR_FELTER.DCPRN;                    
+         KOM_AREAL.SØG.DINDKAAR = STYR_FELTER.DINDKAAR;                 
+         KOM_AREAL.SØG.EKOMNR   = STYR_FELTER.EKOMNR;                   
+         KOM_AREAL.SØG.EEJDNR   = STYR_FELTER.EEJDNR;                   
+         KOM_AREAL.SØG.ELBNR    = STYR_FELTER.ELBNR;                    
+         KOM_AREAL.KOMM.TYPE    = STYR_FELTER.TYPE;                     
+                                                                        
+    /*   PUT DATA (                                                     
+         KOM_AREAL.SØG.DCPRN,                                           
+         KOM_AREAL.SØG.DINDKAAR,                                        
+         KOM_AREAL.SØG.EKOMNR,                                          
+         KOM_AREAL.SØG.EEJDNR,                                          
+         KOM_AREAL.SØG.ELBNR,                                           
+         KOM_AREAL.KOMM.TYPE,                                           
+         FUNKTION);  */                                                 
+                                                                        
+         SELECT (FUNKTION);                                             
+                                                                        
+            WHEN ('LÆS')                                                
+              DO;                                                       
+                KOM_AREAL.FUNKTION = 1;                                 
+                CALL BQ10110 (KOM_AREAL,BQ_IND);                        
+                                                                        
+                CALL BEHANDL_LÆS;                                       
+              END;                                                      
+                                                                        
+            WHEN ('SKRIV')                                              
+              DO;                                                       
+                 KOM_AREAL.FUNKTION = 2;                                
+                 CALL BQ10110 (KOM_AREAL,BQ_UD);                        
+                                                                        
+                 CALL BEHANDL_SKRIV;                                    
+              END;                                                      
+                                                                        
+            OTHER                                                       
+              PUT SKIP LIST ('BQ10110 DATAMODUL FORKERT FUNKTION'!!     
+                                                        FUNKTION);      
+         END; /*SELECT (FUNKTION)*/                                     
+                                                                        
+                                                                        
+         STYR_FELTER.RETURKODE  = KOM_AREAL.RETURKODE;                  
+         STYR_FELTER.RETURTEKST = KOM_AREAL.RETURTEKST;                 
+         STYR_FELTER.FEJLTEKST  = KOM_AREAL.RETURTEKST;                 
+                                                                        
+         IF KOM_AREAL.RETURKODE = 0                                     
+         THEN                                                           
+            DO;                                                         
+              IF KOM_AREAL.FUNKTION = 1                                 
+              THEN                                                      
+                 TV_LÆS_EVS = TV_LÆS_EVS + 1;                           
+              ELSE                                                      
+                 TV_SKRIV_EVS = TV_SKRIV_EVS + 1;                       
+            END;                                                        
+         ELSE                                                           
+         IF KOM_AREAL.RETURKODE < 0                                     
+         THEN                                                           
+            DO;                                                         
+               IF KOM_AREAL.SQLKODE  ^= 0                               
+               THEN                                                     
+                  CALL SQL_FEJL;                                        
+                                                                        
+               CALL BEHANDL_FEJL;                                       
+            END;                                                        
+                                                                        
+ END DATA_MODUL;                                                        
+ /*********************************************************************/
+ /*      BEHANDL SKRIV KONTROLDATASÆT VEDR. LÆS DB2 I TEST            */
+ /*********************************************************************/
+ BEHANDL_LÆS: PROC;                                                     
+                                                                        
+         IF EX_PARM = 'TDB2'                                            
+         THEN                                                           
+            DO;                                                         
+               TEST = KOM_AREAL, BY NAME;                               
+               TEST = BQ_IND, BY NAME;                                  
+               WRITE FILE (BH9728O) FROM (TEST);                        
+            END;                                                        
+                                                                        
+     /*  PUT DATA (                                                     
+         BQ_IND.PERSON.DCPRN,                                           
+         BQ_IND.PERSON.DINDKAAR,                                        
+         BQ_IND.PERSON.EKOMNR,                                          
+         BQ_IND.PERSON.EEJDNR,                                          
+         BQ_IND.PERSON.ELBNR,                                           
+         BQ_IND.PERSON.EGENNR); */                                      
+                                                                        
+ END BEHANDL_LÆS;                                                       
+ /*********************************************************************/
+ /*      BEHANDL SKRIV KONTROLDATASÆT VEDR. SKRIV DB2 I TEST          */
+ /*********************************************************************/
+ BEHANDL_SKRIV: PROC;                                                   
+                                                                        
+         IF EX_PARM = 'TDB2'                                            
+         THEN                                                           
+            DO;                                                         
+               TEST = KOM_AREAL, BY NAME;                               
+               TEST = BQ_UD, BY NAME;                                   
+               WRITE FILE (BH9729O) FROM (TEST);                        
+            END;                                                        
+                                                                        
+     /*  PUT DATA (                                                     
+         BQ_UD.PERSON.DCPRN,                                            
+         BQ_UD.PERSON.DINDKAAR,                                         
+         BQ_UD.PERSON.EKOMNR,                                           
+         BQ_UD.PERSON.EEJDNR,                                           
+         BQ_UD.PERSON.ELBNR,                                            
+         BQ_UD.PERSON.EGENNR); */                                       
+                                                                        
+ END BEHANDL_SKRIV;                                                     
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ BEHANDL_FEJL: PROC;                                                    
+                                                                        
+         IF EX_PARM ^= 'TDB2'                                           
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         IF TV_LIN = 0 ! TV_LIN > 23                                    
+         THEN                                                           
+            DO;                                                         
+              TV_LIN = 0;                                               
+              CALL ZZ20300(SIDELIN,'02');                               
+              CALL ZZ20300(OVERLIN1,'02');                              
+              CALL ZZ20300(OVERLIN2,'02');                              
+            END;                                                        
+                                                                        
+         TV_FEJL = TV_FEJL + 1;                                         
+         TV_LIN   = TV_LIN + 1;                                         
+                                                                        
+         FEJL_LIN1 = '';                                                
+         FEJL_LIN1.CTL = ZZWS2;                                         
+         FEJL_LIN1.RECORDNR  = TV_LÆS;                                  
+         FEJL_LIN1.DCPRN     = BH960.SORT_CPR;                          
+         FEJL_LIN1.EKOMNR    = BH960.SORT_KOMNR;                        
+         FEJL_LIN1.EEJDNR    = BH960.SORT_EJDNR;                        
+         FEJL_LIN1.ELBNR     = BH960.UDSKRLBNR;                         
+         FEJL_LIN1.FEJLNR    = STYR_FELTER.FEJLNR;                      
+         FEJL_LIN1.FEJLTEKST = STYR_FELTER.FEJLTEKST;                   
+         CALL ZZ20300(FEJL_LIN1,'02');                                  
+                                                                        
+ END BEHANDL_FEJL;                                                      
+                                                                        
+ /**********************************************************************
+ **     FORETAG EVT. OPDATERING AF EVS-TABELLER P.G.A. KØB/SALG       **
+ **********************************************************************/
+ BEHANDL_HANDEL: PROC;                                                  
+                                                                        
+         SELECT (STYR_FELTER.RETURKODE);                                
+                                                                        
+            WHEN (0)  /* BÅDE PERSON OG EJENDOM FUNDET */               
+              DO;                                                       
+                 TV.LÆS_EJD = TV.LÆS_EJD + 1;                           
+                 TV.LÆS_PERS = TV.LÆS_PERS + 1;                         
+                                                                        
+                 IF BQ_IND.PERSON.DOVTG ^= (10)' '                      
+                 THEN                                                   
+                    EVS_DOVTG =                                         
+                    DB2_DATO_TIL_FIX09(BQ_IND.PERSON.DOVTG);            
+                 ELSE                                                   
+                    EVS_DOVTG = 0;                                      
+                                                                        
+                 IF BQ_IND.PERSON.DAFSTAA ^= (10)' '                    
+                 THEN                                                   
+                    EVS_DAFSTAA =                                       
+                    DB2_DATO_TIL_FIX09(BQ_IND.PERSON.DAFSTAA);          
+                 ELSE                                                   
+                    EVS_DAFSTAA = 0;                                    
+                                                                        
+                 IF BQ_IND.PERSON.COMPLA = '1' !                        
+                   (BQ_IND.PERSON.CSUPPL ^= '2' &                       
+                    BQ_IND.PERSON.CAJOUR > '1') ! /* A.H.T. FEJLRET */  
+                 /* BQ_IND.PERSON.CAJOUR > '0') ! -- A.H.T. FEJLRET */  
+                   (BH960.TIL_EVS.DAFSTAA > 0 &                         
+                    BH960.TIL_EVS.DAFSTAA <= EVS_DOVTG)                 
+                 THEN                                                   
+                    DO;                                                 
+                       TV_OVERLÆS = TV_OVERLÆS + 1;                     
+                       EVS_OPDATERET = NEJ;                             
+                    END;                                                
+                 ELSE                                                   
+                    DO;                                                 
+                       IF BQ_IND.PERSON.CÆGTOPR > '0' !                 
+                          BQ_IND.PERSON.CDATAFRA = '4' !                
+                          BQ_IND.PERSON.CDATAFRA = '6'                  
+                       THEN                                             
+                          DO;                                           
+                             EVS_OPDATERET = NEJ;                       
+                             TV_OVERLÆS = TV_OVERLÆS + 1;               
+                          END;                                          
+                       ELSE                                             
+                          DO;                                           
+                             STYR_FELTER.STATUS = KOM_AREAL.KOMM.TYPE;  
+                             IF EVS_DAFSTAA > 0 &                       
+                                BH960.TIL_EVS.DOVTG >= EVS_DAFSTAA      
+                             THEN                                       
+                                DO;                                     
+                                   /* OPRET NY EJERPERIODE */           
+                                   /* FOR SAMME EJENDOM    */           
+                                   /* D.V.S. NYT LØBENR.   */           
+                                   IF (BQ_IND.PERSON.CSUPPL = '1' !     
+                                       BQ_IND.PERSON.CSUPPL = '2') &    
+                                       BQ_IND.PERSON.CTILKØB ^= 'J' &   
+                                      (BQ_IND.PERSON.CKØBSALG = '1' !   
+                                       BQ_IND.PERSON.CKØBSALG = '2')    
+                                   THEN                                 
+                                      CALL RET_GL_SALG;                 
+                                   CALL RET_CKØBSALG;                   
+                                   STYR_FELTER.TYPE = 1;                
+                                   STYR_FELTER.ELBNR =                  
+                                   BQ_IND.PERSON.ELBNR + 1;             
+                                   BH960.UDSKRLBNR =                    
+                                   STYR_FELTER.ELBNR;                   
+                                   STYR_FELTER.EGENNR = 0;              
+                                END;                                    
+                             ELSE                                       
+                                DO;                                     
+                                   STYR_FELTER.TYPE = 0;                
+                                   STYR_FELTER.ELBNR =                  
+                                   BQ_IND.PERSON.ELBNR;                 
+                                   BH960.UDSKRLBNR =                    
+                                   BQ_IND.PERSON.ELBNR;                 
+                                   STYR_FELTER.EGENNR =                 
+                                   BQ_IND.PERSON.EGENNR;                
+                                END;                                    
+                             CALL OPSÆT_DATA_TIL_EJENDOM;               
+                             CALL OPSÆT_DATA_TIL_PERSON;                
+                             BQ_UD.PERSON.EGENNR =                      
+                             STYR_FELTER.EGENNR;                        
+                             EVS_OPDATERET = JA;                        
+                             CALL DATA_MODUL('SKRIV');                  
+                          END;                                          
+                    END;                                                
+              END;                                                      
+                                                                        
+            WHEN (1)  /* KUN EJENDOMMEN FUNDET */                       
+              DO;                                                       
+                 TV.LÆS_EJD = TV.LÆS_EJD + 1;                           
+                                                                        
+                 STYR_FELTER.TYPE = 1;                                  
+                 STYR_FELTER.ELBNR = BH960.UDSKRLBNR;                   
+                 STYR_FELTER.EGENNR = 0;                                
+                                                                        
+                 CALL OPSÆT_DATA_TIL_EJENDOM;                           
+                 CALL OPSÆT_DATA_TIL_PERSON;                            
+                 EVS_OPDATERET = JA;                                    
+                 CALL DATA_MODUL('SKRIV');                              
+              END;                                                      
+                                                                        
+            WHEN (2)  /* HVERKEN PERSON ELLER EJENDOM FUNDET */         
+              DO;                                                       
+                 STYR_FELTER.TYPE = 2;                                  
+                 STYR_FELTER.EGENNR = 0;                                
+                 STYR_FELTER.ELBNR = BH960.UDSKRLBNR;                   
+                 CALL OPSÆT_DATA_TIL_EJENDOM;                           
+                 CALL OPSÆT_DATA_TIL_PERSON;                            
+                 EVS_OPDATERET = JA;                                    
+                 CALL DATA_MODUL('SKRIV');                              
+              END;                                                      
+                                                                        
+            WHEN (-1); /* SQL-FEJL VED LÆS */                           
+                                                                        
+            OTHERWISE                                                   
+              PUT SKIP LIST ('BQ10110 DATAMODUL FORKERT RETURKODE'!!    
+                              STYR_FELTER.RETURKODE);                   
+                                                                        
+         END; /* SELECT RETURKODE */                                    
+                                                                        
+ /**********************************************************************
+ **     OPDATER EVS-TABELLER P.G.A. TILKØB I SUPPL. EFTER GRUNDLEV.   **
+ **********************************************************************/
+ RET_GL_SALG: PROC;                                                     
+                                                                        
+         BQ_UD = BQ_IND, BY NAME;                                       
+                                                                        
+         BQ_UD.PERSON.CTILKØB = 'J';                                    
+         BQ_UD.PERSON.CKØBSALG = ' ';                                   
+                                                                        
+         /* SUPPLEMENTSKØRSEL - DISSE 2 KODER   */                      
+         /* SKAL OPSÆTTES HVIS OPDATERING SKER  */                      
+         BQ_UD.PERSON.CSUPPL = '2';                                     
+         BQ_UD.PERSON.CAJOUR = '1'; /* KUN AKTIV HVIS FEJLRETTELSE */   
+                                                                        
+         BQ_UD.PERSON.DFRAGLD = ''; /* OPSÆTTES AF DATAMODUL */         
+                                                                        
+         BQ_UD.PERSON.DTILGLD = ''; /* OPSÆTTES AF DATAMODUL */         
+                                                                        
+         BQ_UD.PERSON.CSCREGISTMP = ' ';                                
+         BQ_UD.PERSON.PERSKOD = ' ';                                    
+         BQ_UD.PERSON.MYNDNR = ' ';                                     
+                                                                        
+         TV_OPDAT_TILKØB = TV_OPDAT_TILKØB + 1;                         
+                                                                        
+         STYR_FELTER.TYPE   = 0;                                        
+         STYR_FELTER.ELBNR  = BQ_IND.PERSON.ELBNR;                      
+         STYR_FELTER.EGENNR = BQ_IND.PERSON.EGENNR;                     
+                                                                        
+         CALL DATA_MODUL('SKRIV');                                      
+                                                                        
+ END RET_GL_SALG;                                                       
+ /**********************************************************************
+ **     RET EVT. CKØBSALG P.G.A. TILKØB I SUPPL.                      **
+ **     DENNE FUNKTION UDFØRES AF HENSYN TIL AT DER EVT. OGSÅ SKAL    **
+ **     SENDES EN RETTELSE OGSÅ TIL CSC                               **
+ **********************************************************************/
+ RET_CKØBSALG: PROC;                                                    
+                                                                        
+         IF (BH960.TIL_EVS.CKØBSALG = '1' !                             
+             BH960.TIL_EVS.CKØBSALG = '2') &                            
+            (BH960.TIL_EVS.DOVTG >= BH960.MT.DRGNÅRFRA &                
+             BH960.TIL_EVS.DOVTG <= BH960.MT.DRGNÅRTIL) &               
+            (BH960.TIL_EVS.DAFSTAA = 0 !                                
+             BH960.TIL_EVS.DAFSTAA > BH960.MT.DRGNÅRTIL)                
+         THEN                                                           
+            DO;                                                         
+               BH960.AKT_EJER.CTILKØB = 'J';                            
+               BH960.TIL_EVS.CKØBSALG = ' ';                            
+            END;                                                        
+                                                                        
+ END RET_CKØBSALG;                                                      
+                                                                        
+ END BEHANDL_HANDEL;                                                    
+                                                                        
+ /*-------------------------------------------------------------------*/
+ /* DB2_DATO_TIL_FIX09                                                */
+ /* HVIS DATO = BLANKE, RETURNES 0                                    */
+ /*-------------------------------------------------------------------*/
+ DB2_DATO_TIL_FIX09: PROC (DB2_DATO_IND) RETURNS (DEC FIXED (09));      
+                                                                        
+ DCL     DB2_DATO_IND    CHAR      (10);   /* ÅÅÅÅ-MM-DD*/              
+ DCL     DATO_CHAR       CHAR      (08);   /* ÅÅÅÅMMDD  */              
+ DCL     DATO_PIC        PIC       '99999999' DEF DATO_CHAR;            
+ DCL     DATO_FIX        DEC FIXED (09);                                
+                                                                        
+         DATO_CHAR = SUBSTR (DB2_DATO_IND,1,4) !!                       
+                     SUBSTR (DB2_DATO_IND,6,2) !!                       
+                     SUBSTR (DB2_DATO_IND,9,2);                         
+         IF DB2_DATO_IND = ''                                           
+         THEN                                                           
+            DATO_PIC = 0;                                               
+                                                                        
+         DATO_FIX = DATO_PIC;                                           
+                                                                        
+         RETURN (DATO_FIX);                                             
+                                                                        
+ END DB2_DATO_TIL_FIX09;                                                
+                                                                        
+ /*-------------------------------------------------------------------*/
+ /* DB2_DATO_TIL_FIX09                                                */
+ /* NB HVIS DATO = 0, SÆTTES DB2-DATO = BLANKE                        */
+ /*-------------------------------------------------------------------*/
+ FIX09_TIL_DB2_DATO: PROC (FIX_DATO_IND) RETURNS (CHAR (10));           
+                                                                        
+ DCL     FIX_DATO_IND        DEC FIXED (09);                            
+ DCL     DATO_PIC        PIC       '99999999';                          
+ DCL     1 DATO          BASED (ADDR(DATO_PIC)),                        
+          2 ÅR           PIC      '9999',                               
+          2 MD           PIC        '99',                               
+          2 DG           PIC        '99';                               
+ DCL     DATO_CHAR       CHAR      (10);   /* ÅÅÅÅ-MM-DD*/              
+                                                                        
+         DATO_PIC  = FIX_DATO_IND;                                      
+         DATO_CHAR = DATO.ÅR !! '-' !!                                  
+                     DATO.MD !! '-' !!                                  
+                     DATO.DG;                                           
+                                                                        
+         IF FIX_DATO_IND = 0                                            
+         THEN                                                           
+            DATO_CHAR = '';                        /** ?? **/           
+                                                                        
+         RETURN (DATO_CHAR);                                            
+                                                                        
+ END FIX09_TIL_DB2_DATO;                                                
+                                                                        
+         %INCLUDE BH00001M;                    /* CHAR4_TIL_BIN15     */
+                                               /* CHAR10_TIL_FIX11    */
+                                                                        
+         %INCLUDE BH97200M;                    /* DAN_DATA_TIL_EJDTAB */
+                                                                        
+         %INCLUDE BH97201M;                    /* DAN_DATA_TIL_PERSTAB*/
+                                                                        
+         %INCLUDE BH97202M;                    /* DAN_DATA_TIL_SLUT   */
+                                                                        
+         %INCLUDE BH97203M;                    /* FAKTURER T&S        */
+                                                                        
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE:                                                            
+         PROC;                                                          
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.LÆS_BH960;                                  
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK             B.H96000D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            IF LÆST_EJDTYP(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED EJENDOMSTYPE ' !! HJ_CHAR1;          
+                  DETLIN1.ANTAL = LÆST_EJDTYP(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            IF LÆST_BERGRL(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED BER.GRL.TYPE ' !! HJ_CHAR1;          
+                  DETLIN1.ANTAL = LÆST_BERGRL(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 4000 TO 6000;                                       
+            IF LÆST_FEJLNR(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = LÆST_FEJLNR(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.HANDEL;                                     
+         DETLIN1.TEKST = '      HERAF HANDLER                        '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV_SKRIV_EVS;                                  
+         DETLIN1.TEKST = 'ANTAL AJOURFØRTE EVS                        ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.HANDEL_OP;                                  
+         DETLIN1.TEKST = '      HERAF HANDLER OPDATERET  ';             
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV_OPDAT_TILKØB;                               
+         DETLIN1.TEKST = '      HERAF RETTET CKØBSALG P.G.A. TILKØB  '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'ANTAL SUPPL INDIVIDER TIL CSC D0311604.A782'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.EJ_BEHANDL;                                 
+         DETLIN1.TEKST = 'ANTAL SKREVET EJ BEHANDLEDE       B.H97220D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         LIN3.CTL = ZZWS1;                                              
+         LIN3.TEKST = 'ANTAL OVERLÆSTE F.EKS. ÆNDRING EFTER HOVEDOPRET';
+         LIN3.ANT = TV_OVERLÆS;                                         
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.TEKST = 'ANTAL ADVIS (F.EKS. OPRETTELSER PÅ EVS)        ';
+         LIN3.ANT = TV_FEJL;                                            
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.SKR_BH972;                                  
+         DETLIN1.TEKST = 'ANTAL SKREVET TIL EJENDOMSMARK.   B.H97210D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         IF EX_PARM = 'TDB2'                                            
+         THEN                                                           
+            DO;                                                         
+               DETLIN1.CCA = ZZWS2;                                     
+               DETLIN1.ANTAL = TV.LÆS_EJD;                              
+               DETLIN1.TEKST =                                          
+               'ANTAL LÆST PÅ EVS-TABELLER        B.H97280D';           
+               CALL ZZ20300 (DETLIN1,'01');                             
+                                                                        
+               DETLIN1.CCA = ZZWS2;                                     
+               DETLIN1.ANTAL = TV.SKRIV_PERS;                           
+               DETLIN1.TEKST =                                          
+               'ANTAL SKRIV PÅ EVS_TABELLER       B.H97290D';           
+               CALL ZZ20300 (DETLIN1,'01');                             
+            END;                                                        
+                                                                        
+         DO INDEX = 4000 TO 6000;                                       
+            IF SKR_FEJLNR(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = SKR_FEJLNR(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 0 TO 9;                                             
+            IF SKR_EJBEVS(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED CEJBEVS ' !! HJ_CHAR1;               
+                  DETLIN1.ANTAL = SKR_EJBEVS(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN2 = '';                                                  
+         DETLIN2.CCA = ZZWS2;                                           
+         DETLIN2.ANTAL = TV.BEREGNET;                                   
+         DETLIN2.TEKST = 'ANTAL BEREGNEDE EJENDOMME (EVS)            '; 
+         DETLIN2.BELØB = TV.EVS2010;                                    
+         CALL ZZ20300 (DETLIN2,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BPROM1;                                     
+         DETLIN1.TEKST = '    HERAF MED 10 PROMILLE            ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BPROM2;                                     
+         DETLIN1.TEKST = '    HERAF MED 30 PROMILLE            ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BNEDSL1;                                    
+         DETLIN1.TEKST = '    HERAF MED 2 PROMILLE NEDSLAG     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BNEDSL2;                                    
+         DETLIN1.TEKST = '    HERAF MED 4 PROMILLE NEDSLAG     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.CPENSN1;                                    
+         DETLIN1.TEKST = '    HERAF MED PENS.NEDSLAGSKODE 1    ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.CPENSN2;                                    
+         DETLIN1.TEKST = '    HERAF MED PENS.NEDSLAGSKODE 2    ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BFASTSTIG;                                  
+         DETLIN1.TEKST = '    HERAF MED FASTFROSSET NEDSLAG    ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO I = 1 TO 10;                                                
+            IF TV.CSTIBLB(I) > 0                                        
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1 = '';                                         
+                  DETLIN1.CCA = ZZWS1;                                  
+                  DETLIN1.ANTAL = TV.CSTIBLB(I);                        
+                  HJ_PIC2 = I;                                          
+                  DETLIN1.TEKST = '    HERAF MED CSTIBLB-KODE LIG '     
+                  !! HJ_CHAR2 !! '    ANTAL:';                          
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL1;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 1           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL2;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 2           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL3;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 3           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL4;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 4           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL5;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 5           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL6;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 6           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL0;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE BLANK/0     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.EJBEREGNET;                                 
+         DETLIN1.TEKST = 'ANTAL IKKE BEREGNEDE EJENDOMME (EVS)       '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL1;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 1           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL2;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 2           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL3;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 3           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL4;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 4           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL5;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 5           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL6;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 6           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL0;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE BLANK/0     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+  END TOTALLISTE;                                                       
+ /********************************************************************* 
+ *       MASKINEL AFSTEMNING                                          * 
+ *********************************************************************/ 
+ MASK_AFSTEMNING:                                                       
+         PROC;                                                          
+                                                                        
+         IF BH96099.SORT_CPR ^= 99999999999                             
+         THEN                                                           
+            CALL FEJLLISTE('1');                                        
+                                                                        
+         IF BH960_ANT_INDV ^= TV.LÆS_BH960 &                            
+            EX_PARM ^= 'TEST' &                                         
+            EX_PARM ^= 'TDB2'                                           
+         THEN                                                           
+            CALL FEJLLISTE('2');                                        
+                                                                        
+ END MASK_AFSTEMNING;                                                   
+ /*********************************************************************/
+ /*      UDSKRIV FEJLLISTE VEDR. KONSTATERET AFSTEMNINGFEJL PÅ ???    */
+ /*********************************************************************/
+ FEJLLISTE:                                                             
+         PROC(FEJL);                                                    
+                                                                        
+ DCL     FEJL            CHAR      (01);                                
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+                                                                        
+         OVERLIN2.CCA = ZZWS3;                                          
+         OVERLIN2.TEKST1 = 'FEJLLISTE VEDR. MASKINEL AFSTEMNING';       
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         IF FEJL = '1'                                                  
+         THEN                                                           
+            DO;                                                         
+               DETLIN1.CCA   = ZZWS3;                                   
+               DETLIN1.TEKST  =                                         
+               'AFSTEMNINGSINDIVID MANGLER PÅ B.H96000D';               
+               DETLIN1.ANTAL = '';                                      
+               CALL ZZ20300(DETLIN1,'01');                              
+            END;                                                        
+                                                                        
+         IF FEJL = '2'                                                  
+         THEN                                                           
+            DO;                                                         
+               DETLIN1.CCA   = ZZWS3;                                   
+               DETLIN1.TEKST = 'ANTAL LÆSTE INDIVIDER PÅ B.H96000D';    
+               DETLIN1.ANTAL = TV.LÆS_BH960;                            
+               CALL ZZ20300(DETLIN1,'01');                              
+               DETLIN1.TEKST =                                          
+               'ANTAL IFØLGE AFSTEMNINGSINDIVID IALT  :';               
+               DETLIN1.ANTAL = BH960_ANT_INDV;                          
+               CALL ZZ20300(DETLIN1,'01');                              
+            END;                                                        
+                                                                        
+         SWFEJL = '1';                                                  
+                                                                        
+ END FEJLLISTE;                                                         
+ /*********************************************************************/
+ /*      UDSKRIV SQL FEJL                                             */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+ DCL     PSQLKODE        PIC       '---9';                              
+         EXEC SQL INCLUDE SQLCA;                                        
+                                                                        
+         PSQLKODE = KOM_AREAL.SQLKODE;                                  
+         CALL ZS67000 (KOM_AREAL.SQLKODE);                              
+                                                                        
+         EXEC SQL ROLLBACK;                                             
+                                                                        
+         IF SQLCODE ^= 0                                                
+         THEN                                                           
+            CALL ZS67000 (SQLCA);                                       
+                                                                        
+         CALL ZS30101(4,'BH97200 ** 250 - SQL_FEJL' !! PSQLKODE,2);     
+                                                                        
+ END SQL_FEJL;                                                          
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:                                                                
+         PROC;                                                          
+                                                                        
+         CALL FAKTURER_TS;                                              
+                                                                        
+         CALL TOTALLISTE;                                               
+                                                                        
+         CALL MASK_AFSTEMNING;                                          
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+         CLOSE FILE (BH960I),                                           
+               FILE (BH9720O),                                          
+               FILE (BH9721O);                                          
+                                                                        
+         IF EX_PARM = 'TDB2'                                            
+         THEN                                                           
+            DO;                                                         
+               CLOSE FILE (BH9728O),                                    
+                     FILE (BH9729O);                                    
+            END;                                                        
+                                                                        
+         IF SWFEJL = '1'                                                
+         THEN                                                           
+            CALL ZS30101(4,'BH97200 ** 251 ' !!                         
+                 'MASKINEL KONSTATERET AFSTEMNINGSFEJL',2);             
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /********************************************************************/ 
+                                                                        
+      ; /* UNDGÅ PROBLEMER MED LABEL */                                 
+ DCL 1 ZM,                                                              
+       2  DUMMY           CHAR (01);                                    
+ END  BH97200;                                                          

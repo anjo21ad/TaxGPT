@@ -1,0 +1,363 @@
+ BE86800: Proc  Options (Main);                                         
+ %Include Zm2EnvB;                                                      
+ Dcl Copyright Char (30) Static Init ('Copyright KMD A/S 2023');        
+ /*-------------------------------------------------------------------- 
+    Program        : BE86800                                            
+                                                                        
+    Funktion       : Dan fil med GS-oplysninger for dødes ejer-         
+                     forhold til SLUT - Individ 808                     
+                                                                        
+    Beskrivelse    : Programmet udskriver GS-oplysninger for døde fra   
+                     tabellen BE61000T, for det seneste indkomstår.     
+                     Oplysningerne leveres i et datasæt til DXC.        
+                                                                        
+    Programmør     : Lotte Jørgensen, Z6LTJ                             
+                                                                        
+    Dato           : November 2023                                      
+                                                                        
+    JCL Test       ::                                                   
+ --------------------------------------------------------------------*/ 
+    Zm2Appl    = 'BEVS';                                                
+    Zm2Program = 'BE86800';                                             
+ /*-------------------------------------------------------------------  
+    Includes                                                            
+ --------------------------------------------------------------------*/ 
+    %include Zm2Db2B;             // Standard til zm2-programmer        
+    %include Zm2SrxA;             // Zm2-macros and routines (batch)    
+ /*-------------------------------------------------------------------  
+    Database                                                            
+ --------------------------------------------------------------------*/ 
+    Exec Sql Include BE61000T;    // GS-oplysninger på døde             
+ /*-------------------------------------------------------------------  
+    Definition af output fil                                            
+ --------------------------------------------------------------------*/ 
+ Dcl  BE868O               File Record Output; // Individ 808 til DXC   
+ /*-------------------------------------------------------------------  
+    Udtræksstruktur til individ 808 (SLUT DXC)                          
+ --------------------------------------------------------------------*/ 
+ Dcl     1 BE868Struktur,                                               
+           %Include BE86800N;                                           
+ /*-------------------------------------------------------------------  
+    Henter åben række på afviklingstabellen (BE72100T)                  
+ --------------------------------------------------------------------*/ 
+ Dcl     1 BE55600M,                                                    
+           %Include BE55600M;                                           
+ /*-------------------------------------------------------------------  
+    Declares                                                            
+ --------------------------------------------------------------------*/ 
+ Dcl  (Addr, Null, Stg, Index, Low, Substr, Cstg, Trim)  Builtin;       
+ Dcl  ProgramNavn          Char (8)       Init('BE86800L');             
+ Dcl  Putskip              Bit (1)        Init('0'B);                   
+ Dcl  Ja                   Bit (1)        Init('1'B);                   
+ Dcl  Nej                  Bit (1)        Init('0'B);                   
+ Dcl  FlerePersoner        Bit (1)        Init('0'B);                   
+ Dcl  IndkomstÅr           Bin Fixed (15);                              
+ Dcl  IndkomstÅrPic        Pic '9999';                                  
+ Dcl  KørselsId            Char (5);                                    
+ Dcl  AfviklingsId         Char (16) Init (' ');                        
+ Dcl  DataId               Bin Fixed (15);                              
+ Dcl  PersonNummerDec      Dec Fixed (11);                              
+ Dcl  PersonNummerPic      Pic '(10)9';                                 
+ Dcl  PersonNummer         Char (10) Based (Addr(PersonnummerPic));     
+ Dcl  SqlCodePic           Pic'999';                                    
+ Dcl  AntalDøde            Bin Fixed (31) Init (0);                     
+ Dcl  Kommunenummer        Pic '999';                                   
+ Dcl  Ejendomsnummer       Pic '(7)9';                                  
+ Dcl  AntalDage            Pic '(3)9';                                  
+ Dcl  VurÆndringsDatoDec   Dec (9,0);                                   
+ Dcl  VurÆndringsDatoPic   Pic '(8)9';                                  
+ Dcl  VurÆndringsDato      Char (8) Based (Addr(VurÆndringsDatoPic));   
+ Dcl  EjerStartDatoDec     Dec (9,0);                                   
+ Dcl  EjerStartDatoPic     Pic '(8)9';                                  
+ Dcl  EjerStartDato        Char (8) Based (Addr(EjerStartDatoPic));     
+ Dcl  EjerSlutDatoDec      Dec (9,0);                                   
+ Dcl  EjerSlutDatoPic      Pic '(8)9';                                  
+ Dcl  EjerSlutDato         Char (8) Based (Addr(EjerSlutDatoPic));      
+ Dcl  Enhedsløbenr         Bin Fixed (15);                              
+ Dcl  ModtagerIdent        Char (4);                                    
+ /*-------------------------------------------------------------------  
+  Declare af cursor                                                     
+ --------------------------------------------------------------------*/ 
+    EXEC SQL                                                            
+      DECLARE PERSONCURSOR CURSOR WITH HOLD FOR                         
+       SELECT PERSONNUMMER,                                             
+              EKOMNR,                                                   
+              EEJDNR,                                                   
+              EPLBNR,                                                   
+              GSBEREGNTID,                                              
+              GSBEREGNID,                                               
+              EVUREJDID,                                                
+              BEJDGRUNDSKYLD,                                           
+              BFENUMMER,                                                
+              ADR_KORT,                                                 
+              ADR_POSTNR,                                               
+              ADR_POSTDISTRIKT,                                         
+              ADR_BYNAVN,                                               
+              VUR_ÆNDRDATO,                                             
+              VUR_ÅR,                                                   
+              VUR_GSBESKATGRL,                                          
+              EJERANDEL,                                                
+              EP_EJERSTARTDATO,                                         
+              EP_EJERSLUTDATO_P,                                        
+              EP_ANTALDAGE_P,                                           
+              EGS_BELØB_P,                                              
+              EGS_RABATBELØB_P,                                         
+              EGS_BELØBEFTERRABAT_P                                     
+         FROM BE61000T                                                  
+        WHERE TIL_EVS_AAR   = :INDKOMSTÅR                               
+          AND AFVIKLINGS_ID = :AFVIKLINGSID                             
+          AND DATA_ID       = :DATAID                                   
+          AND KØRSELS_ID    = :KØRSELSID                                
+     ORDER BY PERSONNUMMER,                                             
+              EKOMNR,                                                   
+              EEJDNR,                                                   
+              EPLBNR;                                                   
+ /*-------------------------------------------------------------------  
+     Housekeeping                                                       
+ --------------------------------------------------------------------*/ 
+    On Error                                                            
+         Begin;                                                         
+            On Error System;                                            
+            Call Afslut;                                                
+            Call Plidump ('SHBO');                                      
+         End;                                                           
+                                                                        
+    Call OpenFiles;                   // Åben output fil                
+                                                                        
+                                      // Opsæt nøgleværdier             
+    Select (BE55600M.Afviklings_Id);                                    
+       When ('OPRET_EVS_FORSK')                                         
+         Do;                                                            
+           AfviklingsId = BE55600M.Afviklings_Id;                       
+           IndkomstÅr   = BE55600M.Til_Evs_Aar;                         
+           DataId       = BE55600M.Data_Id;                             
+           KørselsId    = '1';                                          
+         End;                                                           
+       When ('OPRET_EVS_SLUT')                                          
+          Do;                                                           
+            AfviklingsId = BE55600M.Afviklings_Id;                      
+            IndkomstÅr   = BE55600M.Til_Evs_Aar;                        
+            DataId       = BE55600M.Data_Id;                            
+            KørselsId    = '1';                                         
+          End;                                                          
+       When ('SUPPL_EVS_SLUT')                                          
+          Do;                                                           
+            AfviklingsId = BE55600M.Afviklings_Id;                      
+            IndkomstÅr   = BE55600M.Til_Evs_Aar;                        
+            DataId       = BE55600M.Data_Id;                            
+            KørselsId    = '1';                                         
+          End;                                                          
+       Otherwise                                                        
+          Call AbendModul ('100 Parameterfejl');                        
+    End;                                                                
+                                                                        
+ /*-------------------------------------------------------------------  
+     Hovedprogram                                                       
+ --------------------------------------------------------------------*/ 
+                                                                        
+    Call OpenPerson;                                                    
+                                                                        
+    FlerePersoner = Ja;                                                 
+    Call FetchPerson;                                                   
+                                                                        
+    Do While (FlerePersoner);                                           
+                                                                        
+      Call Udfyld808Struktur;                                           
+      Write File (BE868O) From (BE868Struktur);                         
+                                                                        
+      Call FetchPerson;                                                 
+    End;                                                                
+                                                                        
+    Call ClosePerson;                                                   
+                                                                        
+    Put Skip List('Antal individ 808 (døde) på datasæt:    ' !!         
+                   AntalDøde);                                          
+                                                                        
+    Call Afslut;                                                        
+ /*-------------------------------------------------------------------  
+     OpenPerson                                                         
+ -------------------------------------------------------------------*/  
+ OpenPerson: Proc;                                                      
+                                                                        
+    AntalDøde = 0;                                                      
+                                                                        
+    Exec Sql Open                                                       
+       PersonCursor;                                                    
+                                                                        
+    Select (Sqlcode);                                                   
+       When(0);                                                         
+       Otherwise                                                        
+         Do;                                                            
+           SqlCodePic = Sqlcode;                                        
+           Call AbendModul ('101 OpenPerson - Sqlcode: ' !!             
+                            SqlCodePic);                                
+         End;                                                           
+    End;                                                                
+                                                                        
+ End OpenPerson;                                                        
+ /*-------------------------------------------------------------------  
+     FetchPersonCursor                                                  
+ -------------------------------------------------------------------*/  
+ FetchPerson: Proc;                                                     
+                                                                        
+    Exec Sql Fetch PersonCursor                                         
+        Into :DCLBE61000T.PERSONNUMMER,                                 
+             :DCLBE61000T.EKOMNR,                                       
+             :DCLBE61000T.EEJDNR,                                       
+             :DCLBE61000T.EPLBNR,                                       
+             :DCLBE61000T.GSBEREGNTID,                                  
+             :DCLBE61000T.GSBEREGNID,                                   
+             :DCLBE61000T.EVUREJDID,                                    
+             :DCLBE61000T.BEJDGRUNDSKYLD,                               
+             :DCLBE61000T.BFENUMMER,                                    
+             :DCLBE61000T.ADR_KORT,                                     
+             :DCLBE61000T.ADR_POSTNR,                                   
+             :DCLBE61000T.ADR_POSTDISTRIKT,                             
+             :DCLBE61000T.ADR_BYNAVN,                                   
+             :DCLBE61000T.VUR_ÆNDRDATO,                                 
+             :DCLBE61000T.VUR_ÅR,                                       
+             :DCLBE61000T.VUR_GSBESKATGRL,                              
+             :DCLBE61000T.EJERANDEL,                                    
+             :DCLBE61000T.EP_EJERSTARTDATO,                             
+             :DCLBE61000T.EP_EJERSLUTDATO_P,                            
+             :DCLBE61000T.EP_ANTALDAGE_P,                               
+             :DCLBE61000T.EGS_BELØB_P,                                  
+             :DCLBE61000T.EGS_RABATBELØB_P,                             
+             :DCLBE61000T.EGS_BELØBEFTERRABAT_P;                        
+                                                                        
+    Select (Sqlcode);                                                   
+       When(0)                                                          
+          AntalDøde    = AntalDøde + 1;                                 
+       When(100)                                                        
+         FlerePersoner = Nej;                                           
+       Otherwise                                                        
+         Do;                                                            
+           SqlCodePic = Sqlcode;                                        
+           Call AbendModul ('102 FetchPerson - Sqlcode: ' !!            
+                             SqlCodePic);                               
+         End;                                                           
+    End;                                                                
+                                                                        
+ End FetchPerson;                                                       
+ /*-------------------------------------------------------------------  
+     ClosePersonCursor                                                  
+ -------------------------------------------------------------------*/  
+ ClosePerson: Proc;                                                     
+                                                                        
+    Exec Sql Close PersonCursor;                                        
+                                                                        
+    Select (Sqlcode);                                                   
+       When(0);                                                         
+       Otherwise                                                        
+         Do;                                                            
+           SqlCodePic = Sqlcode;                                        
+           Call AbendModul ('103 ClosePerson - Sqlcode: ' !!            
+                            SqlCodePic);                                
+         End;                                                           
+    End;                                                                
+                                                                        
+ End ClosePerson;                                                       
+ /*-------------------------------------------------------------------- 
+    Udfyld808Struktur                                                   
+ --------------------------------------------------------------------*/ 
+ Udfyld808Struktur:Proc;                                                
+                                                                        
+    BE868STRUKTUR.INDVNR        = 808;                                  
+    BE868STRUKTUR.INDVLGD       = 534;                                  
+    BE868STRUKTUR.FELTLGD       = 534;                                  
+    BE868STRUKTUR.HEADER        = 'GSGRUND';                            
+    BE868STRUKTUR.DINDKAAR      = INDKOMSTÅR;                           
+    BE868STRUKTUR.GSBEREGNTID   = DCLBE61000T.GSBEREGNTID;              
+    BE868STRUKTUR.GSBEREGNID    = DCLBE61000T.GSBEREGNID;               
+                                                                        
+    PERSONNUMMERDEC             = DCLBE61000T.PERSONNUMMER;             
+    PERSONNUMMERPIC             = PERSONNUMMERDEC;                      
+    BE868STRUKTUR.DCPRN         = PERSONNUMMER;                         
+                                                                        
+    KOMMUNENUMMER               = DCLBE61000T.EKOMNR;                   
+    EJENDOMSNUMMER              = DCLBE61000T.EEJDNR;                   
+    BE868STRUKTUR.EKOMNR_EEJDNR = KOMMUNENUMMER !!                      
+                                  EJENDOMSNUMMER;                       
+    BE868STRUKTUR.EVUREJDID     = DCLBE61000T.EVUREJDID;                
+    BE868STRUKTUR.BFENUMMER     = DCLBE61000T.BFENUMMER;                
+    BE868STRUKTUR.ADR_KORT      = DCLBE61000T.ADR_KORT;                 
+    BE868STRUKTUR.ADR_POSTNR    = DCLBE61000T.ADR_POSTNR;               
+    BE868STRUKTUR.ADR_POSTDIST  = DCLBE61000T.ADR_POSTDISTRIKT;         
+    BE868STRUKTUR.ADR_BYNAVN    = DCLBE61000T.ADR_BYNAVN;               
+                                                                        
+    VURÆNDRINGSDATODEC          = DCLBE61000T.VUR_ÆNDRDATO;             
+    VURÆNDRINGSDATOPIC          = VURÆNDRINGSDATODEC;                   
+    BE868STRUKTUR.VUR_ÆNDRDATO  = SUBSTR(VURÆNDRINGSDATO,1,4) !!        
+                                  '-'                         !!        
+                                  SUBSTR(VURÆNDRINGSDATO,5,2) !!        
+                                  '-'                         !!        
+                                  SUBSTR(VURÆNDRINGSDATO,7,2);          
+    BE868STRUKTUR.VUR_ÅR          = DCLBE61000T.VUR_ÅR;                 
+    BE868STRUKTUR.VUR_GSBESKATGRL = DCLBE61000T.VUR_GSBESKATGRL;        
+    BE868STRUKTUR.BEJDGRUNDSKYLD  = DCLBE61000T.BEJDGRUNDSKYLD;         
+    BE868STRUKTUR.EJERANDEL       = DCLBE61000T.EJERANDEL;              
+                                                                        
+    EJERSTARTDATODEC               = DCLBE61000T.EP_EJERSTARTDATO;      
+    EJERSTARTDATOPIC               = EJERSTARTDATODEC;                  
+    BE868STRUKTUR.EP_EJERSTARTDATO = SUBSTR(EJERSTARTDATO,1,4) !!       
+                                     '-'                       !!       
+                                     SUBSTR(EJERSTARTDATO,5,2) !!       
+                                     '-'                       !!       
+                                     SUBSTR(EJERSTARTDATO,7,2);         
+                                                                        
+    EJERSLUTDATODEC                = DCLBE61000T.EP_EJERSLUTDATO_P;     
+    EJERSLUTDATOPIC                = EJERSLUTDATODEC;                   
+    BE868STRUKTUR.EP_EJERSLUTDATO_P = SUBSTR(EJERSLUTDATO,1,4) !!       
+                                      '-'                      !!       
+                                      SUBSTR(EJERSLUTDATO,5,2) !!       
+                                      '-'                      !!       
+                                      SUBSTR(EJERSLUTDATO,7,2);         
+                                                                        
+    ANTALDAGE                      = DCLBE61000T.EP_ANTALDAGE_P;        
+    BE868STRUKTUR.EP_ANTALDAGE_P   = ANTALDAGE;                         
+    BE868STRUKTUR.EGS_BELØB_P      = DCLBE61000T.EGS_BELØB_P;           
+    BE868STRUKTUR.EGS_RABATBELØB_P = DCLBE61000T.EGS_RABATBELØB_P;      
+    BE868STRUKTUR.EGS_BELØBEFTERRABAT_P =                               
+                  DCLBE61000T.EGS_BELØBEFTERRABAT_P;                    
+                                                                        
+ End Udfyld808Struktur;                                                 
+ /*-------------------------------------------------------------------- 
+    OpenFiles                                                           
+ --------------------------------------------------------------------*/ 
+ OpenFiles: Proc;                                                       
+                                                                        
+    Open File (BE868O)   Title ('BE86801O');                            
+                                                                        
+ End OpenFiles;                                                         
+ /*-------------------------------------------------------------------- 
+    AbendModul                                                          
+ --------------------------------------------------------------------*/ 
+ AbendModul: proc (FejlTxt);                                            
+ Dcl  FejlTxt            Char (45);                                     
+ Dcl  AbendKode          Fixed Dec (2);                                 
+ Dcl  1 AbendMedd,                                                      
+        2 Abendpgm       Char  (7),                                     
+        2 Abendfill1     Char  (1)           Init (' '),                
+        2 Abendmednr     Char  (2)           Init ('**'),               
+        2 Abendfill2     Char  (1)           Init (' '),                
+        2 Abendtxt       Char  (45);                                    
+ Dcl  AbendRtKode        Fixed Dec (1)       Init (2);                  
+                                                                        
+    Call Afslut;                                                        
+                                                                        
+    AbendKode          = 5;                                             
+    AbendMedd.AbendPgm = 'BE86800';                                     
+    AbendMedd.Abendtxt = FejlTxt;                                       
+                                                                        
+    Call ZS30101(AbendKode,AbendMedd,AbendRtKode);                      
+                                                                        
+ End AbendModul;                                                        
+ /*-------------------------------------------------------------------- 
+    Afslutning - luk filer, cursorer osv.                               
+ --------------------------------------------------------------------*/ 
+ Afslut: Proc;                                                          
+                                                                        
+    Close File (BE868O);        // Individ 808 til DXC                  
+                                                                        
+ End Afslut;                                                            
+ End BE86800;                                                           

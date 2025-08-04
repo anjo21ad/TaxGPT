@@ -1,0 +1,784 @@
+ BE24600: PROCEDURE OPTIONS (MAIN);                                     
+                                                                        
+ /* UDPAKNING TIL EVS  INDIVID 0135                                   */
+                                                                        
+ /*********************************************************************/
+ /* FUNKTION:                                                         */
+ /*                                                                   */
+ /* BEHANDLING AF 0135 INDIVIDER                                      */
+ /* 1. LÆSER TAB-SEPARERET(X'05') FRA VAR.BLOCK. INPUT-DATASÆT        */
+ /*                                                                   */
+ /* 2. TESTER LÆNGDE PÅ HVERT ENKELT FELT                             */
+ /*    AT DER ER OVERENSTEMMELSE MELLLEM INDDATA OG UDDATA            */
+ /*                                                                   */
+ /* 3. SKRIVER DE UDPAKKEDE DATA I ET LOADGRUNDLAG                    */
+ /*                                                                   */
+ /* 4. HVIS DER ER FEJL I INDDATA KOPIERES DATA OVER PÅ ET            */
+ /*    KOPIDATASÆT                                                    */
+ /*                                                                   */
+ /*  INDDATA:        FLYDENDENDE DATA FRA CSC MED FØLGENDE INDIVIDER: */
+ /*                  -  INDIVID 135 OMPLACERING                       */
+ /*                                                                   */
+ /*  UDDATA          LOAD GRUNDLAG TILBE90200T   135 INDIVID          */
+ /*                  FEJLDATA                                         */
+ /*                                                                   */
+ /*  EXTERNE REF.    ZS30101   ABENDRUTINE                            */
+ /*********************************************************************/
+ /*                                                                   */
+ /*     KOPI af BZ28905     HKS dec. 2019                             */
+ /*                                                                   */
+ /*********************************************************************/
+ /*                                                                   */
+ /*      RETTET AF   : ONE                               10/05-2021   */
+ /*      VEDRØRENDE  : ÅRSTILRETNING 2020                             */
+ /*                    Taget indeholder fra BQ9DATOW includen         */
+ /*                     og lagt ind i programmet her                  */
+ /*      RETTET AF   : ONE                               nov-2021     */
+ /*      VEDRØRENDE  : ÅRSTILRETNING 2021                             */
+ /*      RETTET AF   : ONE                               nov-2022     */
+ /*      VEDRØRENDE  : ÅRSTILRETNING 2022                             */
+ /*      RETTET AF   : ONE                               apr-2023     */
+ /*      VEDRØRENDE  : BQ91200O rettet til BQ90200O                   */
+ /*      RETTET AF   : HNK                               nov-2023     */
+ /*      VEDRØRENDE  : ÅRSTILRETNING 2024 ny evs                      */
+ /********************************************************************/ 
+ /* Input - PARM -                                                   */ 
+ /********************************************************************/ 
+ DCL PARM              FILE RECORD INPUT;                               
+ DCL 1 PARM_REC,                                                        
+       3 PARM_FUNKTION  CHAR(08),                                       
+       3 PARM_FILLER    CHAR(72);                                       
+ /*********************************************************************/
+ /*      DECLARES AF PARM                                             */
+ /*********************************************************************/
+   DCL 1 INDV_0135_OPTAELT,                                             
+      %INCLUDE BE24498N;                                      /*ÅR-RET*/
+   DCL 1 INDV_0135_HEADER,                                              
+      %INCLUDE BE24600N;                                      /*ÅR-RET*/
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES AF FILES                                            */
+ /*********************************************************************/
+ DCL BE2460I FILE   RECORD INPUT;                             /*ÅR-RET*/
+ DCL BE2460O FILE   RECORD OUTPUT;/*LOADGRUNDLAG INDIVID 135*//*ÅR-RET*/
+                                                                        
+ DCL BE2469O  FILE   RECORD OUTPUT;        /* FEJLINDIVID   *//*ÅR-RET*/
+ DCL SYSPRINT EXTERNAL FILE PRINT;                                      
+ /*********************************************************************/
+ /*      DECLARES AF BUILTIN-FUNKTIONER                               */
+ /*********************************************************************/
+   DCL (ADDR,                                                           
+        CSTG,                                                           
+        NULL,                                                           
+        STG,                                                            
+        INDEX,                                                          
+        SUBSTR,                                                         
+        LBOUND,                                                         
+        HBOUND,                                                         
+        VERIFY,                                                         
+        DIVIDE,                                                         
+        LENGTH,                                                         
+        MOD,                                                            
+        PLIRETC,                                                        
+        PLIDUMP,                                                        
+        LOW)           BUILTIN;                                         
+                                                                        
+ /*********************************************************************/
+ /*      DB2 TABELSTRUKTURER                                          */
+ /*********************************************************************/
+ EXEC SQL INCLUDE SQLCA;                                                
+ EXEC SQL INCLUDE BE90000T;                    /* Driftsstyringstabel */
+ EXEC SQL INCLUDE BE90200T;                                             
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES                                                     */
+ /*********************************************************************/
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ %INCLUDE ZS38000N;                /* ENTRY TIL ZS38000 */              
+ %INCLUDE ZS38002N;                                                     
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES AF STRUKTURER  INPUT                                */
+ /*********************************************************************/
+ DCL LGD_INPUTFIL BIN FIXED(15);                                        
+ DCL 1 INPUTFIL      CHAR(200) VAR; /* MED LIDT EKSTRA PLADS */         
+ DCL 1 INPUTFIL_IND,                                                    
+      2 DATA         CHAR(200);                                         
+ DCL INPUTTAB(200)   CHAR(01) DEF INPUTFIL_IND;                         
+ DCL  1  INDIVID     BASED (ADDR(INPUTFIL_IND.DATA)),                   
+       3 INDVNR      CHAR      (4),                                     
+       3 FILLER      CHAR      (1),                                     
+       3 PNR         CHAR     (10);                                     
+                                                                        
+                                                                        
+ DCL  1  INDV_HEAD       BASED (ADDR(INPUTFIL_IND.DATA)),               
+       %INCLUDE BE24600N;;                                    /*ÅR-RET*/
+                                                                        
+ DCL  1  INDV_TRAIL      BASED (ADDR(INPUTFIL_IND.DATA)),               
+       %INCLUDE BE24699N;;                                    /*ÅR-RET*/
+ /*********************************************************************/
+ /*      DECLARES AF STRUKTURER  OUTPUT                               */
+ /*********************************************************************/
+ DCL UDDATA  CHAR(400) VAR;                                             
+                                                                        
+                                                                        
+ DCL 1 HEADER    BASED(ADDR(UDDATA)),                                   
+       4 LAENGDE BIN FIXED  (15),                                       
+       %INCLUDE BE24600N;;                                    /*ÅR-RET*/
+ DCL 1 INDV_0135 BASED(ADDR(UDDATA)),                                   
+       4 LAENGDE BIN FIXED  (15),                                       
+       %INCLUDE BE24635N;;                                    /*ÅR-RET*/
+                                                                        
+ DCL DB2_UDDATA  CHAR(113);                                             
+ DCL 1 DB2_INDV_0135 BASED(ADDR(DB2_UDDATA)),                           
+     %INCLUDE BE90200N;;                                                
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES                                                     */
+ /*********************************************************************/
+   DCL I       BIN FIXED(15);                                           
+   DCL OUTPUT_TXT   CHAR(127); /*LÆNGSTE STRENG + 2 ANFØRSELSTEGN */    
+   DCL FELT_POS_START  BINARY FIXED(15);                                
+   DCL FELT_POS_SLUT   BINARY FIXED(15);                                
+                                                                        
+   DCL EOF_BE2460I       BIT(1) INIT('0'B);                   /*ÅR-RET*/
+   DCL FEJL              BIT(1) INIT('1'B);                             
+   DCL OK                BIT(1) INIT('0'B);                             
+   DCL JA                BIT(1) INIT('1'B);                             
+   DCL NEJ               BIT(1) INIT('0'B);                             
+   DCL TRUE              BIT(1) INIT('1'B);                             
+   DCL FALSE             BIT(1) INIT('0'B);                             
+   DCL AFBRYD            BIT(1) INIT('0'B);                             
+   DCL TRAILER_SW        BIT(1) INIT('0'B);                             
+   DCL TFLAG             BIT(1) INIT('0'B);                             
+   DCL CONVERT_SW        BIT(1) INIT('0'B);                             
+   DCL WK_DUMMY_ID       BIN FIXED(63);                                 
+   DCL DUMMY_ID_DANNET   CHAR (01);                                     
+   DCL WK_INDKAAR        BIN FIXED (15);                                
+   DCL WK_KOERNR         BIN FIXED (15);                                
+   DCL WK_KOERDTO        CHAR (10);                                     
+                                                                        
+   DCL SK_TEGN BINARY FIXED(15)  BASED(ADDR (SK_TEGN_CHAR));            
+   DCL 1 SK_TEGN_CHAR,                                                  
+         2 SK_1         CHAR(1),                                        
+         2 SK_2         CHAR(1),                                        
+         2 SK_3_4       CHAR(2);                                        
+                                                                        
+   DCL PROGRAM_1         CHAR (08) INIT ('BE24600L');         /*ÅR-RET*/
+   DCL PROGRAM_2         CHAR (08) INIT ('BE24800L');         /*ÅR-RET*/
+ /*********************************************************************/
+ /*      DIVERSE DECLARES                                             */
+ /*********************************************************************/
+      /* %INCLUDE BQ0DATOW;                                   /*ÅR-RET*/
+       %INCLUDE BE24401N;; /* FELTTYPER */                    /*ÅR-RET*/
+                                                                        
+   DCL INDKOMSTÅR_TOCIF_CHAR     CHAR  (2)  INIT ('24');      /*ÅR-RET*/
+   DCL INDKOMSTÅR_TOCIF_PIC      PIC  '99'  INIT (24);        /*ÅR-RET*/
+   DCL INDKOMSTÅR_FIRECIF_CHAR   CHAR  (4)  INIT ('2024');    /*ÅR-RET*/
+   DCL INDKOMSTÅR_FIRECIF_PIC_WS PIC '9999'                   /*ÅR-RET*/
+                              BASED(ADDR(INDKOMSTÅR_FIRECIF_CHAR));     
+   DCL INDKOMSTÅR_FIRECIF_BIN   BIN FIXED (15)  INIT (2024);  /*ÅR-RET*/
+   DCL MAX_ANT_FELTER      BINARY FIXED(15) INIT(08);                   
+                                                                        
+   DCL PLACERING_CHAR(8)  CHAR(18) INIT                                 
+    %INCLUDE BE24635M;;                                       /*ÅR-RET*/
+                                                                        
+   DCL 1 PLACERING_BASED(8) BASED(ADDR(PLACERING_CHAR)),                
+         2 FELTNR          PIC '9999',                                  
+         2 FILLER_1        CHAR(1),                                     
+         2 ADRESSE         PIC '99999',                                 
+         2 FILLER_2        CHAR(1),                                     
+         2 LGD             CHAR(4),                                     
+         2 FILLER_3        CHAR(1),                                     
+         2 TYPE            PIC '99';                                    
+                                                                        
+   DCL HJ_FELTNR           BINARY FIXED(15) INIT(0);                    
+   DCL IND_POS             BINARY FIXED(15);                            
+   DCL TAB_SIZE            BINARY FIXED(15);                            
+   DCL O_DATA              CHAR(80);                                    
+   DCL Ktimestamp          CHAR(26);                                    
+   DCL HJ_POS BINARY FIXED(15) INIT(1);                                 
+                                                                        
+                                                                        
+   DCL HJ_PIC_999  PIC '999' ;                                          
+   DCL HJ_PIC_9999 PIC '9999' ;                                         
+                                                                        
+   DCL ANT_ANF_TGN  BINARY FIXED(15) INIT(0);                           
+   DCL TAL          CHAR      (10)   INIT ('0123456789');               
+   DCL CSC_F_ANT    FIXED BIN(15,0)  INIT(0);                           
+   DCL HJ_PNR       PIC '(10)9'      INIT(0);                           
+                                                                        
+   DCL     FEJLTEKST      CHAR (50) INIT(' ');                          
+                                                                        
+   DCL     DATO                 PIC'(8)9';                              
+   DCL     1 DATO_DEF           BASED (ADDR (DATO) ),                   
+            2 DG1               PIC  '99',                              
+            2 MD1               PIC  '99',                              
+            2 ÅR1               PIC'9999';                              
+   DCL     HELP_DATOC           CHAR (8);                               
+   DCL     HELP_DATOP           PIC'(8)9' BASED (ADDR (HELP_DATOC) );   
+   DCL     1 HELP_DTX           BASED (ADDR (HELP_DATOC) ),             
+            2 ÅRX               PIC'9999',                              
+            2 MDX               PIC  '99',                              
+            2 DGX               PIC  '99';                              
+                                                                        
+ /*********************************************************************/
+ /****** PRINTLINIER TIL INTERN FEJL- OG KONTROLLISTE               */  
+ /*********************************************************************/
+         % INCLUDE ZZ20301M;     /* STANDARD KONTROLKARAKTERER */       
+   DCL     1   PRINT89,                                                 
+             3  CCHAR      CHAR      (1),                               
+             3  TEXT       CHAR      (132);                             
+                                                                        
+   DCL     1 OSKR89,                                                    
+           2 TX1         CHAR      (13) INIT ('BE24600L  *'), /*ÅR-RET*/
+           2 TX2         CHAR      (30)                                 
+                                  INIT ('UDPAKNING TIL ÆNDRINGSKØRSEL'),
+           2 TX3         CHAR      (6)  INIT ('DATO: '),                
+           2 UDDATO      PIC       '99.99.9999',                        
+           2 HFILL       CHAR      (82) INIT (' ');                     
+   DCL     O89           CHAR      (132)  DEF OSKR89;                   
+                                                                        
+   DCL     L89             CHAR      (132);                             
+   DCL     1 LIN99         DEF       L89,                               
+             2 TEKST       CHAR      (45),                              
+             2 FILL1       CHAR      (2),                               
+             2 ANTAL       PIC       'Z.ZZZ.ZZ9',                       
+             2 FILL2       CHAR      (76);                              
+                                                                        
+ /*********************************************************************/
+ /*      HOUSEKEEPING                                                 */
+ /*********************************************************************/
+         CALL ZS61900;/* SKRIV SSI-DATO             */                  
+                                                                        
+         ON ERROR  CALL PLIDUMP ('SBHO','BE24600');           /*ÅR-RET*/
+                                                                        
+         ON CONVERSION                                                  
+          BEGIN;                                                        
+             CSC_F_ANT = CSC_F_ANT + 1;                                 
+             PUT SKIP LIST(' BE24600: CONVERSION FEJL');      /*ÅR-RET*/
+             PUT SKIP LIST('       PNR        :' !!INDIVID.PNR);        
+             PUT SKIP LIST('       0135_REC_NR:' !!FANTAL_LAES);        
+             PUT SKIP LIST('       INP_FELT_NR:' !!I);                  
+             PUT SKIP LIST('              DATA:' !!                     
+                                               SUBSTR(OUTPUT_TXT,1,30));
+             PUT SKIP LIST('         INPUT_POS:' !! IND_POS);           
+             PUT SKIP LIST('         ONCHAR   : ' !!ONCHAR());          
+             ONCHAR() = 0;                                              
+             CONVERT_SW = '1'B;                                         
+          END;                                                          
+                                                                        
+         ON ENDFILE (BE2460I)                                 /*ÅR-RET*/
+          BEGIN;                                                        
+            EOF_BE2460I = JA;                                 /*ÅR-RET*/
+          END;                                                          
+           PARM_FUNKTION = '*';                                         
+                                                                        
+         ON UNDEFINEDFILE(PARM) BEGIN;                                  
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+         OPEN FILE(PARM) TITLE('PARM');                                 
+                                                                        
+         ON ENDFILE(PARM) BEGIN;                                        
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+        READ FILE(PARM) INTO(PARM_REC);                                 
+                                                                        
+        PUT SKIP LIST('PARM_FUNKTION=', PARM_FUNKTION);                 
+ /*------------------------------------------------------------------*/ 
+ /* HOUSEKEEPING_SLUT                                                */ 
+ /*------------------------------------------------------------------*/ 
+ HOUSEKEEPING_SLUT:                                                     
+                                                                        
+         FUNKTION   = 'DAGSDATO';                                       
+         VALIDERING = 'N';                                              
+         CALL ZS38000(ZS380PARM.FUNKTION,                               
+                      ZS380PARM.VALIDERING,                             
+                      ZS380PARM.PARM,                                   
+                      ZS380PARM.RETURKODE);                             
+                                                                        
+         HELP_DATOC   = ZS380PARM3.DATO1;                               
+         DATO_DEF.DG1 = HELP_DTX.DGX;                                   
+         DATO_DEF.MD1 = HELP_DTX.MDX;                                   
+         DATO_DEF.ÅR1 = HELP_DTX.ÅRX;                                   
+         UDDATO = DATO;                                                 
+         CALL ZZ20390 ('*OPEN','BE24689Y'); /* KONTROLLISTE *//*ÅR-RET*/
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = O89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+         PRINT89 = '';;                                                 
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         KTIMESTAMP = TIMESTAMP;                                        
+                                                                        
+         OPEN FILE (BE2460I) TITLE ('BE24600I');              /*ÅR-RET*/
+         OPEN FILE (BE2460O) TITLE ('BE90200O');              /*ÅR-RET*/
+         OPEN FILE (BE2469O) TITLE ('BE24690O');              /*ÅR-RET*/
+                                                                        
+ /*********************************************************************/
+ /*      HOVEDSTYRING                                                 */
+ /*********************************************************************/
+         CALL BEHANDLING;                                               
+         CALL SKRIV_TOTALER;                                            
+         CALL AFSLUT;                                                   
+         CALL KONTROLTÆLLER;                                            
+ /*********************************************************************/
+ /*      KONTROLTÆLLING                                               */
+ /*********************************************************************/
+ KONTROLTÆLLER: PROC;                                                   
+                                                                        
+         IF TRAILER_SW THEN DO;                                         
+            IF INDV_0135_OPTAELT.FANTAL_LAES - 2 ^= INDV_TRAIL.FINDV    
+            THEN DO;                                                    
+               PUT SKIP LIST ('BE24600');                     /*ÅR-RET*/
+               ABENDTXT =                                               
+                     '250 ANTAL LÆSTE AFVIGER FRA ANTAL FRA TRAILEREN'; 
+               CALL ABEND_MODUL('BE24600');                  /*ÅR-RET*/ 
+            END;                                                        
+         END;                                                           
+         ELSE DO;                                                       
+            ABENDTXT                                                    
+            = '251 BE24600 INGEN TRAILER RECORD FUNDET';      /*ÅR-RET*/
+            PUT SKIP LIST(ABENDTXT);                                    
+            CALL ABEND_MODUL('BE24600');                      /*ÅR-RET*/
+         END;                                                           
+                                                                        
+ END KONTROLTÆLLER;                                                     
+ /*********************************************************************/
+ /*      BEHANDLING                                                   */
+ /*********************************************************************/
+ BEHANDLING: PROC;                                                      
+                                                                        
+                                                                        
+   SK_TEGN = 5;                                                         
+   CALL LÆS_INPUTFIL;                                                   
+   UDDATA = '';                                                         
+   /*CALL TEST_VIS_PLACERING;*/                                         
+   DO WHILE(EOF_BE2460I = NEJ);                               /*ÅR-RET*/
+      INDV_0135_OPTAELT.FANTAL_LAES = INDV_0135_OPTAELT.FANTAL_LAES + 1;
+      I = 2;                                                            
+      HJ_POS = 0;                                                       
+      IND_POS = 0;                                                      
+      AFBRYD = NEJ;                                                     
+      BITTAB(*) = '0'B;                                                 
+      INDV_0135.STAT(*) = '0'B;                                         
+      SELECT (INDIVID.INDVNR);                                          
+         WHEN('0001') /* HEADER */                                      
+          DO;                                                           
+            CALL DAN_HEADER_INDV0135;                                   
+          END;                                                          
+        WHEN('0135')                                                    
+          DO;                                                           
+             CALL BEHANDL_DATA;                                         
+             IF AFBRYD = NEJ                                            
+             THEN                                                       
+               DO;                                                      
+                 INDV_0135.STAT(*) = BITTAB(*); /*EBD 07-08-2020*/      
+                 CALL DAN_INDIVID_TIL_DB2_LOAD;                         
+                 WRITE FILE (BE2460O) FROM (DB2_UDDATA);      /*ÅR-RET*/
+                 UDDATA = ' ';                                          
+                 INDV_0135_OPTAELT.FANTAL_SKRIV =                       
+                                  INDV_0135_OPTAELT.FANTAL_SKRIV + 1;   
+               END;                                                     
+          END;                                                          
+        WHEN('0999') /* TRAILER */                                      
+          DO;                                                           
+            TRAILER_SW = JA;                                            
+          END;                                                          
+        OTHER  /* FEJL */                                               
+          DO;                                                           
+             PUT SKIP LIST('FEJL I 0135 INPUTDATA I RECORDNR: ',        
+                           INDV_0135_OPTAELT.FANTAL_LAES);              
+             ABENDTXT =                                                 
+                '250 FEJL I 0135 INPUTDATA';                            
+             CALL ABEND_MODUL('BE24600');                     /*ÅR-RET*/
+          END;                                                          
+      END; /*SELECT INDIVIDNR */                                        
+      CALL LÆS_INPUTFIL;                                                
+   END;                                                                 
+                                                                        
+ END BEHANDLING;                                                        
+ /*********************************************************************/
+ /*      DAN INDIVID TIL DB2 LOAD                                     */
+ /*********************************************************************/
+ DAN_INDIVID_TIL_DB2_LOAD: PROC;                                        
+                                                                        
+                                                                        
+     DB2_INDV_0135 = '';                                                
+     CALL DAN_DUMMY_ID;                                                 
+     IF DUMMY_ID_DANNET = 'J'                                           
+     THEN                                                               
+       DO;                                                              
+          DB2_INDV_0135.DUMMY_ID = WK_DUMMY_ID;                         
+          DB2_INDV_0135.INDKAAR  = WK_INDKAAR;                          
+          DB2_INDV_0135.KOERNR   = WK_KOERNR;                           
+          DB2_INDV_0135.KOERDTO  = WK_KOERDTO;                          
+          DB2_INDV_0135.PNR      = INDV_0135.PNR;                       
+          DB2_INDV_0135.REGISTMP = INDV_0135.REGISTMP;                  
+          DB2_INDV_0135.NYTPNR   = INDV_0135.NYTPNR;                    
+          IF INDV_0135.STAT(5) = '1'B      /* EBD 6 -> 5 */             
+          THEN                                                          
+            DB2_INDV_0135.OMPLSTATUSKOD = INDV_0135.OMPLSTATUSKOD;      
+          ELSE                                                          
+            DB2_INDV_0135.OMPLSTATUSKOD_NULL = '?';                     
+          IF INDV_0135.STAT(6) = '1'B      /* EBD 7 -> 6 */             
+          THEN                                                          
+            DB2_INDV_0135.OMPLDTO = KONV_CH8_DB2DATE(INDV_0135.OMPLDTO);
+          ELSE                                                          
+            DB2_INDV_0135.OMPLDTO_NULL = '?';                           
+          IF INDV_0135.STAT(7) = '1'B      /* EBD 8 -> 7 */             
+          THEN                                                          
+            DB2_INDV_0135.OMPLARTKOD = INDV_0135.OMPLARTKOD;            
+          ELSE                                                          
+            DB2_INDV_0135.OMPLARTKOD_NULL = '?';                        
+          DB2_INDV_0135.INSERT_TS = KTIMESTAMP;                         
+          DB2_INDV_0135.INSERT_AF = PROGRAM_1;                          
+       END;                                                             
+                                                                        
+ END DAN_INDIVID_TIL_DB2_LOAD;                                          
+ /*********************************************************************/
+ /*      LÆSE INPUT FIL                                               */
+ /*********************************************************************/
+ LÆS_INPUTFIL: PROC;                                                    
+   READ FILE (BE2460I) INTO (INPUTFIL);                       /*ÅR-RET*/
+   INPUTFIL_IND = INPUTFIL;                                             
+   TAB_SIZE     = LENGTH(INPUTFIL);                                     
+ END LÆS_INPUTFIL;                                                      
+ /*********************************************************************/
+ /*      BEHANDLING                                                   */
+ /*********************************************************************/
+ DAN_HEADER_INDV0135: PROC;                                             
+ DCL HJ_KØRSELSNR BIN FIXED (15);                                       
+                                                                        
+     IF INDV_HEAD.INDKAAR ^= INDKOMSTÅR_FIRECIF_CHAR                    
+     THEN                                                               
+        DO;                                                             
+          PUT SKIP LIST ('BE24600');                          /*ÅR-RET*/
+          ABENDTXT = '250 FORKERT INDKOMSTÅR I HEADER';                 
+          CALL ABEND_MODUL('BE24600');                        /*ÅR-RET*/
+        END;                                                            
+                                                                        
+     IF VERIFY (INDV_HEAD.KOERNR,TAL) ^= 0                              
+     THEN                                                               
+        DO;                                                             
+          PUT SKIP LIST ('BE24600');                          /*ÅR-RET*/
+          ABENDTXT = '250 KØRSELSNR MANGLER I HEADER';                  
+          CALL ABEND_MODUL('BE24600');                        /*ÅR-RET*/
+        END;                                                            
+                                                                        
+     ZS380PARM.RETURKODE  = 0;                                          
+     ZS380PARM.FUNKTION   = 'VALIDATO';                                 
+     ZS380PARM.VALIDERING = 'J';                                        
+     ZS380PARM3.DATO1     = INDV_HEAD.KOERDTOD;                         
+                                                                        
+     CALL ZS38000(ZS380PARM.FUNKTION,                                   
+                  ZS380PARM.VALIDERING,                                 
+                  ZS380PARM.PARM,                                       
+                  ZS380PARM.RETURKODE);                                 
+                                                                        
+     IF ZS380PARM.RETURKODE > 0                                         
+     THEN                                                               
+        DO;                                                             
+          PUT SKIP LIST ('BE24600');                          /*ÅR-RET*/
+          ABENDTXT = '250 KØRESLSDATO MANGLER I HEADER';                
+          CALL ABEND_MODUL('BE24600');                        /*ÅR-RET*/
+        END;                                                            
+                                                                        
+     CALL DRIFTSTYR_KONTROL(135);                                       
+                                                                        
+     WK_INDKAAR = KONV_CH4_BF15(INDV_HEAD.INDKAAR);                     
+     WK_KOERNR  = KONV_CH3_BF15(INDV_HEAD.KOERNR);                      
+                                                                        
+     IF (MAX_KØRSELSNR = WK_KOERNR)                                     
+     THEN                                                               
+       DO;                                                              
+           IF PARM_FUNKTION = 'GENSKRIV'                                
+           THEN                                                         
+             DO;                                                        
+                 CALL SLET_BE90200T(WK_INDKAAR,WK_KOERNR);              
+                 CALL OPDAT_BE90000T(WK_INDKAAR,WK_KOERNR,135);         
+             END;                                                       
+           ELSE                                                         
+             DO;                                                        
+               ABENDTXT =                                               
+              '264 KØRSELSNR. '!! INDV_HEAD.KOERNR !!' ER KØRT';        
+               CALL ABEND_MODUL('BE24600');                   /*ÅR-RET*/
+             END;                                                       
+      END;                                                              
+                                                                        
+     EXEC SQL SELECT KOERNR                                             
+         INTO :HJ_KØRSELSNR                                             
+         FROM  BE90200T                                                 
+         WHERE INDKAAR = :WK_INDKAAR                                    
+         AND   KOERNR  = :WK_KOERNR                                     
+     FETCH FIRST ROWS ONLY                                              
+     ;                                                                  
+                                                                        
+     SELECT (SQLCODE);                                                  
+       WHEN (0)                                                         
+          DO;                                                           
+               ABENDTXT =                                               
+            '264 KØRSELSNR. '!! INDV_HEAD.KOERNR !!' ER KØRT';          
+             CALL ABEND_MODUL('BE24600');                     /*ÅR-RET*/
+          END;                                                          
+       WHEN (100)                                                       
+         DO;                                                            
+           HJ_KØRSELSNR = 0;                                            
+           CALL OPRET_BE90000T(135);                                    
+         END;                                                           
+       OTHER                                                            
+         DO;                                                            
+           FEJLTEKST=' 260 FEJL I SELECT Koerne på BE90200T SQLCODE:'   
+                     !! SQLCODE;                                        
+           CALL sql_fejl;                                               
+         END;                                                           
+     END;                                                               
+                                                                        
+     INDV_0135_HEADER = INDV_HEAD;                                      
+     HEADER = INDV_HEAD, BY NAME;                                       
+     WK_INDKAAR = KONV_CH4_BF15(INDV_HEAD.INDKAAR);                     
+     WK_KOERNR  = KONV_CH3_BF15(INDV_HEAD.KOERNR);                      
+     WK_KOERDTO = KONV_CH8_DB2DATE(INDV_HEAD.KOERDTOD);                 
+                                                                        
+     UDDATA = ' ';                                                      
+     HEADER = '';                                                       
+ END DAN_HEADER_INDV0135;                                               
+ /*********************************************************************/
+ /*      BEHANDLING  AF DATA                                          */
+ /*********************************************************************/
+ BEHANDL_DATA: PROC;                                                    
+                                                                        
+   DO WHILE(AFBRYD=NEJ & (HJ_POS < (TAB_SIZE+1)) &                      
+            I < (MAX_ANT_FELTER+1));                                    
+                                                                        
+      HJ_FELTNR = PLACERING_BASED.FELTNR(I);                            
+      FELTBIT = '0'B;                                                   
+      OUTPUT_TXT = DAN_STRENG(HJ_POS,HJ_FELTNR);                        
+      IF PLACERING_BASED(I).FELTNR > MAX_ANT_FELTER THEN                
+         ;                                                              
+      ELSE DO;                                                          
+         HJ_FELTNR = PLACERING_BASED(I).FELTNR;                         
+         IF IND_POS < (TAB_SIZE + 1) THEN DO;                           
+            /* SÆTTER AFBRYD OP TIL '1'B NÅR DER ER FEJL */             
+            AFBRYD = KONVERTER_OG_INDSAET_FELT(OUTPUT_TXT,HJ_FELTNR,    
+                                         FELT_POS_START,FELT_POS_SLUT); 
+            IF AFBRYD=JA THEN                                           
+            PUT DATA(OUTPUT_TXT,HJ_FELTNR,FELT_POS_START,FELT_POS_SLUT);
+            I = I + 1;                                                  
+         END;                                                           
+      END;                                                              
+   END;                                                                 
+ END BEHANDL_DATA;                                                      
+ /*********************************************************************/
+ /*      SLET_BE90200T                                                */
+ /*********************************************************************/
+ SLET_BE90200T: PROC(T_INDKAAR,T_KOERNR);                               
+ DCL T_INDKAAR BIN FIXED (15);                                          
+ DCL T_KOERNR  BIN FIXED (15);                                          
+                                                                        
+       EXEC SQL DELETE                                                  
+         FROM  BE90200T                                                 
+         WHERE INDKAAR = :T_INDKAAR                                     
+         AND   KOERNR  = :T_KOERNR                                      
+     ;                                                                  
+                                                                        
+     SELECT (SQLCODE);                                                  
+       WHEN (0)                                                         
+          DO;                                                           
+             put skip list('antal slettet rækker:',SQLERRD(3));         
+             EXEC SQL COMMIT;                                           
+          END;                                                          
+       WHEN(100);                                                       
+       OTHER                                                            
+         DO;                                                            
+           FEJLTEKST='266 FEJL VED DEL på BE90200T SQLCODE: '           
+                     !! SQLCODE;                                        
+           CALL sql_fejl;                                               
+         END;                                                           
+     END;                                                               
+ END SLET_BE90200T;                                                     
+                                                                        
+ /*********************************************************************/
+ /*      AFSLUT                                                       */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+    CLOSE FILE(BE2460I);                                      /*ÅR-RET*/
+    CLOSE FILE(BE2460O);                                      /*ÅR-RET*/
+    CLOSE FILE(BE2469O);                                      /*ÅR-RET*/
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /* SKRIV FEJL TEXT                                                   */
+ /*********************************************************************/
+ SKRIV_FEJL_TEXT: PROC(NR,FEJLTYPE,FELTTYPE,START_IDX,SLUT_IDX,FELT);   
+    DECLARE NR        BINARY FIXED(15);                                 
+    DECLARE FEJLTYPE  BINARY FIXED(15);                                 
+    DECLARE FELTTYPE  BINARY FIXED(15);                                 
+    DECLARE START_IDX BINARY FIXED(15);                                 
+    DECLARE SLUT_IDX  BINARY FIXED(15);                                 
+    DECLARE FELT      CHAR(50);                                         
+                                                                        
+    SELECT(FEJLTYPE);                                                   
+      WHEN (1013) DO;                                                   
+              PUT SKIP LIST('*********FEJL************* ' !! NR);       
+              PUT SKIP LIST('DER ER FOR MANGE KARAKTERER');             
+              PUT SKIP LIST('PNR         ' !! INDV_0135.PNR);           
+              PUT SKIP LIST('0135_REC_NR ' !! FANTAL_LAES);             
+              PUT SKIP LIST('I ' !! I);                                 
+              PUT SKIP LIST('FELTTYPE  ' !! FELTTYPE);                  
+              PUT SKIP LIST('START_IDX ' !! START_IDX);                 
+              PUT SKIP LIST('SLUT_IDX ' !! SLUT_IDX);                   
+              PUT SKIP LIST('LÆNGDE  ' !! (SLUT_IDX - START_IDX + 1));  
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!           
+                             TYPE_CHAR_DEF(FELTTYPE).LGD);              
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!       
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+      WHEN (1014) DO;                                                   
+              PUT SKIP LIST('*********FEJL************* ' !! NR);       
+              PUT SKIP LIST('PNR         ' !! INDV_0135.PNR);           
+              PUT SKIP LIST('0135_REC_NR' !! FANTAL_LAES);              
+              PUT SKIP LIST('FELTTYPE  ' !! FELTTYPE);                  
+              PUT SKIP LIST('I ' !! I);                                 
+              PUT SKIP LIST('INDV_133_REC_NR ER FOR STORT ' !! FELT);   
+              PUT SKIP LIST('FELTTYPE            ' !!                   
+                             FELTTYPE_BESKRIVELSE(FELTTYPE));           
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!           
+                             TYPE_CHAR_DEF(FELTTYPE).LGD);              
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!       
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+      OTHERWISE   DO;                                                   
+              PUT SKIP LIST('*********FEJL************* ' !! NR);       
+              PUT SKIP LIST('PNR         ' !! INDV_0135.PNR);           
+              PUT SKIP LIST('0135_REC_NR' !! FANTAL_LAES);              
+              PUT SKIP LIST('FELTTYPE  ' !! FELTTYPE);                  
+              PUT SKIP LIST('I ' !! I);                                 
+              PUT SKIP LIST('UKENDT FELTTYPE ' !! FELTTYPE);            
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!           
+                             TYPE_CHAR_DEF(FELTTYPE).LGD);              
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!       
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+    END;                                                                
+                                                                        
+ END SKRIV_FEJL_TEXT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* TEST VIS PLACERING                                                */
+ /*********************************************************************/
+   TEST_VIS_PLACERING: PROC;                                            
+     DCL I BINARY FIXED(15);                                            
+         PUT SKIP LIST('TEST_VIS_PLACERING');                           
+      I = 1;                                                            
+      PUT SKIP LIST('****************');                                
+      PUT SKIP LIST('TAB_SIZE=' !! TAB_SIZE);                           
+      DO WHILE((I < (MAX_ANT_FELTER + 1)));                             
+         PUT SKIP LIST('****************');                             
+         PUT SKIP LIST('I=      ' !! I);                                
+         PUT SKIP LIST('FELTNR  ' !! PLACERING_BASED(I).FELTNR);        
+         PUT SKIP LIST('ADRESSE ' !! PLACERING_BASED(I).ADRESSE);       
+         PUT SKIP LIST('TYPE    ' !! PLACERING_BASED(I).TYPE);          
+         I = I + 1;                                                     
+      END;                                                              
+   END TEST_VIS_PLACERING;                                              
+ /*********************************************************************/
+ /* DIVERSE MACROER                                                   */
+ /*********************************************************************/
+ KONV_CH8_DB2DATE: PROC (CHAR8)                                         
+                             RETURNS (CHAR (10));                       
+ DCL     CHAR8      CHAR (08);                                          
+ DCL     CHAR10     CHAR (10);                                          
+                                                                        
+         IF CHAR8 = ''                                                  
+         THEN                                                           
+           DO;                                                          
+              CHAR10 = '';                                              
+           END;                                                         
+         ELSE                                                           
+           DO;                                                          
+              CHAR10 = SUBSTR(CHAR8,1,4) !! '-' !!                      
+                       SUBSTR(CHAR8,5,2) !! '-' !!                      
+                       SUBSTR(CHAR8,7,2);                               
+           END;                                                         
+         RETURN (CHAR10);                                               
+                                                                        
+ END KONV_CH8_DB2DATE;                                                  
+ /*********************************************************************/
+ /*      SKRIV TOTALER                                                */
+ /*********************************************************************/
+ SKRIV_TOTALER: PROC;                                                   
+                                                                        
+         PRINT89 = '';                                                  
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'INDV 135 HEADER:'                              
+                      !! INDV_0135_HEADER.INDVNR !! ' '                 
+                      !! INDV_0135_HEADER.INDKAAR !! ' '                
+                      !! INDV_0135_HEADER.KOERNR !! ' '                 
+                      !! INDV_0135_HEADER.FASE1KOERNR !! ' '            
+                      !! INDV_0135_HEADER.KOERDTOD;                     
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL LÆSTE INCL. HEADER/TRAILER INDV. 0135.:';
+         LIN99.ANTAL  = INDV_0135_OPTAELT.FANTAL_LAES;                  
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL SKREVNE DB2 LOADFIL 0135  ............:';
+         LIN99.ANTAL  = INDV_0135_OPTAELT.FANTAL_SKRIV;                 
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL SKREVNE FEJL INDV. 0135...............:';
+         LIN99.ANTAL  = INDV_0135_OPTAELT.FANTAL_FEJL;                  
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         PRINT89 = '';                                                  
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+         CALL ZZ20300 (' ','99'); /* luk print */                       
+                                                                        
+ END SKRIV_TOTALER;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDTXT = FEJLTEKST;                                          
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ %INCLUDE ZM90002M;;             /* FJERNE ALT ANDET END TAL I FELTET */
+ %INCLUDE BE90201M;              /* DAN DUMMY_ID                      */
+ %INCLUDE BE90004M;              /* DRIFTSSTYRING                     */
+ %INCLUDE BE24401M;              /* DAN STRENG              *//*ÅR-RET*/
+ %INCLUDE BE24606M;              /*KONVERTER OG INDSAET FELT*//*ÅR-RET*/
+ %INCLUDE BE24403M;              /* TJEK GRÆNSE             *//*ÅR-RET*/
+ %INCLUDE BE24404M;              /* ABENDMODUL              *//*ÅR-RET*/
+ %INCLUDE BE24405M;              /* KONVERTER FELTER        *//*ÅR-RET*/
+                                                                        
+ END BE24600;                                                           

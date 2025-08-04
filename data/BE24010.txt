@@ -1,0 +1,227 @@
+ BE24010: PROC(COM_PTR) OPTIONS(MAIN,REENTRANT) REORDER;                
+ /********************************************************************* 
+ * PROJEKT:     EVS SLUT 2024.                                         *
+ * PROGRAMNAVN: BE24010. (CICSUDGAVE AF BATCHPROGRAM BE24110).         *
+ * PROGRAMTYPE: CICS.                                                  *
+ * FUNKTION:    LINKMODUL TIL SYNKRON (DIREKTE) BEHANDLING AF MQ-DATA. *
+ * PGMFORLØB:   1.VALIDER NØGLEFELTER.                                 *
+ *              2.INIT STRUKTURER.                                     *
+ *              3.TILGÅ EJENDOMS-/PERSONTABELLEN.                      *
+ *              4.RETURNER SVAR.                                       *
+ * INDDATA:     UDFYLDTE NØGLEFELTER FRA HOVEDSTYRING BQ11000.         *
+ * RETURDATA:   SQLCODE    - SQL RETUR KODE.                           *
+ *              RETURKODE  - 0:OK 1:TOM RÆKKE -1:FEJL.                 *
+ *              RETURTEKST - UDDYBENDE TEKST TIL RETURKODE.            *
+ * TABELLER:    BE20000T   - EVS EJENDOMSTABEL                         *
+ *              BE30000T   - EVS EJERSKABSTABEL                        *
+ * KONSTRUKTØR: Per Jensen, PEN                            17.11.2023  *
+ ***********************************************************************
+ * ÆNDRINGSLOG: Per Jensen, PEN                            17.11.2023  *
+ *              Ny version ift. BF17 - 2024 =>                         *
+ *              Kun den tidligere funktion 17 er medtaget - og         *
+ *                                                                      
+ **********************************************************************/
+                                                                        
+ DCL     COPYRIGHT       CHAR (30) INIT ('(C) KMD A/S 2003');           
+                                                                        
+ DCL     DEFAULTÅR       BIN FIXED (15) INIT (2024); /*RUL Defaultår */ 
+ DCL     WK_DINDKAAR     BIN FIXED (15);                                
+                                                                        
+ /**********************************************************************
+ * DECLARE AF STRUKTUR                                                 *
+ **********************************************************************/
+                                                                        
+ DCL     COM_PTR            PTR;                                        
+ DCL     DATA_PTR           PTR;                                        
+                                                                        
+ DCL     1 KOM_AREAL        BASED (COM_PTR),                            
+         %INCLUDE BE24013N;                                             
+                                                                        
+ DCL     1 EVS_EJD,                    /* EVS EJENDOMSTABEL          */ 
+         %INCLUDE BE20000N;;                                            
+ DCL     1 EVS_ESK,                    /* EVS EJERSKABSTABELEN       */ 
+         %INCLUDE BE30001N;;                                            
+                                                                        
+ DCL     1 EJENDOMTAB,                                                  
+         %INCLUDE BE24100N;;                                            
+ DCL     1 PERSONTAB,                                                   
+         %INCLUDE BE24200N;;                                            
+                                                                        
+ DCL     1 INDK_EJEND,                 /* INDIKATOR EJENDOMS OPLYSN. */ 
+         %INCLUDE BE24005N;;                                            
+ DCL     1 INDK_EJERSK,                /* INDIKATOR EJERSKAB OPLYSN. */ 
+         %INCLUDE BE24006N;;                                            
+                                                                        
+ /* Bruges i ZSRØR service BJ36102                                    */
+ DCL     TS_TAKSATION_PTR POINTER;                                      
+                                                                        
+ DCL     1 TS_TAKSATION,                   /* T/S AREAL TAKSATIONER */  
+         %INCLUDE BE24016N;                                             
+                                                                        
+         TS_TAKSATION_PTR = ADDR(TS_TAKSATION);                         
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR, NULL, STG, SUBSTR, CSTG, MULTIPLY) BUILTIN;             
+                                                                        
+ %INCLUDE ZS38002N;                                                     
+                                                                        
+ /**********************************************************************
+ * DECLARE AF DB2 TABELLER                                             *
+ **********************************************************************/
+                                                                        
+    EXEC SQL INCLUDE SQLCA;          /*   SQL KOMMUNIKATIONSAREAL    */ 
+    EXEC SQL INCLUDE BE20000T;       /*   EVS EJENDOMTABEL           */ 
+    EXEC SQL INCLUDE BE30000T;       /*   EVS ejerskabsTABEL         */ 
+                                                                        
+ /**********************************************************************
+ * DECLARE AF DIVERSE HJÆLPEFELTER                                     *
+ **********************************************************************/
+                                                                        
+ DCL     RETURTEKST_EJD        CHAR (35) VAR  INIT(' ');                
+ DCL     RETURTEKST_PER        CHAR (35) VAR  INIT(' ');                
+ DCL     RETURTEKST_RES        CHAR (35) VAR  INIT(' ');                
+ DCL     TS_SKRIV_EVS_OK       BIT  (1);                                
+ DCL     GEM_EEJDNR            BIN FIXED(31)  INIT (0);                 
+ DCL     GEM_UDSKRDTO          CHAR (10)      INIT (' ');               
+ DCL     PUTSKIP               BIT  (1)       INIT ('0'B);              
+ DCL     JA                    BIT(1)         INIT('1'B);               
+ DCL     NEJ                   BIT(1)         INIT('0'B);               
+                                                                        
+ DCL     SUM_INDK              BIN FIXED(15);                           
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+         %INCLUDE ZS37800M;                                             
+                                                                        
+ /**********************************************************************
+ * PROCES                                                              *
+ **********************************************************************/
+      IF PUTSKIP THEN PUT SKIP LIST('***** BE24010 START *****');       
+      KOM_AREAL.RETURKODE = 0;                                          
+      KOM_AREAL.SQLKODE   = 0;                                          
+                                                                        
+      CALL VALIDER_INPUT;                                               
+      CALL HENT_TAKSATIONER;                                            
+                                                                        
+      IF PUTSKIP THEN PUT SKIP LIST('***** BE24010 SLUT  *****');       
+      EXEC CICS RETURN;                                                 
+                                                                        
+ /**********************************************************************
+ * Her valideres input                                                 *
+ **********************************************************************/
+ VALIDER_INPUT: PROC;                                                   
+                                                                        
+       IF KOM_AREAL.DINDKAAR > 0 THEN                                   
+          WK_DINDKAAR = KOM_AREAL.DINDKAAR;                             
+       ELSE                                                             
+          WK_DINDKAAR = DEFAULTÅR;                                      
+                                                                        
+       IF WK_DINDKAAR < 2024 THEN                                       
+         DO;                                                            
+          KOM_AREAL.RETURKODE      = -1;                                
+          RETURTEKST = 'År skal være større eller lig med 2024';        
+          CALL FEJL;                                                    
+       END;                                                             
+                                                                        
+ END VALIDER_INPUT;                                                     
+                                                                        
+ /*********************************************************************/
+ /* OPSÆT_INDKOMSTÅR                                                  */
+ /*********************************************************************/
+ OPSÆT_INDKOMSTÅR:                                                      
+ PROC(DINDKAAR,CFRÅR,DRGNÅRFRA,DRGNÅRTIL);                              
+                                                                        
+ DCL DINDKAAR     BIN FIXED (15);                                       
+ DCL CFRÅR        CHAR      (02);                                       
+ DCL DRGNÅRFRA    CHAR      (10);                                       
+ DCL DRGNÅRTIL    CHAR      (10);                                       
+ DCL HJ_INDKÅR    PIC       '9999';                                     
+                                                                        
+    IF CFRÅR = '02'                /* FREMADFORSKUDT REGNSKABSÅR */     
+    THEN                                                                
+       DO;                                                              
+         HJ_INDKÅR = DINDKAAR;                                          
+         DRGNÅRFRA = HJ_INDKÅR !! '-02-01';                             
+                                                                        
+         HJ_INDKÅR = DINDKAAR + 1;                                      
+         DRGNÅRTIL = HJ_INDKÅR !! '-01-31';                             
+       END;                                                             
+    ELSE                                                                
+    IF CFRÅR > '02'                /* BAGUDFORSKUDT REGNSKABSÅR */      
+    THEN                                                                
+       DO;                                                              
+         HJ_INDKÅR = DINDKAAR - 1;                                      
+                                                                        
+         DRGNÅRFRA = HJ_INDKÅR !! '-' !! CFRÅR !! '-01';                
+                                                                        
+         HJ_INDKÅR = DINDKAAR;                                          
+                                                                        
+         ZS380PARM.RETURKODE  = 0;                                      
+         ZS380PARM.FUNKTION   = 'NYDATO';                               
+         ZS380PARM.VALIDERING = 'N';                                    
+         ZS380PARM3.DATO1     = HJ_INDKÅR !! CFRÅR !! '01';             
+         ZS380PARM3.ANT_DAGE  = -1;                                     
+                                                                        
+         EXEC CICS LINK                                                 
+                   PROGRAM  ('ZS38002')                                 
+                   COMMAREA (ZS380PARM)                                 
+         ;                                                              
+                                                                        
+         DRGNÅRTIL = SUBSTR (ZS380PARM3.DATO2,1,4) !! '-' !!            
+                     SUBSTR (ZS380PARM3.DATO2,5,2) !! '-' !!            
+                     SUBSTR (ZS380PARM3.DATO2,7,2);                     
+       END;                                                             
+    ELSE                           /* KALENDER ÅRET */                  
+       DO;                                                              
+         HJ_INDKÅR = DINDKAAR;                                          
+         DRGNÅRFRA = HJ_INDKÅR !! '-01-01';                             
+         DRGNÅRTIL = HJ_INDKÅR !! '-12-31';                             
+       END;                                                             
+                                                                        
+ END OPSÆT_INDKOMSTÅR;                                                  
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE.                *
+ **********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+      KOM_AREAL.RETURKODE = -1;                                         
+      KOM_AREAL.SQLKODE   = SQLCA.SQLCODE;                              
+                                                                        
+      ZS378FUNK   = '01';                                 /* KUN LOG */ 
+      ZS378TYPE   = 'DB2';                                              
+      ZS378MODUL  = 'BE24010';                                          
+      ZS378ROLLB  = 'JA';                                               
+      ZS378SQLCA  = ADDR(SQLCA);                                        
+      ZS378TEKST  = RETURTEKST;                                         
+                                                                        
+      %INCLUDE ZS37802M;                                                
+                                                                        
+      EXEC CICS RETURN;                                                 
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE.                *
+ **********************************************************************/
+ FEJL: PROC;                                                            
+                                                                        
+      KOM_AREAL.RETURKODE = -1;                                         
+      KOM_AREAL.SQLKODE   = 0;                                          
+                                                                        
+      EXEC CICS RETURN;                                                 
+                                                                        
+ END FEJL;                                                              
+                                                                        
+ /**********************************************************************
+ * DIVERSE MAKROER.                                                    *
+ **********************************************************************/
+                                                                        
+    %INCLUDE ZM70002M;              /*     TS_KØ BEHANDLING          */ 
+    %INCLUDE BE24013M;              /*     BEHANDL FUNKTIONERNE 16,17*/ 
+                                                                        
+ END BE24010;                                                           

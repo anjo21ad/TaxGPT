@@ -1,0 +1,285 @@
+ BH97700: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     AJOURFØR EVS FORSKUD 2005 MED UDLADT LOAD OPLYSNING.   *
+ * PROGRAMNAVN: BH97700.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET AJOURFØR EVS FORSKUD 2005 MED UDLADTE       *
+ *              LOAD OPLYSNINGER                                       *
+ * INPUT:       BH95100D - LOAD GRUNDLAG TIL PERSONTABEL               *
+ * IND/UDDATA:  BN00500T - EVS EJENDOMSTABEL.                          *
+ *              BN00600T - EVS PERSONTABEL.                            *
+ * UDDATA:      BH97701Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: BO SCHMIDT         OKTOBER 2007                        *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2007');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE BN00500T;        /* EVS EJENDOMSTABELLEN */   
+         EXEC SQL INCLUDE BN00600T;        /* EVS PERSONTABELLEN   */   
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+         %INCLUDE BN89812N;                                             
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS38100        ENTRY OPTIONS (INTER ASM);    /* TIMESTAMP    */
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+                                                                        
+ DCL     BH951I FILE RECORD INPUT;      /* LOAD-GRUNDLAG TIL EVS     */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF LOAD-GRUNDLAG TIL EVS                                  */
+ /*********************************************************************/
+                                                                        
+ DCL     1 BH951,                                                       
+          %INCLUDE BH95100N;;                                           
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     EOF_BH951       BIT       (1);                                 
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     FEJLTEKST       CHAR (20) VAR INIT (' ');                      
+ DCL     ABENDMEDD       CHAR (56) INIT (' ');                          
+                                                                        
+ DCL     ANTAL_BEHANDEL  BIN FIXED (15);                                
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANTLÆS_BH951    BIN FIXED (31) INIT (0);                       
+ DCL     ANTSKRIV_PERSON BIN FIXED (31) INIT (0);                       
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                CALL PLIDUMP  ('SBHO','MODUL BH97700');                 
+            END;                                                        
+                                                                        
+         ON ENDFILE (BH951I)                                            
+            EOF_BH951 = JA;                                             
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+         EOF_BH951 = NEJ;                                               
+         OPEN FILE (BH951I) TITLE ('BH95100I');                         
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH97701Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+         ANTAL_BEHANDEL = 0;                                            
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         READ FILE (BH951I) INTO (BH951);                               
+                                                                        
+         IF EOF_BH951 = NEJ                                             
+         THEN                                                           
+            ANTLÆS_BH951 = ANTLÆS_BH951 + 1;                            
+                                                                        
+         DO WHILE (EOF_BH951 = NEJ);                                    
+                                                                        
+            CALL BEHANDL;                                               
+                                                                        
+            READ FILE (BH951I) INTO (BH951);                            
+                                                                        
+            IF EOF_BH951 = NEJ                                          
+            THEN                                                        
+               ANTLÆS_BH951 = ANTLÆS_BH951 + 1;                         
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+ /*********************************************************************/
+ /* BEHANDL LOAD OPLYSNINGER                                          */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+         DB2_SW.BBERGRL_015ANV_SW = 0;                                  
+         DB2_SW.BBERGRL_02ANV_SW  = 0;                                  
+         DB2_SW.BBERGRL_AKT_SW    = 0;                                  
+                                                                        
+         PERSONEJENDOMSOPL.PERSONNUMMER   = BH951.DCPRN;                
+         PERSONEJENDOMSOPL.DINDKAAR       = BH951.DINDKAAR;             
+         PERSONEJENDOMSOPL.EKOMNR         = BH951.EKOMNR;               
+         PERSONEJENDOMSOPL.EEJDNR         = BH951.EEJDNR;               
+         PERSONEJENDOMSOPL.BBERGRL_015ANV = BH951.BBERGRL_015ANV;       
+         PERSONEJENDOMSOPL.BBERGRL_02ANV  = BH951.BBERGRL_02ANV;        
+         PERSONEJENDOMSOPL.BBERGRL_AKT    = BH951.BBERGRL_AKT;          
+                                                                        
+                                                                        
+         IF BH951.B_NULL18 = '?'                                        
+         THEN                                                           
+            DB2_SW.BBERGRL_015ANV_SW = -1;                              
+                                                                        
+         IF BH951.B_NULL19 = '?'                                        
+         THEN                                                           
+            DB2_SW.BBERGRL_02ANV_SW = -1;                               
+                                                                        
+         IF BH951.B_NULL20 = '?'                                        
+         THEN                                                           
+            DB2_SW.BBERGRL_AKT_SW = -1;                                 
+                                                                        
+         IF BH951.B_NULL18 = '?'                                        
+          & BH951.B_NULL19 = '?'                                        
+          & BH951.B_NULL20 = '?'                                        
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         EXEC SQL                                                       
+              UPDATE BN00600T                                           
+                  SET  BBERGRL_015ANV = :                               
+                          PERSONEJENDOMSOPL.BBERGRL_015ANV:             
+                                          DB2_SW.BBERGRL_015ANV_SW      
+                      ,BBERGRL_02ANV  = :                               
+                          PERSONEJENDOMSOPL.BBERGRL_02ANV:              
+                                          DB2_SW.BBERGRL_02ANV_SW       
+                      ,BBERGRL_AKT    = :                               
+                          PERSONEJENDOMSOPL.BBERGRL_AKT:                
+                                          DB2_SW.BBERGRL_AKT_SW         
+                                                                        
+              WHERE  DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR         
+               AND   PERSONNUMMER = :PERSONEJENDOMSOPL.PERSONNUMMER     
+               AND   EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR           
+               AND   EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR           
+         ;                                                              
+                                                                        
+         IF SQLCA.SQLCODE = 0                                           
+         THEN                                                           
+            DO;                                                         
+              ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                    
+                                                                        
+              ANTAL_BEHANDEL = ANTAL_BEHANDEL + 1;                      
+            END;                                                        
+                                                                        
+         ELSE                                                           
+         IF (SQLCA.SQLCODE ^= 0 & SQLCA.SQLCODE ^= 100)                 
+         THEN                                                           
+            DO;                                                         
+               FEJLTEKST  = 'SQLFEJL VED UPDATE';                       
+               ABENDMEDD  = 'BH97700 ** 251 ' !! FEJLTEKST;             
+               CALL SQL_FEJL;                                           
+            END;                                                        
+                                                                        
+         IF ANTAL_BEHANDEL > 10000                                      
+         THEN                                                           
+            DO;                                                         
+              EXEC SQL COMMIT;                                          
+              ANTAL_BEHANDEL = 0;                                       
+            END;                                                        
+                                                                        
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL:                                                              
+                                                                        
+         PROC;                                                          
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         EXEC SQL ROLLBACK;                                             
+                                                                        
+         IF SQLCODE ^= 0                                                
+         THEN                                                           
+            CALL ZS67000 (SQLCA);                                       
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' OPDATER EVS FORSKUD TABEL ' !! 'DATO: '     
+                       !!   UDDATO;                                     
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH97700 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE PÅ B.H95100D . . . . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_BH951;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE PÅ BN00600T. . . . . . . . . . .';  
+         LIN.ANT   = ANTSKRIV_PERSON;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+         CLOSE FILE (BH951I);                                           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ END BH97700;                                                           

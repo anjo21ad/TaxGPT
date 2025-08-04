@@ -1,0 +1,1649 @@
+ BE30100: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ *                                                                     *
+ * PROJEKT:     EVS FORSKUD/SLUT                                       *
+ * PROGRAMNAVN: BE30125.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE AKTIVE OG VALIDE EJENDOMME   *
+ *              FRA SIDSTE EVS FORSKUD                                 *
+ *                                                                     *
+ * INDDATA:     BS01500T - EVS EJENDOM                                 *
+ *              BS01700T - EVS EJERFORHOLD                             *
+ *              BS01800T - BASISRABAT (2024)                           *
+ *              BS01900T - RABATBERETTIGET EJERANDEL                   *
+ *                                                                     *
+ * UDDATA:      BE30100O - UDTRÆK FRA EVS FORSKUD - EXCL. KOMMUNE      *
+ *                         999 (UDENLANDSKE EJENDOMME).                *
+ *              BE30110O - UDTRÆK FRA EVS FORSKUD - K U N  KOMMUNE     *
+ *                         999 (UDENLANDSKE EJENDOMME).                *
+ *              BE30101Y - KONTROLLISTE.                               *
+ *                                                                     *
+ * PROGRAMMØR:  Tina Carstens (TIC), FORSKUD 2025     BF17 02.06.2023. *
+ *              Efter model BH30100                                    *
+ ***********************************************************************
+ * ÆNDRINGSLOG:                                                        *
+ ***********************************************************************
+ * RETTET:      US1549422      JXT,  FORSKUD 2025     BF17 01.11.2023. *
+ * RETTET:      US1549422 CÆGTOPR + UDL EJD efter 20250101             *
+ * RETTET:      US1549418 JXT UDL skal IKKE leveres   BF17 01.12.2023  *
+ * RETTET:      D#2298    JXT UDL skal      leveres   BF17 08.01.2024  *
+ * RETTET:      US1641246 Forsk 2025 ÆA53 JXT/MBS     BF17 16.01.2024  *
+ * RETTET:      Forskud 2025 ÆA58 PEN                 BF17 16.04.2024  *
+ *              CVUR_KAT + COPR_CVUR_KAT tilføjet opslag på BS01700T   *
+ * Forskud 2025 PBR Defekt 2416. Rettet BE30100M           21.05.2024  *
+ * Forskud 2025 PEN tabel/areal rettelser                  23.05.2024  *
+ *              Nye felter i BE30100T                                  *
+ * Forskud 2025 JJJ BE55600M erstatter BE55300M            19.06.2024  *
+ * SLUT 2024    Jan Erik Jensen (Z6XJY)                    28.10.2024  *
+ *              #1888922 Konvertering af udenlandske ejendomsnumre:    *
+ *              * Fikset produktionsfejl med at sidst indlæste record  *
+ *                ikke blev skrevet til output datasettene.            *
+ *              * Implementeret kode i proceduren RET_UDENL_EJDNR til  *
+ *                at konvertere udenlandske ejendomsnumre via kald     *
+ *                til procedurer i makroen BE83000M.                   *
+ *                                                                     *
+ **********************************************************************/
+                                                                        
+         DEFAULT RANGE (*) STATIC;                                      
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2023');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE BS01500T;  /* EVS Ejendom                   */
+         EXEC SQL INCLUDE BS01600T;  /* EVS Ejerrelation              */
+         EXEC SQL INCLUDE BS01700T;  /* EVS Ejerforhold               */
+         EXEC SQL INCLUDE BS01800T;  /* EVS Rabat                     */
+         EXEC SQL INCLUDE BS01900T;  /* EVS Rabatberettiget Ejerandel */
+         EXEC SQL INCLUDE BN03300T;  /* Landekode                     */
+                                                                        
+         EXEC SQL INCLUDE BE83000T;  /* UDL.EJD. MAPNING              */
+         EXEC SQL INCLUDE BE83100T;  /* UDL.EJD. LOGNING              */
+                                                                        
+ DCL     BS01800T_FUNDET                BIT       (01);                 
+ DCL     BS01900T_FUNDET                BIT       (01);                 
+                                                                        
+         /* Indikatorvariable                                         */
+ DCL     BS017_BNYMAN_SW                BIN FIXED (15);                 
+ DCL     BS017_EVSEFTERRABAT_SW         BIN FIXED (15);                 
+ DCL     BS017_RABATEJERANDEL_SW        BIN FIXED (15);                 
+ DCL     BS017_RES_FAKTISKRABAT_SW      BIN FIXED (15);                 
+ DCL     BS018_R24_EJERANDEL_SW         BIN FIXED (15);                 
+ DCL     BS019_RABATEJERANDEL_SW        BIN FIXED (15);                 
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ENTRIES                                                  *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                       /* KST/SSI INFO */
+ DCL     ZS62500         ENTRY OPTIONS(INTER ASM);   /* SKAF JOB INFO */
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*********************************************************************/
+ DCL     SQLFEJL         PIC       '----9';                             
+ DCL     FEJLTEKST       CHAR      (20)    INIT(' ');                   
+                                                                        
+ DCL     ABENDKODE       FIXED     (2)     INIT(5);                     
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL   CHAR      (7)     INIT ('BE30100'),            
+          2 ABENDFILL1   CHAR      (1)     INIT (' '),                  
+          2 ABENDMEDNR   CHAR      (2)     INIT ('**'),                 
+          2 ABENDFILL2   CHAR      (1)     INIT (' '),                  
+          2 ABENDTXT     CHAR      (45);                                
+                                                                        
+ DCL     ABENDRTKODE     FIXED     (1)     INIT (2);                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     AKTUEL_PERSONNUMMER  DEC FIXED (11) INIT(0);                   
+ DCL     AKTUEL_EKOMNR        BIN FIXED (15) INIT(0);                   
+ DCL     AKTUEL_EEJDNR        BIN FIXED (31) INIT(0);                   
+ DCL     AKTUEL_EENHEDLBNR    BIN FIXED (15) INIT(0);                   
+ DCL     AKTUEL_DTILGLD       CHAR      (26) INIT('');                  
+ DCL     DF_TILDATO           CHAR      (26)                            
+                              INIT('9999-12-31-23.59.59.999999');       
+                                                                        
+ DCL     HJ_DCPRN       CHAR (10);                                      
+ DCL     HJ_DCPRN_PIC   PIC  '(10)9' BASED(ADDR(HJ_DCPRN));             
+ DCL     HJ_EKOMNR      CHAR (03);                                      
+ DCL     HJ_EEJDNR      CHAR (06);                                      
+ DCL     EKOMEEJD_NR    CHAR (09);                                      
+ DCL     OK             CHAR (01)        INIT('J');                     
+ DCL     SW_FDAGEJ_NUL  BIT(01)    INIT('0'B);                          
+ DCL     FETCH_SQLKODE  FIXED BIN(15)    INIT(0);                       
+                                                                        
+ DCL     HJ_SLUTÅR_PL1  BIN FIXED (15);                                 
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     HJ_DATOEN      PIC '(8)9';                                     
+ DCL     1 HJ_DATO      BASED(ADDR(HJ_DATOEN)),                         
+           2 AAR        PIC  '9999',                                    
+           2 MD         PIC  '99',                                      
+           2 DG         PIC  '99';                                      
+                                                                        
+ DCL     1 BE55600M,                             /*#01*/                
+           %INCLUDE BE55600M;                    /* DATO OG ÅR MACRO */ 
+                                                                        
+ DCL     TFLAG           BIT(1) INIT('0'B);                             
+                                                                        
+ DCL     ZS625P1         CHAR (08); /* Jobnavn */                       
+ DCL     ZS625P2         CHAR (16); /* Job step navn/procedure */       
+ DCL     ZS625P3         CHAR (08); /* Job step program navn */         
+ DCL     ZS625P4         CHAR (04); /* Account info pointer */          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BE3010O FILE OUTPUT RECORD; /* EVS Udtræk excl. kommune 999 */ 
+                                                                        
+ /* US1549418 JXT  */                                                   
+ /* D#2298 aktiver */                                                   
+ DCL     BE3011O FILE OUTPUT RECORD;  //EVS Udtræk kun   kommune 999    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_FORS,                                                 
+           %INCLUDE BE30100N;;                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANTLÆS_PERSON     BIN FIXED (31) INIT(0);/*LÆSTE PERSONTABEL */
+ DCL     ANTLÆS_PERSON_ØVR BIN FIXED (31) INIT(0);/*ØVRIGE            */
+ DCL     ANTLÆS_PERSON_UDL BIN FIXED (31) INIT(0);/*UDLAND            */
+ DCL     ANTLÆS_BS018_ØVR  BIN FIXED (31) INIT(0);/*BASISRABAT        */
+ DCL     ANTLÆS_BS018_UDL  BIN FIXED (31) INIT(0);/*BASISRABAT        */
+ DCL     ANTLÆS_BS019_ØVR  BIN FIXED (31) INIT(0);/*RABATBER.EJERANDEL*/
+ DCL     ANTLÆS_BS019_UDL  BIN FIXED (31) INIT(0);/*RABATBER.EJERANDEL*/
+ DCL     ANTSKRIV_PERSON   BIN FIXED (31) INIT(0);/*SKREVET UDTRÆKSFIL*/
+ DCL     ANTSKRIV_ØVR      BIN FIXED (31) INIT(0);/*SKREVET EXCL UDL. */
+ DCL     ANTSKRIV_UDL      BIN FIXED (31) INIT(0);/*SKREVET KUN  UDL. */
+ DCL     ANTCEJBEVS_9      BIN FIXED (31) INIT(0);/*CEJBEVS=9(SLETTET)*/
+ DCL     ANTCSLET_1        BIN FIXED (31) INIT(0);/*CSLET=1(SLETTET)  */
+ DCL     ANTEJENDOM_0      BIN FIXED (31) INIT(0);/*EEJDNR =0         */
+ DCL     ANTEJENDOM        BIN FIXED (31) INIT(0);/*HJÆLPE FELT       */
+ DCL     ANTEJERFH_EJ_SKR  BIN FIXED (31) INIT(0);/*EJERFH. IKKE SKR. */
+ DCL     ANTDTILGLD_EJ_MAX BIN FIXED (31) INIT(0);/*DTIGLD IKKE MAX   */
+ DCL     ANTUDL_20250101   BIN FIXED (31) INIT(0);/*UDL EFTER 01012025*/
+ DCL     TV_SUMMERET      BIN FIXED (31) INIT(0);/*ANTAL SUMMERET     */
+ DCL     TV_IKKE_SUMMERET BIN FIXED (31) INIT(0);/*ANTAL IKKE SUMMERET*/
+ DCL     TV_STOR_FDAGIALT BIN FIXED (31) INIT(0);/*ANTAL FDAGIALT>360 */
+                                                                        
+ DCL     ANT_ÆA73_TJEKKET               BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_EJ_MAPPET             BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_MAPPET                BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_SLETTET               BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_SAMME                 BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_DUBLET                BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_OK                    BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_SKREVNE               BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_EJDNR_ÆNDRET          BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_EJDNR_UÆNDRET         BIN FIXED (31) INIT(0);         
+ DCL     ANT_ÆA73_EJ_SKREVNE            BIN FIXED (31) INIT(0);         
+                                                                        
+ /*********************************************************************/
+ /* PARM KORT                                                         */
+ /*********************************************************************/
+  DCL     EOF_PARM         BIT (1) INIT ('0'B);                         
+  DCL     PARMKORT         FILE RECORD INPUT;                           
+  DCL     PARM_AR          CHAR  (80)  INIT (' ');                      
+  DCL     PARM_MEDTAGET    BIT (1)       INIT ('0'B);                   
+  DCL     PARM_FEJL        BIT (1)       INIT ('0'B);                   
+                                                                        
+  DCL     1 PARMLINIE  BASED (ADDR (PARM_AR) ),                         
+            2 PARMSTART    CHAR      (02),                              
+            2 PROGNAVN     CHAR      (07),                              
+            2 KOMNR1       CHAR      (03),                              
+            2 KOMNR2       CHAR      (03),                              
+            2 KOMNR3       CHAR      (03),                              
+            2 REST         CHAR      (62);                              
+                                                                        
+  DCL     PARMKOMNR1     BIN FIXED (15);                                
+  DCL     PARMKOMNR2     BIN FIXED (15);                                
+  DCL     PARMKOMNR3     BIN FIXED (15);                                
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BE30125');                 
+            END;                                                        
+                                                                        
+         ON UNDEFINEDFILE(BE3010O) BEGIN;                               
+            ABENDMEDD.ABENDTXT = 'Datasæt BE3010O kan ikke åbnes';      
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         ON UNDEFINEDFILE(BE3011O) BEGIN;                               
+            ABENDMEDD.ABENDTXT = 'Datasæt BE3011O kan ikke åbnes';      
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+         CALL TERMINER_LISTE                                            
+                      ('***           EVS Forskud/Slut           ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***  Udtræk Ejendomme fra sidste Forskud ***'); 
+         CALL TERMINER_LISTE('***          '!!                          
+                              BE55600M.AFVIKLINGS_ID!!' '!!             
+                              BE55600M.INDKÅR1!!'       ***');          
+         CALL TERMINER_LISTE(' ');                                      
+                                                                        
+         AKTUEL_PERSONNUMMER     = 0;                                   
+         AKTUEL_EKOMNR           = 0;                                   
+         AKTUEL_EEJDNR           = 0;                                   
+         AKTUEL_EENHEDLBNR       = 0;                                   
+                                                                        
+         DCLBS01500T             = '';                                  
+         DCLBS01600T             = '';                                  
+         DCLBS01700T             = '';                                  
+         DCLBS01800T             = '';                                  
+         DCLBS01900T             = '';                                  
+                                                                        
+         UDTRÆK_FORS             = '';                                  
+         UDTRÆK_FORS.BFORSKAT_SW = -1;                                  
+         DT                      = DATE;                                
+                                                                        
+         OPEN FILE (BE3010O) TITLE ('BE30100O');                        
+         OPEN FILE (BE3011O) TITLE ('BE30110O');                        
+                                                                        
+         CALL ZZ20390('*OPEN','BE30101Y');       /* Åben Kontrolliste */
+                                                                        
+         CALL ZS61900;                           /* KST/SSI Info.     */
+                                                                        
+         CALL ZS62500 (ZS625P1,                 /* SKAF JOB/STEP INFO */
+                       ZS625P2,                                         
+                       ZS625P3,                                         
+                       ZS625P4);                                        
+                                                                        
+         CALL OPSTART_INIT;                      /* Parmkort          */
+                                                                        
+         HJ_SLUTÅR_PL1 = BE55600M.SLUTÅR + 1;                           
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL DECLARE_BS01700T_EJERFORHOLD;                             
+         CALL OPEN_BS01700T_EJERFORHOLD;                                
+         CALL FETCH_BS01700T_EJERFORHOLD;                               
+                                                                        
+         SELECT (FETCH_SQLKODE);  /*GEMT SQLCODE FRA FETCH_PERSONEJ. */ 
+           WHEN (0) DO;                                                 
+              AKTUEL_PERSONNUMMER = DCLBS01700T.PERSONNUMMER;           
+              AKTUEL_EKOMNR       = DCLBS01700T.EKOMNR;                 
+              AKTUEL_EEJDNR       = DCLBS01700T.EEJDNR;                 
+              AKTUEL_EENHEDLBNR   = DCLBS01700T.EENHEDLBNR;             
+                                                                        
+              DO WHILE (FETCH_SQLKODE = 0);                             
+                                                                        
+                 CALL BEHANDL_OG_SKRIV;                                 
+                                                                        
+                 CALL FETCH_BS01700T_EJERFORHOLD;                       
+              END;                                                      
+                                                                        
+              CALL SKRIV_PERSON;                                        
+           END;                                                         
+           WHEN (100)                                                   
+              PUT SKIP LIST ('INGEN RÆKKER LÆST');                      
+           OTHERWISE                                                    
+           DO;                                                          
+              FEJLTEKST  = 'FETCH BS017_EJERFH_CUR ';                   
+              CALL SQL_FEJL;                                            
+           END;                                                         
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL OG SKRIV EVS OPLYSNINGER                           RUTINE */
+ /*********************************************************************/
+ BEHANDL_OG_SKRIV: PROC;                                                
+                                                                        
+         IF TFLAG                                                       
+         THEN DO;                                                       
+            PUT SKIP EDIT('Behandl: ',                                  
+                           DCLBS01700T.DINDKAAR,' ',                    
+                           DCLBS01700T.PERSONNUMMER,' ',                
+                           DCLBS01700T.EKOMNR,' ',                      
+                           DCLBS01700T.EEJDNR,' ',                      
+                           DCLBS01700T.EENHEDLBNR,' ',                  
+                           DCLBS01700T.EPLBNR,' ',                      
+                           DCLBS01700T.DFRAGLD)                         
+                         (A,P'9999',A,P'9999999999',A,P'999',A,         
+                          P'999999',A,P'99',A,P'99',A,A);               
+            END;                                                        
+                                                                        
+         /* IF DCLBS01700T.EKOMNR ^= 999      US1549422                 
+          & DCLBS01700T.CEJBEVS = '9'                                   
+         THEN DO;                                                       
+            ANTCEJBEVS_9 = ANTCEJBEVS_9 + 1;                            
+            RETURN;                                                     
+            END; */                                                     
+                                                                        
+         IF DCLBS01700T.EEJDNR = 0                                      
+         THEN DO;                                                       
+            ANTEJENDOM_0 = ANTEJENDOM_0 + 1;                            
+            RETURN;                                                     
+            END;                                                        
+                                                                        
+         IF DCLBS01700T.EKOMNR = 999                                    
+         THEN DO;                                                       
+            // RETURN;  D#2298                                          
+                                                                        
+            /* US1549418 JXT */                                         
+            /* UDL=999 læses på DB2 men springes over   */              
+            /* CURSOR er kompleks og ligger i en makro  */              
+            /* Hvis performance er et issue, kig på det */              
+            END;                                                        
+                                                                        
+         /* IF DCLBS01700T.DOVTG >= 20250101                            
+          & DCLBS01700T.EKOMNR = 999                                    
+         THEN DO;                                                       
+            ANTUDL_20250101  = ANTUDL_20250101 + 1;                     
+            RETURN;                                                     
+            END; */                                                     
+                                                                        
+         /* Ændret behandling i forbindelse med Forskud 2017     */     
+         /* Der trækkes nu ud på CSLET = 1 men kun til optælling */     
+         /* KS30-01                                              */     
+         /* Defect 248 udlandske slettede skrives så de senere   */     
+         /* kan afgører om data fra EVS SLUT/Forskud skal bruges */     
+         /* Slut 2019 Danske med CSLET = 1 skal skrives          */     
+         IF DCLBS01700T.CSLET = '1'                                     
+         THEN DO;                                                       
+            ANTCSLET_1 = ANTCSLET_1 + 1;                                
+            END;                                                        
+                                                                        
+         IF AKTUEL_EKOMNR       ^= DCLBS01700T.EKOMNR                   
+          ! AKTUEL_PERSONNUMMER ^= DCLBS01700T.PERSONNUMMER             
+          ! AKTUEL_EEJDNR       ^= DCLBS01700T.EEJDNR                   
+          ! AKTUEL_EENHEDLBNR   ^= DCLBS01700T.EENHEDLBNR               
+         THEN DO;                                                       
+            CALL SKRIV_PERSON;                                          
+                                                                        
+            AKTUEL_PERSONNUMMER = DCLBS01700T.PERSONNUMMER;             
+            AKTUEL_EKOMNR       = DCLBS01700T.EKOMNR;                   
+            AKTUEL_EEJDNR       = DCLBS01700T.EEJDNR;                   
+            AKTUEL_EENHEDLBNR   = DCLBS01700T.EENHEDLBNR;               
+                                                                        
+            SW_FDAGEJ_NUL           = '0'B;                             
+            UDTRÆK_FORS             = '';                               
+            UDTRÆK_FORS.BFORSKAT_SW = -1;                               
+            ANTEJENDOM              = 0;                                
+         END;                                                           
+         ELSE                                                           
+         DO;                                                            
+            ANTEJERFH_EJ_SKR = ANTEJERFH_EJ_SKR + 1;                    
+         END;                                                           
+                                                                        
+         CALL OVERFØRDATA;                                              
+                                                                        
+ END BEHANDL_OG_SKRIV;                                                  
+                                                                        
+ /*********************************************************************/
+ /* SKRIV_PERSON                                               RUTINE */
+ /*********************************************************************/
+ SKRIV_PERSON: PROC;                                                    
+                                                                        
+    IF TFLAG                                                            
+    THEN DO;                                                            
+       PUT SKIP LIST(' ');                                              
+       PUT SKIP EDIT('Skriv  :      ',                                  
+                      UDTRÆK_FORS.DCPRN,' ',                            
+                      UDTRÆK_FORS.EKOMNR,' ',                           
+                      UDTRÆK_FORS.EEJDNR,' ',                           
+                      UDTRÆK_FORS.EENHEDLBNR,' ',                       
+                      UDTRÆK_FORS.EPLBNR,' ',                           
+                      UDTRÆK_FORS.DFRAGLD)                              
+                 (A,P'9999999999',A,P'999',A,                           
+                  P'999999',A,P'99',A,P'99',A,A);                       
+       END;                                                             
+                                                                        
+    IF ANTEJENDOM = 1                                                   
+    THEN                                                                
+       UDTRÆK_FORS.CEVSSUM = ' ';                                       
+                                                                        
+    IF SW_FDAGEJ_NUL = '1'B  & UDTRÆK_FORS.CEVSSUM = '1'                
+    THEN                                                                
+       UDTRÆK_FORS.CEVSSUM = '2'; /* TIL PERIODE OPDELING    */         
+                                  /* ESB OG AAR EVS SLUT 2002*/         
+                                                                        
+    /* Hent oplysninger fra BS01800T og BS01900T             */         
+    AKTUEL_DTILGLD = UDTRÆK_FORS.DTILGLD;                               
+                                                                        
+    CALL HENT_OPYSNINGER_OM_RABAT;                                      
+                                                                        
+    IF AKTUEL_DTILGLD < '9999-12-31-23.59.59.999999'                    
+    THEN                                                                
+       ANTDTILGLD_EJ_MAX = ANTDTILGLD_EJ_MAX + 1;                       
+                                                                        
+    IF UDTRÆK_FORS.EKOMNR ^= 999                                        
+    THEN DO;                                                            
+       ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                           
+                                                                        
+       WRITE FILE (BE3010O) FROM (UDTRÆK_FORS);                         
+       ANTSKRIV_ØVR = ANTSKRIV_ØVR + 1;                                 
+    END;                                                                
+    ELSE                                                                
+    DO;                                                                 
+       /* XJY 28.10.2024 ÆA73: Ret udenlandske ejendomsnumre.   */      
+       /* Ved slettemarkerede ejendomsnumre skrives de ikke til */      
+       /* output filen.                                         */      
+       IF RET_UDENL_EJDNR (UDTRÆK_FORS.EKOMNR,                          
+                           UDTRÆK_FORS.EEJDNR,                          
+                           UDTRÆK_FORS.DCPRN) THEN                      
+       DO;                                                              
+          ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                        
+                                                                        
+          WRITE FILE (BE3011O) FROM (UDTRÆK_FORS);                      
+          ANTSKRIV_UDL = ANTSKRIV_UDL + 1;                              
+                                                                        
+          ANT_ÆA73_SKREVNE += 1;                                        
+       END;                                                             
+       ELSE                                                             
+       DO;                                                              
+          ANT_ÆA73_EJ_SKREVNE += 1;                                     
+       END;                                                             
+    END;                                                                
+                                                                        
+    /* XJY 28.10.2024: Denne optælling er flyttet i forbindelse */      
+    /* med rettelse af produktionsproblemet med, at den sidst   */      
+    /* indlæste record ikke blev skrevet, så der også optælles  */      
+    /* for den sidst læste record.                              */      
+    IF UDTRÆK_FORS.FDAGIALT > 360                                       
+    THEN                                                                
+       TV_STOR_FDAGIALT = TV_STOR_FDAGIALT + 1;                         
+                                                                        
+ END SKRIV_PERSON;                                                      
+                                                                        
+ /*********************************************************************/
+ /* Ret de udenlandske ejendomsnumre på baggrund af ændringsanmodning */
+ /* ÆA73.                                                             */
+ /*                                                                   */
+ /* Proceduren returnerer en bit værdi som indikerer, om der skal     */
+ /* skrives en record på output filen:                                */
+ /* 1/true  = Der skal skrives en record                              */
+ /* 0/false = Der skal ikke skrives en record, da mapningen er        */
+ /*           slettemarkeret.                                         */
+ /*********************************************************************/
+ RET_UDENL_EJDNR: PROC (P_EKOMNR                                        
+                       ,P_EEJDNR                                        
+                       ,P_DCPRN) RETURNS(BIT(1));                       
+                                                                        
+ DCL P_EKOMNR                       BIN FIXED (15) UNAL;                
+ DCL P_EEJDNR                       BIN FIXED (31) UNAL;                
+ DCL P_DCPRN                        DEC FIXED (11);                     
+                                                                        
+ DCL NYT_EEJDNR                     BIN FIXED (31);                     
+ DCL SLET_MARK                      CHAR(1);                            
+                                                                        
+                                                                        
+    ANT_ÆA73_TJEKKET += 1;                                              
+                                                                        
+    /* Tjek om der findes mapning på ejendomsnummeret */                
+    IF FINDES_UDENL_EJD_MAPNING (BE55600M.TIL_EVS_AAR                   
+                                ,BE55600M.AFVIKLINGS_ID                 
+                                ,BE55600M.DATA_ID                       
+                                ,(P_EKOMNR)                             
+                                ,(P_EEJDNR)                             
+                                ,NYT_EEJDNR                             
+                                ,SLET_MARK) THEN                        
+    DO;                                                                 
+       ANT_ÆA73_MAPPET += 1;                                            
+                                                                        
+       /* Tjek om mapningen indeholder slettemarkering */               
+       IF SLET_MARK = '0' THEN                                          
+       DO;                                                              
+          /* Tjek om der mappes fra og til samme ejendomsnummer  */     
+          /* hvilket blot er en bevarelse af det aktuelle        */     
+          /* ejendomsnummer.                                     */     
+          IF P_EEJDNR = NYT_EEJDNR THEN                                 
+          DO;                                                           
+             /* Der mappes fra og til samme ejendomsnummer og det  */   
+             /* tillades altid ubetinget.                          */   
+             ANT_ÆA73_SAMME += 1;                                       
+                                                                        
+             CALL OPRET_UDENL_EJD_LOGNING (                             
+                     BE55600M.TIL_EVS_AAR                               
+                    ,BE55600M.AFVIKLINGS_ID                             
+                    ,BE55600M.DATA_ID                                   
+                    ,(P_EKOMNR)                                         
+                    ,(P_EEJDNR)                                         
+                    ,NYT_EEJDNR                                         
+                    ,PACKAGENAME()                                      
+                    ,ZS625P1                                            
+                    ,P_DCPRN                                            
+                    ,0                                                  
+                    ,'U');                                              
+                                                                        
+             ANT_ÆA73_EJDNR_UÆNDRET += 1;                               
+          END;                                                          
+          ELSE                                                          
+          DO;                                                           
+             /* Tjek om der samtidigt mappes fra et andet ejendoms- */  
+             /* nummer til det nye ejendomsnummer, hvilket i givet  */  
+             /* fald er en ikke tilladt dublet mapning.             */  
+             IF ^FINDES_ANDEN_GÆLD_UDENL_EJD_LOGNING (                  
+                    BE55600M.TIL_EVS_AAR                                
+                   ,BE55600M.AFVIKLINGS_ID                              
+                   ,BE55600M.DATA_ID                                    
+                   ,(P_EKOMNR)                                          
+                   ,(P_EEJDNR)                                          
+                   ,NYT_EEJDNR                                          
+                   ,PACKAGENAME()                                       
+                   ,ZS625P1                                             
+                   ,P_DCPRN) THEN                                       
+             DO;                                                        
+                /* Der er førstegangs-mappet til det nye ejendoms-   */ 
+                /* nummer eller i forvejen mappet fra fra-ejendoms-  */ 
+                /* nummeret til det nye ejendomsnummer og det er     */ 
+                /* tilladt.                                          */ 
+                ANT_ÆA73_OK += 1;                                       
+                                                                        
+                CALL OPRET_UDENL_EJD_LOGNING (                          
+                        BE55600M.TIL_EVS_AAR                            
+                       ,BE55600M.AFVIKLINGS_ID                          
+                       ,BE55600M.DATA_ID                                
+                       ,(P_EKOMNR)                                      
+                       ,(P_EEJDNR)                                      
+                       ,NYT_EEJDNR                                      
+                       ,PACKAGENAME()                                   
+                       ,ZS625P1                                         
+                       ,P_DCPRN                                         
+                       ,0                                               
+                       ,'J');                                           
+                                                                        
+                UDTRÆK_FORS.EEJDNR = NYT_EEJDNR;                        
+                ANT_ÆA73_EJDNR_ÆNDRET += 1;                             
+             END;                                                       
+             ELSE                                                       
+             DO;                                                        
+                /* Der er mappet fra flere forskellige samtidige    */  
+                /* fra-ejendomsnumre til det nye ejendomsnummer     */  
+                /* og derfor er det en ikke tilladt dublet mapning. */  
+                ANT_ÆA73_DUBLET += 1;                                   
+                                                                        
+                CALL OPRET_UDENL_EJD_LOGNING (                          
+                        BE55600M.TIL_EVS_AAR                            
+                       ,BE55600M.AFVIKLINGS_ID                          
+                       ,BE55600M.DATA_ID                                
+                       ,(P_EKOMNR)                                      
+                       ,(P_EEJDNR)                                      
+                       ,NYT_EEJDNR                                      
+                       ,PACKAGENAME()                                   
+                       ,ZS625P1                                         
+                       ,P_DCPRN                                         
+                       ,0                                               
+                       ,'D');                                           
+                                                                        
+                ANT_ÆA73_EJDNR_UÆNDRET += 1;                            
+             END;                                                       
+          END;                                                          
+       END;                                                             
+       ELSE                                                             
+       DO;                                                              
+          ANT_ÆA73_SLETTET += 1;                                        
+                                                                        
+          CALL OPRET_UDENL_EJD_LOGNING (                                
+                  BE55600M.TIL_EVS_AAR                                  
+                 ,BE55600M.AFVIKLINGS_ID                                
+                 ,BE55600M.DATA_ID                                      
+                 ,(P_EKOMNR)                                            
+                 ,(P_EEJDNR)                                            
+                 ,NYT_EEJDNR                                            
+                 ,PACKAGENAME()                                         
+                 ,ZS625P1                                               
+                 ,P_DCPRN                                               
+                 ,0                                                     
+                 ,'N');                                                 
+                                                                        
+          RETURN ('0'B);                                                
+       END;                                                             
+    END;                                                                
+    ELSE                                                                
+    DO;                                                                 
+       ANT_ÆA73_EJ_MAPPET += 1;                                         
+                                                                        
+       CALL OPRET_UDENL_EJD_LOGNING (                                   
+               BE55600M.TIL_EVS_AAR                                     
+              ,BE55600M.AFVIKLINGS_ID                                   
+              ,BE55600M.DATA_ID                                         
+              ,(P_EKOMNR)                                               
+              ,(P_EEJDNR)                                               
+              ,0                                                        
+              ,PACKAGENAME()                                            
+              ,ZS625P1                                                  
+              ,P_DCPRN                                                  
+              ,0                                                        
+              ,'M');                                                    
+                                                                        
+       ANT_ÆA73_EJDNR_UÆNDRET += 1;                                     
+    END;                                                                
+                                                                        
+    RETURN ('1'B);                                                      
+                                                                        
+ END RET_UDENL_EJDNR;                                                   
+                                                                        
+ /*********************************************************************/
+ /* OVERFØRDATA                                                RUTINE */
+ /*********************************************************************/
+ OVERFØRDATA: PROC;                                                     
+                                                                        
+         HJ_DATOEN = DCLBS01700T.DOVTG;                                 
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN DO;                                                       
+            HJ_DATO.MD = 01;                                            
+            HJ_DATO.DG = 01;                                            
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         DCLBS01700T.DOVTG = HJ_DATOEN;                                 
+                                                                        
+         HJ_DATOEN = DCLBS01700T.DAFSTAA;                               
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 12;                                          
+              HJ_DATO.DG = 31;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         DCLBS01700T.DAFSTAA = HJ_DATOEN;                               
+                                                                        
+                                                                        
+         HJ_DATOEN = DCLBS01700T.DATO0107;                              
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 01;                                          
+              HJ_DATO.DG = 01;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         DCLBS01700T.DATO0107 = HJ_DATOEN;                              
+                                                                        
+                                                                        
+         HJ_DATOEN = DCLBS01700T.DINDFLYT;                              
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 01;                                          
+              HJ_DATO.DG = 01;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         DCLBS01700T.DINDFLYT = HJ_DATOEN;                              
+                                                                        
+                                                                        
+         HJ_DATOEN = DCLBS01700T.DFRAFLYT;                              
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 12;                                          
+              HJ_DATO.DG = 31;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         DCLBS01700T.DFRAFLYT = HJ_DATOEN;                              
+                                                                        
+         ANTEJENDOM = ANTEJENDOM + 1;                                   
+         UDTRÆK_FORS.DCPRN = DCLBS01700T.PERSONNUMMER;                  
+                                                                        
+         UDTRÆK_FORS.EKOMNR        = DCLBS01700T.EKOMNR;                
+         UDTRÆK_FORS.EEJDNR        = DCLBS01700T.EEJDNR;                
+         UDTRÆK_FORS.EENHEDLBNR    = DCLBS01700T.EENHEDLBNR;            
+                                                                        
+         UDTRÆK_FORS.EJDBELIG      = DCLBS01500T.EJDBELIG;              
+         /* nye felter indført i slut 2018 først med i Forskud 2020*/   
+         UDTRÆK_FORS.VEJK_EJD      = DCLBS01500T.EJD_VEJK;              
+         UDTRÆK_FORS.HUSNR_EJD     = DCLBS01500T.EJD_HUSNR;             
+         UDTRÆK_FORS.ETAGE_EJD     = DCLBS01500T.EJD_ETAGE;             
+         UDTRÆK_FORS.SDØR_EJD      = DCLBS01500T.EJD_SDØR;              
+         UDTRÆK_FORS.ENHEDBELIG    = DCLBS01500T.ENHEDBELIG;            
+         UDTRÆK_FORS.VEJK_ENHED    = DCLBS01500T.ENHED_VEJK;            
+         UDTRÆK_FORS.HUSNR_ENHED   = DCLBS01500T.ENHED_HUSNR;           
+         UDTRÆK_FORS.ETAGE_ENHED   = DCLBS01500T.ENHED_ETAGE;           
+         UDTRÆK_FORS.SDØR_ENHED    = DCLBS01500T.ENHED_SDØR;            
+                                                                        
+         UDTRÆK_FORS.BBERGRL       = DCLBS01700T.BBERGRL;               
+         UDTRÆK_FORS.BBER2FAM      = DCLBS01700T.BBER2FAM;              
+                                                                        
+                                                                        
+         IF DCLBS01700T.EKOMNR = 999                                    
+         THEN                                                           
+            UDTRÆK_FORS.CLANDEKODE    = DCLBS01500T.LANDEKODE;          
+         ELSE                                                           
+            UDTRÆK_FORS.CLANDEKODE    = '';                             
+                                                                        
+         UDTRÆK_FORS.CFRATYPE      = '4';                               
+         IF DCLBS01700T.DAFSTAA > 0                                     
+         THEN                                                           
+            UDTRÆK_FORS.DSORTDAT1  = DCLBS01700T.DAFSTAA;               
+         ELSE                                                           
+            UDTRÆK_FORS.DSORTDAT1  = 99991231;                          
+         UDTRÆK_FORS.DSORTDAT2     = DCLBS01700T.DOVTG;                 
+         UDTRÆK_FORS.EPLBNR        = DCLBS01700T.EPLBNR;                
+         UDTRÆK_FORS.DFRAGLD       = DCLBS01700T.DFRAGLD;               
+         UDTRÆK_FORS.DTILGLD       = DCLBS01700T.DTILGLD;               
+         UDTRÆK_FORS.CEVSBENY      = DCLBS01700T.CEVSBENY;              
+         UDTRÆK_FORS.CEJBEVS       = DCLBS01700T.CEJBEVS;               
+         UDTRÆK_FORS.COPR_CEJBEVS  = DCLBS01700T.COPR_CEJBEVS;          
+         UDTRÆK_FORS.CEJDTYPE      = DCLBS01700T.CEJDTYPE;              
+         UDTRÆK_FORS.CFRED         = DCLBS01700T.CFRED;                 
+         UDTRÆK_FORS.CNEDSL1       = DCLBS01700T.CNEDSL1;               
+         UDTRÆK_FORS.DATO0107      = DCLBS01700T.DATO0107;              
+         UDTRÆK_FORS.DOVTG         = DCLBS01700T.DOVTG;                 
+                                                                        
+         UDTRÆK_FORS.COPR_DOVTG     = DCLBS01700T.COPR_DOVTG;           
+                                                                        
+         if BS017_RABATEJERANDEL_SW = -1 then                           
+           UDTRÆK_FORS.RABATEJERANDEL = 0;                              
+         else                                                           
+           UDTRÆK_FORS.RABATEJERANDEL = DCLBS01700T.RABATEJERANDEL;     
+         UDTRÆK_FORS.COPR_RABATEJERANDEL =                              
+            DCLBS01700T.COPR_RABATEJERANDEL;                            
+                                                                        
+         IF ANTEJENDOM = 1                                              
+         THEN                                                           
+            UDTRÆK_FORS.DOVTG_GL   = DCLBS01700T.DOVTG;                 
+         UDTRÆK_FORS.DAFSTAA       = DCLBS01700T.DAFSTAA;               
+         UDTRÆK_FORS.DINDFLYT      = DCLBS01700T.DINDFLYT;              
+         UDTRÆK_FORS.DFRAFLYT      = DCLBS01700T.DFRAFLYT;              
+                                                                        
+         IF DCLBS01700T.CÆGTOPR = ' '            /* US1549422 JXT */    
+         THEN                                                           
+           UDTRÆK_FORS.GPCTEJER    = DCLBS01700T.GPCTEJER;              
+         ELSE                                                           
+           UDTRÆK_FORS.GPCTEJER    = 0;                                 
+                                                                        
+         UDTRÆK_FORS.FDAGUDLE      = DCLBS01700T.FDAGUDLE;              
+         UDTRÆK_FORS.GPCTUDLE      = DCLBS01700T.GPCTUDLE;              
+         UDTRÆK_FORS.FDAGERHV      = DCLBS01700T.FDAGERHV;              
+         UDTRÆK_FORS.GPCTERHV      = DCLBS01700T.GPCTERHV;              
+         UDTRÆK_FORS.BPROM1        = DCLBS01700T.BPROM1;                
+         UDTRÆK_FORS.BUDLSKC       = DCLBS01700T.BUDLSKC; /*DEF #521*/  
+                                                                        
+         IF DCLBS01700T.CEJBEVS = '0' !                                 
+            DCLBS01700T.CEJBEVS = '4' !                                 
+            DCLBS01700T.CEJBEVS = '5'                                   
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BBRUTTO_SW = 0;                              
+               UDTRÆK_FORS.BBRUTTO    = DCLBS01700T.BBRUTTO;            
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BBRUTTO_SW = -1;                             
+               UDTRÆK_FORS.BBRUTTO    = 0;                              
+            END;                                                        
+                                                                        
+         UDTRÆK_FORS.CENKE        = DCLBS01700T.CENKE;                  
+         UDTRÆK_FORS.EJET20240101 = DCLBS01700T.EJET20240101;           
+                                                                        
+         IF BS017_EVSEFTERRABAT_SW = 0                                  
+         THEN DO;                                                       
+            UDTRÆK_FORS.BEVSEFTRAB_SW = 0;                              
+            UDTRÆK_FORS.BEVSEFTRAB     = DCLBS01700T.RES_EVSEFTERRABAT; 
+            END;                                                        
+         ELSE DO;                                                       
+            UDTRÆK_FORS.BEVSEFTRAB_SW = -1;                             
+            UDTRÆK_FORS.BEVSEFTRAB     = 0;                             
+            END;                                                        
+                                                                        
+         UDTRÆK_FORS.FDAGEJ     = DCLBS01700T.FDAGEJ;   /* ESB */       
+                                                                        
+         UDTRÆK_FORS.CEKSEMP    = DCLBS01700T.CEKSEMP;  /*#09-04*/      
+         UDTRÆK_FORS.COPR_EKSEMP =                                      
+                               DCLBS01700T.COPR_EKSEMP; /*#09-04*/      
+                                                                        
+         /* 2021 Vurmark */                                             
+         UDTRÆK_FORS.VURMARK_AKT_PER = DCLBS01700T.VURMARK_AKT;         
+         UDTRÆK_FORS.VURMARK_PER     = DCLBS01700T.VURMARK;             
+         UDTRÆK_FORS.VURMARK_AKT_EJD = DCLBS01500T.VURMARK_AKT;         
+         UDTRÆK_FORS.VURMARK_OM      = DCLBS01500T.VURMARK_OM;          
+         UDTRÆK_FORS.VURMARK_EJD     = DCLBS01500T.VURMARK;             
+                                                                        
+         /* KS46 */                                                     
+         UDTRÆK_FORS.CRTEKORNS           = DCLBS01700T.CRTEKORNS;       
+         UDTRÆK_FORS.COPR_CRTEKORNS      =                              
+                                      DCLBS01700T.COPR_CRTEKORNS;       
+                                                                        
+                                                                        
+         /* TEMP RETTELSE DA FELTER MANGLER I PROD */                   
+        /*UDTRÆK_FORS.BFENR               = DCLBS01500T.BFENR;          
+         UDTRÆK_FORS.VUREJENDOMID        = DCLBS01500T.VUREJENDOMID;*/  
+                                                                        
+         UDTRÆK_FORS.BFENR               = 0;                           
+         UDTRÆK_FORS.VUREJENDOMID        = 0;                           
+                                                                        
+         IF BS017_BNYMAN_SW = 0                                         
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BNYMAN_SW = 0;                               
+               UDTRÆK_FORS.BNYMAN    = DCLBS01700T.BNYMAN;              
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BNYMAN_SW = -1;                              
+               UDTRÆK_FORS.BNYMAN = 0;                                  
+            END;                                                        
+                                                                        
+         IF DCLBS01700T.CEJBEVS = '0' !                                 
+            DCLBS01700T.CEJBEVS = '4' !                                 
+            DCLBS01700T.CEJBEVS = '5'                                   
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.B100_SW = 0;                                 
+               UDTRÆK_FORS.B100 = DCLBS01700T.B100;                     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.B100_SW = -1;                                
+               UDTRÆK_FORS.B100 = 0;                                    
+            END;                                                        
+                                                                        
+         IF DCLBS01700T.BEJERAN > 0      &                              
+            (DCLBS01700T.CEJBEVS = '0'   !                              
+             DCLBS01700T.CEJBEVS = '4'   !                              
+             DCLBS01700T.CEJBEVS = '5')  &                              
+            (DCLBS01700T.GPCTEJER > 0    &                              
+             DCLBS01700T.GPCTEJER < 10000)                              
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BEJERAN_SW = 0;                              
+               UDTRÆK_FORS.BEJERAN = DCLBS01700T.BEJERAN;               
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BEJERAN_SW = -1;                             
+               UDTRÆK_FORS.BEJERAN = 0;                                 
+            END;                                                        
+                                                                        
+         /* Nyt felt Forskud 2020 */                                    
+         UDTRÆK_FORS.CSLET = DCLBS01700T.CSLET;                         
+         UDTRÆK_FORS.RES_FAKTISKRABAT =                                 
+            DCLBS01700T.RES_FAKTISKRABAT;                               
+         UDTRÆK_FORS.RES_FAKTISKRABAT_SW =                              
+            BS017_RES_FAKTISKRABAT_SW;                                  
+                                                                        
+         SELECT;                                                        
+         WHEN (BS017_BNYMAN_SW = 0          &                           
+               //DCLBS01700T.CEJBEVS  ^= '9'  &  US1549422              
+               DCLBS01700T.CEVSBENY  = '0'  &                           
+               (DCLBS01700T.CEJBEVS  = 'A'  !                           
+                DCLBS01700T.CEJBEVS  = '6'))                            
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                      UDTRÆK_FORS.BNYMAN;               
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = UDTRÆK_FORS.FDAGIALT +            
+                                      UDTRÆK_FORS.FDAGEJ;               
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         WHEN (UDTRÆK_FORS.BEJERAN_SW = 0   &                           
+               DCLBS01700T.CEVSBENY  = '0'  )                           
+               //DCLBS01700T.CEJBEVS  ^= '9')    US1549422              
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                         + DCLBS01700T.BEJERAN;         
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = UDTRÆK_FORS.FDAGIALT +            
+                                      UDTRÆK_FORS.FDAGEJ;               
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         WHEN (UDTRÆK_FORS.B100_SW = 0       &                          
+               DCLBS01700T.CEVSBENY  = '0'   )                          
+               //DCLBS01700T.CEJBEVS  ^= '9')   US1549422               
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                         + DCLBS01700T.B100;            
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = UDTRÆK_FORS.FDAGIALT +            
+                                      UDTRÆK_FORS.FDAGEJ;               
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         OTHERWISE                                                      
+            TV_IKKE_SUMMERET = TV_IKKE_SUMMERET + 1;                    
+         END; /*SELECT*/                                                
+                                                                        
+                                                                        
+ END OVERFØRDATA;                                                       
+ /*********************************************************************/
+ /*      HENT OPLYSNINGER OM RABAT                                    */
+ /*********************************************************************/
+ HENT_OPYSNINGER_OM_RABAT:    PROC;                                     
+                                                                        
+         UDTRÆK_FORS.OVERFØRT_ÆGTEF = '0';                              
+                                                                        
+         /* Hent Oplysninger om Basisrabat                            */
+         CALL SELECT_BS01800T_BASISRABAT;                               
+                                                                        
+         IF BS01800T_FUNDET                                             
+         THEN DO;                                                       
+            UDTRÆK_FORS.OVERFØRT_ÆGTEF = '2';                           
+                                                                        
+            IF UDTRÆK_FORS.EKOMNR = 999                                 
+            THEN                                                        
+               ANTLÆS_BS018_UDL= ANTLÆS_BS018_UDL + 1;                  
+            ELSE                                                        
+               ANTLÆS_BS018_ØVR= ANTLÆS_BS018_ØVR + 1;                  
+                                                                        
+            UDTRÆK_FORS.BSRDFRAGLD        = DCLBS01800T.DFRAGLD;        
+            UDTRÆK_FORS.BSRDTILGLD        = DCLBS01800T.DTILGLD;        
+            UDTRÆK_FORS.BSIMPRABAT       =                              
+                                 DCLBS01800T.R24_SIMPELBASISRABAT;      
+            UDTRÆK_FORS.BSIMPRABAT_NEG   =                              
+                                 DCLBS01800T.R24_SIMPELBASISRABAT_NEG;  
+            UDTRÆK_FORS.BBASISREGUL      =                              
+                                 DCLBS01800T.R24_BASISRABAT_REGUL;      
+            UDTRÆK_FORS.COPR_BBASISREGUL =                              
+                                 DCLBS01800T.COPR_R24_BASISRABAT_REGUL; 
+            UDTRÆK_FORS.BBASISRABAT      = DCLBS01800T.R24_BASISRABAT;  
+                                                                        
+            IF BS018_R24_EJERANDEL_SW = 0                               
+            THEN DO;                                                    
+               UDTRÆK_FORS.EJERANDEL     = DCLBS01800T.R24_EJERANDEL;   
+               UDTRÆK_FORS.EJERANDEL_SW  = 0;                           
+               END;                                                     
+            ELSE DO;                                                    
+               UDTRÆK_FORS.EJERANDEL     = 0;                           
+               UDTRÆK_FORS.EJERANDEL_SW  = -1;                          
+               END;                                                     
+            END;                                                        
+         ELSE DO;                                                       
+            UDTRÆK_FORS.BSRDFRAGLD       = '';                          
+            UDTRÆK_FORS.BSRDTILGLD       = '';                          
+            UDTRÆK_FORS.BSIMPRABAT       = 0;                           
+            UDTRÆK_FORS.BSIMPRABAT_NEG   = 0;                           
+            UDTRÆK_FORS.BBASISREGUL      = 0;                           
+            UDTRÆK_FORS.COPR_BBASISREGUL = ' ';                         
+            UDTRÆK_FORS.BBASISRABAT      = 0;                           
+            UDTRÆK_FORS.EJERANDEL        = 0;                           
+            UDTRÆK_FORS.EJERANDEL_SW     = -1;                          
+            END;                                                        
+                                                                        
+         /* Hent Oplysninger om Rabatejerandel                        */
+         CALL SELECT_BS01900T_RABATEJERANDEL;                           
+                                                                        
+         IF ^BS01900T_FUNDET                                            
+          ! (BS01900T_FUNDET                                            
+          &  BS019_RABATEJERANDEL_SW = -1)                              
+         THEN DO;                                                       
+            IF BS01900T_FUNDET                                          
+            THEN DO;                                                    
+               IF UDTRÆK_FORS.EKOMNR = 999                              
+               THEN                                                     
+                  ANTLÆS_BS019_UDL= ANTLÆS_BS019_UDL + 1;               
+               ELSE                                                     
+                  ANTLÆS_BS019_ØVR= ANTLÆS_BS019_ØVR + 1;               
+                                                                        
+               UDTRÆK_FORS.RBDFRAGLD = DCLBS01900T.DFRAGLD;             
+               UDTRÆK_FORS.RBDTILGLD = DCLBS01900T.DTILGLD;             
+               END;                                                     
+            ELSE DO;                                                    
+               UDTRÆK_FORS.RBDFRAGLD = '';                              
+               UDTRÆK_FORS.RBDTILGLD = '';                              
+               END;                                                     
+                                                                        
+            UDTRÆK_FORS.RBEJERAND    = 0;                               
+            UDTRÆK_FORS.RBEJERAND_SW = -1;                              
+            UDTRÆK_FORS.COPR_RBEJERAND = '';                            
+            END;                                                        
+         ELSE DO;                                                       
+            IF UDTRÆK_FORS.EKOMNR = 999                                 
+            THEN                                                        
+               ANTLÆS_BS019_UDL= ANTLÆS_BS019_UDL + 1;                  
+            ELSE                                                        
+               ANTLÆS_BS019_ØVR= ANTLÆS_BS019_ØVR + 1;                  
+                                                                        
+            UDTRÆK_FORS.RBDFRAGLD    = DCLBS01900T.DFRAGLD;             
+            UDTRÆK_FORS.RBDTILGLD    = DCLBS01900T.DTILGLD;             
+            UDTRÆK_FORS.RBEJERAND    = DCLBS01900T.RABATEJERANDEL;      
+            UDTRÆK_FORS.RBEJERAND_SW = 0;                               
+            UDTRÆK_FORS.COPR_RBEJERAND =                                
+                                       DCLBS01900T.COPR_RABATEJERANDEL; 
+            END;                                                        
+                                                                        
+ END HENT_OPYSNINGER_OM_RABAT;                                          
+ /*********************************************************************/
+ /*      Opstart                                                      */
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+ DCL     HJ_KOMNR     PIC '(03)9';                                      
+                                                                        
+         /* PARMKORT ER EVT. MEDTAGET I KØRSLEN */                      
+         ON  ENDFILE (PARMKORT) BEGIN;                                  
+           EOF_PARM  = '1'B;                                            
+           GO TO INIT_SLUT;                                             
+           END;                                                         
+                                                                        
+         PARMLINIE = '';                                                
+                                                                        
+         READ FILE (PARMKORT) INTO (PARM_AR);                           
+                                                                        
+         IF PARMLINIE.PROGNAVN ^= 'BE30100'                             
+         THEN                                                           
+            PARM_FEJL = '1'B;                                           
+                                                                        
+         IF VERIFY (PARMLINIE.KOMNR1,'0123456789')  >  0                
+         THEN                                                           
+            PARM_FEJL = '1'B;                                           
+                                                                        
+          /*Første kommunenummer skal være udfyldt når der er parmkort*/
+          IF PARMLINIE.KOMNR1  <  '100' !                               
+             PARMLINIE.KOMNR1  >  '999'                                 
+          THEN                                                          
+            PARM_FEJL = '1'B;                                           
+                                                                        
+          IF PARM_FEJL                                                  
+          THEN                                                          
+             DO;                                                        
+               PUT SKIP LIST ('FEJL I PARMKORT: ',PARM_AR);             
+               ABENDMEDD = '101 FEJL I PARMKORT';                       
+               CALL ZS30101(5,ABENDMEDD,2);                             
+             END;                                                       
+          ELSE                                                          
+             DO;                                                        
+               PARM_MEDTAGET  = '1'B;                                   
+               PUT SKIP LIST('PARMKORT MEDTAGET: ' !!                   
+                      PARMLINIE.PROGNAVN  !! PARMLINIE.KOMNR1 !!        
+                      PARMLINIE.KOMNR2 !! PARMLINIE.KOMNR3);            
+             END;                                                       
+                                                                        
+ INIT_SLUT:                                                             
+                                                                        
+         IF PARMLINIE.KOMNR1 = ''                                       
+         THEN                                                           
+           DO;                                                          
+             PARMKOMNR1 = 0;                                            
+             PARMKOMNR2 = 0;                                            
+             PARMKOMNR3 = 0;                                            
+           END;                                                         
+         ELSE                                                           
+           DO;                                                          
+             HJ_KOMNR  = PARMLINIE.KOMNR1;                              
+             PARMKOMNR1 = HJ_KOMNR;                                     
+             IF PARMLINIE.KOMNR2 > '000'                                
+             THEN                                                       
+               DO;                                                      
+                 HJ_KOMNR  = PARMLINIE.KOMNR2;                          
+                 PARMKOMNR2 = HJ_KOMNR;                                 
+               END;                                                     
+                                                                        
+             IF PARMLINIE.KOMNR3 > '000'                                
+             THEN                                                       
+               DO;                                                      
+                 HJ_KOMNR  = PARMLINIE.KOMNR3;                          
+                 PARMKOMNR3 = HJ_KOMNR;                                 
+               END;                                                     
+                                                                        
+           PUT SKIP LIST('PARMLINIE.KOMNR1 =',PARMKOMNR1);              
+           PUT SKIP LIST('PARMLINIE.KOMNR2 =',PARMKOMNR2);              
+           PUT SKIP LIST('PARMLINIE.KOMNR3 =',PARMKOMNR3);              
+         END;                                                           
+                                                                        
+ END OPSTART_INIT;                                                      
+                                                                        
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL LUK_FILER;                                                
+                                                                        
+         CALL CLOSE_BS01700T_EJERFORHOLD;                               
+                                                                        
+         CALL DAN_AFSTEMNINGSLISTE;                                     
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /* LUK FILER                                                         */
+ /*********************************************************************/
+ LUK_FILER: PROC;                                                       
+                                                                        
+         CLOSE FILE (BE3010O);                                          
+         CLOSE FILE (BE3011O);                                          
+                                                                        
+ END LUK_FILER;                                                         
+                                                                        
+ /*********************************************************************/
+ /* DAN AFSTEMNINGS- OG KONTROLLISTEN                                 */
+ /*********************************************************************/
+ DAN_AFSTEMNINGSLISTE: PROC;                                            
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' UDTRÆK FRA EVS FORSKUD '                    
+         /*#01*/       !! BE55600M.INDKÅR1                              
+                       !! ' DATO: '                                     
+                       !! DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BE30100 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA PERSONTABELLEN . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_PERSON;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF DANSKE EJENDOMME . . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_PERSON_ØVR;                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME. . . . . . .';  
+         LIN.ANT   = ANTLÆS_PERSON_UDL;                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FUNDET PÅ BASISRABATTABELLEN . . . . . .';  
+         LIN.ANT   = ANTLÆS_BS018_ØVR + ANTLÆS_BS018_UDL;               
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF DANSKE EJENDOMME . . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_BS018_ØVR;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME. . . . . . .';  
+         LIN.ANT   = ANTLÆS_BS018_UDL;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FUNDET PÅ RABATBERETTIGET EJERANDELTABEL';  
+         LIN.ANT   = ANTLÆS_BS019_ØVR + ANTLÆS_BS019_UDL;               
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF DANSKE EJENDOMME . . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_BS019_ØVR;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME. . . . . . .';  
+         LIN.ANT   = ANTLÆS_BS019_UDL;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+      //LIN.TEKST = 'ANTAL EJ SKREVET MED CEJBEVS LIG 9 . . . . . .';   
+      //LIN.ANT   = ANTCEJBEVS_9;                                       
+      //CALL ZZ20300(LINIE,'01'); US1549422                             
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVET MED CSLET LIG 1. . . . . . . . .';  
+         LIN.ANT   = ANTCSLET_1;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET MED EEJDNR LIG 0. . . . . . .';  
+         LIN.ANT   = ANTEJENDOM_0;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT . . . . . . . . . . . . . .';  
+         LIN.ANT   = ANTSKRIV_PERSON;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF DANSKE EJENDOMME . . . . . . . . .';  
+         LIN.ANT   = ANTSKRIV_ØVR;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME. . . . . . .';  
+         LIN.ANT   = ANTSKRIV_UDL;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         /*                                                             
+         LIN.TEKST = 'ANTAL EJ SKREVET UDL MED DATO > 1/1-2025 . . .';  
+         LIN.ANT   = ANTUDL_20250101;                                   
+         CALL ZZ20300(LINIE,'01'); */                                   
+                                                                        
+         LIN.TEKST = 'ANTAL EJERFORHOLD DER IKKE ER SENESTE. . . . .';  
+         LIN.ANT   = ANTEJERFH_EJ_SKR;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         IF ANTDTILGLD_EJ_MAX > 0                                       
+         THEN DO;                                                       
+            LIN.TEKST =                                                 
+                     'ANTAL GÆLDENDE TIL ER IKKE MAX                ';  
+            LIN.ANT   = ANTDTILGLD_EJ_MAX;                              
+            CALL ZZ20300(LINIE,'01');                                   
+            END;                                                        
+                                                                        
+         LIN.TEKST = 'ANTAL HVOR DER ER SUMMERET SKAT. . . . . . . .';  
+         LIN.ANT   = TV_SUMMERET;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL HVOR DER IKKE ER SUMMERET SKAT . . . . .';  
+         LIN.ANT   = TV_IKKE_SUMMERET;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL MED FDAGIALT STØRRE END 360 DAGE . . . .';  
+         LIN.ANT   = TV_STOR_FDAGIALT;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'Antal udenl.ejd. kontrolleret for ejd.nr.skift';  
+         LIN.ANT   = ANT_ÆA73_TJEKKET;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '- heraf med ikke mappet ejd.nr (Mangler) . . .';  
+         LIN.ANT   = ANT_ÆA73_EJ_MAPPET;                                
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '- heraf med mappet ejendomsnummer  . . . . . .';  
+         LIN.ANT   = ANT_ÆA73_MAPPET;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '  - heraf mappet som slettet (Slettet) . . . .';  
+         LIN.ANT   = ANT_ÆA73_SLETTET;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '  - heraf mappet til samme (Uændret) . . . . .';  
+         LIN.ANT   = ANT_ÆA73_SAMME;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '  - heraf med anvendt til-ejd.nr (Dublet)  . .';  
+         LIN.ANT   = ANT_ÆA73_DUBLET;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '  - heraf med ikke anvendt til-ejd.nr (OK) . .';  
+         LIN.ANT   = ANT_ÆA73_OK;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'Antal skrevne udenlandske ejendomme  . . . . .';  
+         LIN.ANT   = ANT_ÆA73_SKREVNE;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '- heraf med nyt ejendomsnummer . . . . . . . .';  
+         LIN.ANT   = ANT_ÆA73_EJDNR_ÆNDRET;                             
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '- heraf med nuværende ejendomsnummer . . . . .';  
+         LIN.ANT   = ANT_ÆA73_EJDNR_UÆNDRET;                            
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'Antal ikke skrevne udenlandske ejendomme . . .';  
+         LIN.ANT   = ANT_ÆA73_EJ_SKREVNE;                               
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END DAN_AFSTEMNINGSLISTE;                                              
+                                                                        
+ /*********************************************************************/
+ /*      TERMINER LISTE                                               */
+ /*********************************************************************/
+ TERMINER_LISTE:  PROCEDURE (TEKST);                                    
+ DCL     TEKST            CHAR      (45);                               
+                                               /* Medd. til termine-  */
+ DCL     1 MEDDELELSE     STATIC,              /* ringslisten         */
+           3 MODULNAVN    CHAR      (07)    INIT ('BE30100'),           
+           3 FILLER1      CHAR      (01)    INIT (' '),                 
+           3 MEDDNR       PIC       '999'   INIT (6),                   
+           3 DATA         CHAR      (45)    INIT (' ');                 
+ DCL     MEDDELELSEN      CHAR      (56)    DEF MEDDELELSE;             
+                                                                        
+         MEDDELELSE.MEDDNR = MEDDELELSE.MEDDNR + 1;                     
+         MEDDELELSE.DATA   = TEKST;                                     
+                                                                        
+         CALL ZS30101 (2,                                               
+                       MEDDELELSEN,                                     
+                       2);                                              
+                                                                        
+ END TERMINER_LISTE;                                                    
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:               ' !! ABENDTXT);        
+         PUT SKIP LIST ('PERSON  :               ' !!                   
+                                           AKTUEL_PERSONNUMMER);        
+         PUT SKIP LIST ('KOMMUNE :               ' !!                   
+                                           AKTUEL_EKOMNR);              
+         PUT SKIP LIST ('EJENDOM :               ' !!                   
+                                           AKTUEL_EEJDNR);              
+         PUT SKIP LIST ('ENHED   :               ' !!                   
+                                           AKTUEL_EENHEDLBNR);          
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL DAN_AFSTEMNINGSLISTE;                                     
+                                                                        
+         CALL LUK_FILER;                                                
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLFEJL = SQLCA.SQLCODE;                                       
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLFEJL  ' !!SQLFEJL);         
+         PUT SKIP LIST ('FEJLTEKST:               ' !! FEJLTEKST);      
+         PUT SKIP LIST ('PERSON   :               ' !!                  
+                                           AKTUEL_PERSONNUMMER);        
+         PUT SKIP LIST ('KOMMUNE  :               ' !!                  
+                                           AKTUEL_EKOMNR);              
+         PUT SKIP LIST ('EJENDOM  :               ' !!                  
+                                           AKTUEL_EEJDNR);              
+         PUT SKIP LIST ('ENHED    :               ' !!                  
+                                           AKTUEL_EENHEDLBNR);          
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDTXT = '250 ' !! FEJLTEKST !! SQLFEJL;                     
+                                                                        
+         CALL PROGRAM_FEJL;                                             
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+ %INCLUDE BE30100M;             /* DECLARE OG FETCH SQL STATEMENTS:   */
+                                /* DECLARE_BS01700T_EJERFORHOLD       */
+                                /* OPEN_BS01700T_EJERFORHOLD          */
+                                /* CLOSE_BS01700T_EJERFORHOLD         */
+                                /* FETCH_BS01700T_EJERFORHOLD         */
+                                /* CHECK_CEKSEMP                      */
+                                /* SELECT_BS01800T_BASISRABAT         */
+                                /* SELECT_BS01900T_RABATEJERANDEL     */
+ %INCLUDE ZM90051M;             /* KONV BIN15 TIL CHAR                */
+ %INCLUDE BS34307M;             /* KONV BF31 TIL CHAR6                */
+ %INCLUDE ZM90013M;             /* OMSÆT DATO TIL/FRA DB2-DATOFORMAT  */
+                                                                        
+ /**********************************************************************
+ * Inkluderede procedurer                                              *
+ **********************************************************************/
+ %INCLUDE BE99900M; /* SQL_ERROR                                      */
+ %INCLUDE BE99901M; /* ABEND                                          */
+ %INCLUDE BE83000M; /* FINDES_UDENL_EJD_MAPNING                       */
+                    /* FINDES_ANDEN_GÆLD_UDENL_EJD_LOGNING            */
+                    /* OPRET_UDENL_EJD_LOGNING                        */
+                    /* SÆT_GLNY_LOV_UD_FRA_JOBNAVN                    */
+                                                                        
+ /*********************************************************************/
+ /* Håndter afslutning af programmet umiddelbart før abend.           */
+ /*                                                                   */
+ /* Kode udført heri og procedurer kaldt herfra bør IKKE kalde        */
+ /* SQL_ERROR eller ABEND procedurerne, da det resulterer i et        */
+ /* uendeligt loop.                                                   */
+ /*********************************************************************/
+ AFSLUT_PROGRAM_FØR_ABEND: PROC (P_PROCNAME,                            
+                                 P_USER_ABEND_CODE, P_USER_ABEND_TEXT); 
+                                                                        
+ DCL P_PROCNAME                     CHAR(*) VAR;                        
+ DCL P_USER_ABEND_CODE              PIC '999';                          
+ DCL P_USER_ABEND_TEXT              CHAR(*) VAR;                        
+                                                                        
+    /* Udskriv afstemningsliste fra programmet */                       
+    CALL DAN_AFSTEMNINGSLISTE;                                          
+                                                                        
+    /* Luk filer */                                                     
+    CALL LUK_FILER;                                                     
+                                                                        
+ END AFSLUT_PROGRAM_FØR_ABEND;                                          
+                                                                        
+ END BE30100;                                                           

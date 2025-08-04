@@ -1,0 +1,379 @@
+ PROCESS OPT(TIME);                                                     
+ BE71400:   /* OPDEL ESR-UDTRÆK I EJENDOMME MED 2 EJERE OG ØVR. EJD. */ 
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /********************************************************************/ 
+  DCL COPYRIGHT   CHAR (30) STATIC    INIT ('COPYRIGHT KMD A/S 2013');  
+ /********************************************************************* 
+ /*                                                                   */
+ /* FORMÅL: LÆSER ET DATASÆT OG UD FRA PARAMETER OPDATERER DEN VUDERIN*/
+ /*          GSÅR NY OG GAMMEL. OPRETTET SOM KOPI AF BE71400L FOR     */
+ /*          AT KUNNE GENBRUGE DATASÆT FRA SLUT 2017 SUP              */
+ /*                                                                   */
+ /*Parameterfil udfyldes således:                                     */
+ /*>>BE71400202520241                                                 */
+ /**********-----------------------programnavn                        */
+ /*         ****-----------------------nyt_aar                        */
+ /*             ****-----------------------GL_aar                     */
+ /*                 *------------------------kode forskud = 1, slut= 2*/
+ /*                  **----------------------trace kode 00 - 12       */
+ /*  JCL ligger på BZTSO: UDV.BEVS.F25.JCL.T2(BE71400T)               */
+ /*                                                                   */
+ /*  EBD: Version til BF flytter altid  + 2 år                        */
+ /*                                                                   */
+ /*SLUT2024    :Per Jensen, PEN                        17-10-2023     */
+ /*             Implementering af vurderinger for 2022                */
+ /*SLUT2024    :Jan Jensen, JJJ                        12-02-2024     */
+ /*             Rulning af årstal fra 2024 datasæt til 2023           */
+ /********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+  /*       DEFAULT RANGE (*) STATIC;   */                               
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL  PARMFIL      FILE RECORD INPUT;                                   
+ DCL  BE714I       FILE RECORD INPUT;                                   
+ DCL  BE714O       FILE RECORD OUTPUT;                                  
+ DCL  SYSPRINT     FILE OUTPUT;                                         
+                                                                        
+ DCL  1 PARM,                                                           
+         03 IDENT          CHAR (09)   init (''),                       
+         03 NY_AAR         PIC '(04)9' init (0),                        
+         03 GL_AAR         PIC '(04)9' init (0),                        
+         03 EVS_KODE       PIC '(01)9' init (0), /*1=forskud,2=slut*/   
+         03 TRACE_KD       PIC '(02)9' init (0),                        
+         03 FILLER         CHAR(60);                                    
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF                                   *                 
+ *********************************************************************/ 
+ DCL     BE714_AR        CHAR      (2000) VAR;                          
+ DCL     1 BE714         BASED     (ADDR(BE714_AR)),                    
+           4 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BH31824N;      /* GL ESR STRUKTUR*/                 
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     EOF_BE714       BIT       (1);                                 
+ DCL     EOF_PARMFIL               CHAR      (01)  INIT(' ');           
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     1 TV,                                                          
+           2 LÆS_BE714   FIXED DEC (31)    INIT(0),                     
+           2 SKRIV_BE714 FIXED DEC (31)    INIT(0);                     
+                                                                        
+ DCL PROGRAM_ID          CHAR (08)  INIT('BE71400');                    
+ DCL MODUL_NAVN          CHAR (08)  INIT('BE71400');                    
+ DCL HJ_MAX              FIXED DEC(9) INIT(0);                          
+ DCL HJ_MIN              FIXED DEC(9) INIT(0);                          
+ DCL HJ_AAR              FIXED DEC(9) INIT(0);                          
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     MOD             BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS61900         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BE714 = NEJ;                                               
+                                                                        
+         ON ENDFILE (PARMFIL)                                           
+         BEGIN;                                                         
+          EOF_PARMFIL = '1';                                            
+         END;                                                           
+                                                                        
+         OPEN FILE (PARMFIL) TITLE ('BE71400C') INPUT;                  
+         READ FILE (PARMFIL) INTO (PARM);                               
+         CLOSE FILE (PARMFIL);                                          
+         PUT SKIP LIST('PARMFIL ' !! PARM);                             
+                                                                        
+         OPEN FILE (BE714I)  TITLE ('BE71400I');                        
+         OPEN FILE (BE714O)  TITLE ('BE71400O');                        
+                                                                        
+         ON ENDFILE(BE714I)                                             
+         BEGIN;                                                         
+            EOF_BE714 = JA;                                             
+         END;                                                           
+                                                                        
+         IF PARM.TRACE_KD = ''                                          
+          THEN                                                          
+           PARM.TRACE_KD = 0;                                           
+                                                                        
+        %INCLUDE GN9TRC0N;             /*******************************/
+        INPUT_TRC = PARM.TRACE_KD;     /* OPSÆTNING AF TRACEPARAMETER */
+        %INCLUDE GN9TRC0M;             /*******************************/
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+    IF PROC_TRC THEN CALL STRT_PROC('START PROGRAM BE71400');           
+                                                                        
+         /* DATOER SKAL VÆRE INDENFOR TO ÅR */                          
+         IF PARM.EVS_KODE = 2 & /*EVS SLUT ruller tilbage*/             
+            PARM.NY_AAR < PARM.GL_AAR THEN                              
+           DO;                                                          
+             HJ_AAR = PARM.GL_AAR;                                      
+             HJ_MAX = HJ_AAR * 10000 + 1231;                            
+             HJ_MIN = HJ_AAR * 10000 + 0101;                            
+           END;                                                         
+         ELSE                                                           
+           DO;                  /*Ruller frem*/                         
+             HJ_AAR = PARM.GL_AAR;                                      
+             HJ_MAX = (HJ_AAR -1) * 10000 + 1231;                       
+             HJ_MIN = (HJ_AAR -2) * 10000 + 0101;                       
+           END;                                                         
+                                                                        
+         PUT SKIP LIST('HJ_AAR :',HJ_AAR);                              
+         PUT SKIP LIST('MAX DATO:',HJ_MAX);                             
+         PUT SKIP LIST('MIN DATO:',HJ_MIN);                             
+                                                                        
+                                                                        
+         CALL LÆS_BE714;                                                
+         DO WHILE (EOF_BE714 = NEJ);                                    
+                                                                        
+           IF BE714.DCPRCIR < 9999999999 THEN                           
+             DO;                                                        
+               IF PARM.NY_AAR < PARM.GL_AAR THEN                        
+                 CALL RUL_AAR_TILBAGE;                                  
+               ELSE                                                     
+                 CALL RUL_AAR_FREM;                                     
+             END;                                                       
+                                                                        
+          CALL SKRIV_BE714;                                             
+          CALL LÆS_BE714;                                               
+         END;  /*END DO*/                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       FREMSKRIVNING AF ÅRSTAL                                      * 
+ *********************************************************************/ 
+ RUL_AAR_FREM: PROC;                                                    
+                                                                        
+    /*                                                                  
+    IF BE714.DOVTG >= HJ_MIN &                                          
+       BE714.DOVTG <= HJ_MAX THEN                                       
+      DO;                                                               
+        BE714.DOVTG = BE714.DOVTG + 10000;                              
+      END;                                                              
+    */                                                                  
+                                                                        
+                                                                        
+    IF BE714.DAFSTÅ >= HJ_MIN &                                         
+       BE714.DAFSTÅ <= HJ_MAX THEN                                      
+      DO;                                                               
+        IF PARM.EVS_KODE = 2 THEN /*EVS SLUT*/                          
+          BE714.DAFSTÅ = BE714.DAFSTÅ + 20000;                          
+        ELSE                                                            
+          BE714.DAFSTÅ = BE714.DAFSTÅ + 10000;                          
+      END;                                                              
+                                                                        
+    IF BE714.DAFGDAT >= HJ_MIN &                                        
+       BE714.DAFGDAT <= HJ_MAX THEN                                     
+      DO;                                                               
+        IF PARM.EVS_KODE = 2 THEN /*EVS SLUT*/                          
+          BE714.DAFGDAT = BE714.DAFGDAT + 20000;                        
+        ELSE                                                            
+          BE714.DAFGDAT = BE714.DAFGDAT + 10000;                        
+      END;                                                              
+                                                                        
+    IF BE714.DSKØDE >= HJ_MIN &                                         
+       BE714.DSKØDE <= HJ_MAX THEN                                      
+      DO;                                                               
+        IF PARM.EVS_KODE = 2 THEN /*EVS SLUT*/                          
+          BE714.DSKØDE = BE714.DSKØDE + 20000;                          
+        ELSE                                                            
+          BE714.DSKØDE = BE714.DSKØDE + 10000;                          
+      END;                                                              
+                                                                        
+    IF BE714.DSLUTS >= HJ_MIN &                                         
+       BE714.DSLUTS <= HJ_MAX THEN                                      
+      DO;                                                               
+        IF PARM.EVS_KODE = 2 THEN /*EVS SLUT*/                          
+          BE714.DSLUTS = BE714.DSLUTS + 20000;                          
+        ELSE                                                            
+          BE714.DSLUTS = BE714.DSLUTS + 10000;                          
+      END;                                                              
+                                                                        
+    IF PARM.EVS_KODE = 2 THEN /*EVS SLUT*/                              
+      DO;                                                               
+                                                                        
+        SELECT(BE714.VURDOPLNY.DVURDÅR);                                
+          WHEN('2020') BE714.VURDOPLNY.DVURDÅR = '2022';                
+          WHEN('2021') BE714.VURDOPLNY.DVURDÅR = '2023';                
+          WHEN('2022') BE714.VURDOPLNY.DVURDÅR = '2024';                
+          WHEN('2023') BE714.VURDOPLNY.DVURDÅR = '2025';                
+          WHEN('2024') BE714.VURDOPLNY.DVURDÅR = '2026';                
+          WHEN('2025') BE714.VURDOPLNY.DVURDÅR = '2026';                
+          WHEN('2026') BE714.VURDOPLNY.DVURDÅR = '2028';                
+          OTHER;                                                        
+        END;                                                            
+                                                                        
+        SELECT(BE714.VURDOPLGL.DVURDÅR);                                
+          WHEN('2020') BE714.VURDOPLGL.DVURDÅR = '2022';                
+          WHEN('2021') BE714.VURDOPLGL.DVURDÅR = '2023';                
+          WHEN('2022') BE714.VURDOPLGL.DVURDÅR = '2024';                
+          WHEN('2023') BE714.VURDOPLGL.DVURDÅR = '2025';                
+          WHEN('2024') BE714.VURDOPLGL.DVURDÅR = '2026';                
+          WHEN('2025') BE714.VURDOPLGL.DVURDÅR = '2027';                
+          WHEN('2026') BE714.VURDOPLGL.DVURDÅR = '2028';                
+          OTHER;                                                        
+        END;                                                            
+                                                                        
+        SELECT(BE714.SKATSTOP.DSTOPÅR);                                 
+          WHEN('2022') BE714.SKATSTOP.DSTOPÅR = '2024';                 
+          WHEN('2023') BE714.SKATSTOP.DSTOPÅR = '2025';                 
+          WHEN('2024') BE714.SKATSTOP.DSTOPÅR = '2026';                 
+          WHEN('2025') BE714.SKATSTOP.DSTOPÅR = '2027';                 
+          WHEN('2026') BE714.SKATSTOP.DSTOPÅR = '2028';                 
+          OTHER;                                                        
+        END; /*SELECT*/                                                 
+                                                                        
+      END;                                                              
+    ELSE /*Kun gl. år rettese for EVS Forskud*/                         
+      DO;                                                               
+                                                                        
+        SELECT(BE714.VURDOPLNY.DVURDÅR);                                
+          WHEN('2020') BE714.VURDOPLNY.DVURDÅR = '2021';                
+          WHEN('2021') BE714.VURDOPLNY.DVURDÅR = '2022';                
+          WHEN('2022') BE714.VURDOPLNY.DVURDÅR = '2023';                
+          WHEN('2023') BE714.VURDOPLNY.DVURDÅR = '2024';                
+          WHEN('2024') BE714.VURDOPLNY.DVURDÅR = '2025';                
+          WHEN('2025') BE714.VURDOPLNY.DVURDÅR = '2026';                
+          WHEN('2026') BE714.VURDOPLNY.DVURDÅR = '2027';                
+          OTHER;                                                        
+        END;                                                            
+                                                                        
+        SELECT(BE714.VURDOPLGL.DVURDÅR);                                
+          WHEN('2022') BE714.VURDOPLGL.DVURDÅR = '2023';                
+          WHEN('2023') BE714.VURDOPLGL.DVURDÅR = '2024';                
+          WHEN('2024') BE714.VURDOPLGL.DVURDÅR = '2025';                
+          WHEN('2025') BE714.VURDOPLGL.DVURDÅR = '2026';                
+          WHEN('2026') BE714.VURDOPLGL.DVURDÅR = '2027';                
+          WHEN('2027') BE714.VURDOPLGL.DVURDÅR = '2028';                
+          OTHER;                                                        
+        END;                                                            
+                                                                        
+        SELECT(BE714.SKATSTOP.DSTOPÅR);                                 
+          WHEN('2022') BE714.SKATSTOP.DSTOPÅR = '2023';                 
+          WHEN('2023') BE714.SKATSTOP.DSTOPÅR = '2024';                 
+          WHEN('2024') BE714.SKATSTOP.DSTOPÅR = '2025';                 
+          WHEN('2025') BE714.SKATSTOP.DSTOPÅR = '2026';                 
+          WHEN('2026') BE714.SKATSTOP.DSTOPÅR = '2027';                 
+          WHEN('2027') BE714.SKATSTOP.DSTOPÅR = '2028';                 
+          OTHER;                                                        
+        END; /*SELECT*/                                                 
+                                                                        
+      END;                                                              
+                                                                        
+ END RUL_AAR_FREM;                                                      
+ /********************************************************************* 
+ *       TILBAGE SKRIVNING AF ÅRSTAL                                  * 
+ *********************************************************************/ 
+ RUL_AAR_TILBAGE: PROC;                                                 
+                                                                        
+    IF BE714.DOVTG >= HJ_MIN &                                          
+       BE714.DOVTG <= HJ_MAX THEN                                       
+      BE714.DOVTG = BE714.DOVTG - 10000;                                
+                                                                        
+    IF BE714.DAFSTÅ >= HJ_MIN &                                         
+       BE714.DAFSTÅ <= HJ_MAX THEN                                      
+      BE714.DAFSTÅ = BE714.DAFSTÅ - 10000;                              
+                                                                        
+    IF BE714.DAFGDAT >= HJ_MIN &                                        
+       BE714.DAFGDAT <= HJ_MAX THEN                                     
+      BE714.DAFGDAT = BE714.DAFGDAT - 10000;                            
+                                                                        
+    IF BE714.DSKØDE >= HJ_MIN &                                         
+       BE714.DSKØDE <= HJ_MAX THEN                                      
+      BE714.DSKØDE = BE714.DSKØDE - 10000;                              
+                                                                        
+    IF BE714.DSLUTS  >= HJ_MIN &                                        
+       BE714.DSLUTS  <= HJ_MAX THEN                                     
+      BE714.DSLUTS = BE714.DSLUTS - 10000;                              
+                                                                        
+    SELECT(BE714.SKATSTOP.DSTOPÅR);                                     
+      WHEN('2022') BE714.SKATSTOP.DSTOPÅR = '2021';                     
+      WHEN('2023') BE714.SKATSTOP.DSTOPÅR = '2022';                     
+      WHEN('2024') BE714.SKATSTOP.DSTOPÅR = '2023';                     
+      WHEN('2025') BE714.SKATSTOP.DSTOPÅR = '2024';                     
+      WHEN('2026') BE714.SKATSTOP.DSTOPÅR = '2025';                     
+      OTHER;                                                            
+    END; /*SELECT*/                                                     
+                                                                        
+    SELECT(BE714.VURDOPLNY.DVURDÅR);                                    
+      WHEN('2020') BE714.VURDOPLNY.DVURDÅR = '2019';                    
+      WHEN('2021') BE714.VURDOPLNY.DVURDÅR = '2020';                    
+      WHEN('2022') BE714.VURDOPLNY.DVURDÅR = '2021';                    
+      WHEN('2023') BE714.VURDOPLNY.DVURDÅR = '2022';                    
+      WHEN('2024') BE714.VURDOPLNY.DVURDÅR = '2023';                    
+      WHEN('2025') BE714.VURDOPLNY.DVURDÅR = '2024';                    
+      WHEN('2026') BE714.VURDOPLNY.DVURDÅR = '2025';                    
+      OTHER;                                                            
+    END;                                                                
+                                                                        
+    SELECT(BE714.VURDOPLGL.DVURDÅR);                                    
+      WHEN('2020') BE714.VURDOPLGL.DVURDÅR = '2019';                    
+      WHEN('2021') BE714.VURDOPLGL.DVURDÅR = '2020';                    
+      WHEN('2022') BE714.VURDOPLGL.DVURDÅR = '2021';                    
+      WHEN('2023') BE714.VURDOPLGL.DVURDÅR = '2022';                    
+      WHEN('2024') BE714.VURDOPLGL.DVURDÅR = '2023';                    
+      WHEN('2025') BE714.VURDOPLGL.DVURDÅR = '2024';                    
+      WHEN('2026') BE714.VURDOPLGL.DVURDÅR = '2025';                    
+      OTHER;                                                            
+    END;                                                                
+                                                                        
+ END RUL_AAR_TILBAGE;                                                   
+ /********************************************************************* 
+ *       LÆS ESR UDTRÆK                                               * 
+ *********************************************************************/ 
+ LÆS_BE714: PROC;                                                       
+                                                                        
+   IF PROC_TRC THEN CALL STRT_PROC('LÆS_BE714');                        
+                                                                        
+         READ FILE (BE714I) INTO (BE714_AR);                            
+                                                                        
+         IF EOF_BE714 = NEJ                                             
+         THEN                                                           
+            TV.LÆS_BE714 = TV.LÆS_BE714 + 1;                            
+                                                                        
+   IF PROC_TRC THEN CALL SLUT_PROC;                                     
+                                                                        
+ END LÆS_BE714;                                                         
+ /********************************************************************* 
+ *       SKRIV FIL                                                    * 
+ *********************************************************************/ 
+ SKRIV_BE714: PROC;                                                     
+                                                                        
+         IF PROC_TRC THEN CALL STRT_PROC('SKRIV_BE714');                
+                                                                        
+         WRITE FILE (BE714O) FROM (BE714_AR);                           
+                                                                        
+         TV.SKRIV_BE714 = TV.SKRIV_BE714 + 1;                           
+                                                                        
+          IF PROC_TRC THEN CALL SLUT_PROC;                              
+                                                                        
+ END SKRIV_BE714;                                                       
+ /********************************************************************/ 
+ AFSLUT: PROC;                                                          
+         IF PROC_TRC THEN CALL STRT_PROC('AFSLUT');                     
+                                                                        
+         CLOSE FILE (BE714I),                                           
+               FILE (BE714O);                                           
+                                                                        
+         PUT SKIP LIST ('ANTAL LÆSTE   ' !! TV.LÆS_BE714);              
+         PUT SKIP LIST ('ANTAL SKREVNE ' !! TV.SKRIV_BE714);            
+                                                                        
+                                                                        
+         IF PROC_TRC THEN CALL SLUT_PROC;                               
+ END AFSLUT;                                                            
+                                                                        
+ END  BE71400;                                                          

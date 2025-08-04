@@ -1,0 +1,170 @@
+ PROCESS OPT(TIME);                                                     
+ BE24110: PROC (KOM_AREAL,BE_AREAL) REORDER;                            
+ /**********************************************************************
+ * PROJEKT:     EVS SLUT                                               *
+ * PROGRAMNAVN: BE24110. (BATCHUDGAVE AF CICSPROGRAM BE24010).         *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION : LÆS/SKRIV DATA I BE20000T/BE30000T                       *
+ * PGMFORLØB:   1. VALIDER NØGLEFELTER.                                *
+ *              2. INITIER STRUKTURER.                                 *
+ *              3. TILGÅ EJENDOMS-/PERSONTABELLEN.                     *
+ *              4. RETURNER SVAR.                                      *
+ * INDDATA:     UDFYLDTE NØGLEFELTER FRA HOVEDSTYRINGSMODUL            *
+ * RETURDATA:   SQLCODE    - SQL RETUR KODE.                           *
+ *              RETURKODE  - 0:OK 1:TOM RÆKKE -1: SQLFEJL.             *
+ *              RETURTEKST - UDDYBENDE TEKST TIL RETURKODE.            *
+ * TABELLER:    BE20000T   - EVS EJENDOMSTABEL                         *
+ *              BE30000T   - EVS EJERSKABSTABEL                        *
+ * KONSTRUKTØR: Per Jensen, PEN                            17.11.2023. *
+ ***********************************************************************
+ * ÆNDRINGSLOG: Per Jensen            PEN,                  NOV 2024   *
+ *              ÅRSRULLET Kopi af BQ22110 + nye tabelstrukturer        *
+ *              Nye tabelstrukturer fra BQ200/210/300/310 til          *
+ *              BE20000T/BE30000T                                      *
+ *              Oprydning af funktioner - kun funktion 1 + 2 bibeholdt *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT       CHAR (30) INIT ('(C) KMD A/S 2003');           
+                                                                        
+ /**********************************************************************
+ * DECLARE AF STRUKTUR                                                 *
+ **********************************************************************/
+                                                                        
+ DCL     1 KOM_AREAL,                                                   
+         %INCLUDE BE24010N;                                             
+                                                                        
+ DCL     1 BE_AREAL,                                                    
+         %INCLUDE BE24011N;;                                            
+                                                                        
+ DCL     1 EVS_EJD,                     /* EVS EJENDOMSTABEL          */
+         %INCLUDE BE20000N;;                                            
+ DCL     1 EVS_ESK,                     /* EVS EJERSKABSTABELEN       */
+         %INCLUDE BE30001N;;                                            
+ /*DCL     1 EVS_RES,                     /* EVS EJERSKABSTABELEN       
+ /*        %INCLUDE BE40000N;; */                                       
+                                                                        
+ DCL     1 EJENDOMTAB,                                                  
+         %INCLUDE BE24100N;;                                            
+ DCL     1 PERSONTAB,                                                   
+         %INCLUDE BE24200N;;                                            
+                                                                        
+ DCL     1 INDK_EJEND,                  /* INDIKATOR EJENDOMS OPLYSN. */
+         %INCLUDE BE24005N;;                                            
+ DCL     1 INDK_EJERSK,                 /* INDIKATOR EJENDOMS OPLYSN. */
+         %INCLUDE BE24006N;;                                            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR, NULL, MULTIPLY, PLIDUMP) BUILTIN;                       
+ DCL     PUTSKIP            BIT(1)       INIT('0'B);                    
+                                                                        
+ /**********************************************************************
+ * DECLARE AF DB2                                                      *
+ **********************************************************************/
+                                                                        
+ DCL     ZS67000         ENTRY;                       /* DB2 FEJL     */
+         EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */
+         EXEC SQL INCLUDE BE20000T;     /* EVS EJENDOMTABEL           */
+         EXEC SQL INCLUDE BE30000T;     /* EVS EJERSKABSTABEL         */
+  /*       EXEC SQL INCLUDE BE40000T;     /* EVS RESULTATTABEL        */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF DIVERSE HJÆLPEFELTER                                     *
+ **********************************************************************/
+                                                                        
+ DCL     RETURTEKST_EJD  CHAR (35) VAR  INIT(' ');                      
+ DCL     RETURTEKST_PER  CHAR (35) VAR  INIT(' ');                      
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            CALL PLIDUMP ('SHOB','BE24110');                            
+                                                                        
+ /**********************************************************************
+ * PROCES                                                              *
+ **********************************************************************/
+                                                                        
+         KOM_AREAL.RETURKODE = 0;                                       
+         KOM_AREAL.SQLKODE   = 0;                                       
+                                                                        
+         SELECT (KOM_AREAL.KOMM.FUNKTION);                              
+                                                                        
+          WHEN (1) /* SELECT PERSON & EJENDOM */                        
+             DO;                                                        
+               CALL LÆS_TABELLER;                                       
+               BE_AREAL.EJENDOM   = EJENDOMTAB, BY NAME;                
+               BE_AREAL.PERSON    = PERSONTAB, BY NAME;                 
+               BE_AREAL.INDK_EJD  = INDK_EJEND, BY NAME;                
+               BE_AREAL.INDK_PERS = INDK_EJERSK, BY NAME;               
+             END;                                                       
+                                                                        
+          WHEN (2) /* INSERT PERSON & EJENDOM */                        
+             DO;                                                        
+               EJENDOMTAB  = BE_AREAL.EJENDOM, BY NAME;                 
+               PERSONTAB   = BE_AREAL.PERSON, BY NAME;                  
+               INDK_EJEND  = BE_AREAL.INDK_EJD, BY NAME;                
+               INDK_EJERSK = BE_AREAL.INDK_PERS, BY NAME;               
+                                                                        
+   /*            IF KOMM.TYPE = 3                                       
+               THEN                                                     
+                  CALL SLET_EJD_FEL; */                                 
+                                                                        
+               CALL SKRIV_TABELLER;                                     
+             END;                                                       
+                                                                        
+ /*       WHEN (3)  /*  OPTÆL ANTAL EJENDOMME FOR EN BESTEMT PERSON  */ 
+ /*          CALL OPTÆL_ANTAL_EJENDOMME; */                             
+                                                                        
+ /*       WHEN (4)  /*        BRUGES IKKE I BATCH DATAMODULET        */ 
+ /*          DO;                                                        
+              KOM_AREAL.RETURKODE  = -1;                                
+              RETURTEKST = 'FUNKTIONSVALG SKAL VÆRE 1 - 3';             
+             END;*/                                                     
+                                                                        
+                                                                        
+                                                                        
+          WHEN (5)  /*          BRUGES IKKE I BATCH DATAMODULET      */ 
+             DO;                                                        
+              KOM_AREAL.RETURKODE  = -1;                                
+              RETURTEKST = 'FUNKTIONSVALG SKAL VÆRE 1 - 2';             
+             END;                                                       
+                                                                        
+          OTHERWISE                                                     
+            DO;                                                         
+              KOM_AREAL.RETURKODE  = -1;                                
+              RETURTEKST = 'FUNKTIONSVALG SKAL VÆRE 1 - 2';             
+            END;                                                        
+                                                                        
+         END; /* END-SELECT */                                          
+                                                                        
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE                 *
+ **********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         KOM_AREAL.RETURKODE = -1;                                      
+         KOM_AREAL.SQLKODE   = SQLCA.SQLCODE;                           
+                                                                        
+         CALL ZS67000 (SQLCA);                                          
+                                                                        
+ DCL     P_SQLKODE        PIC       '-----9';                           
+         P_SQLKODE = KOM_AREAL.SQLKODE;                                 
+                                                                        
+    PUT SKIP LIST ('BE24110 - SQL_FEJL CPR: ', SØG.DCPRN);              
+    PUT SKIP LIST ('RETURTEKST_PER: ',RETURTEKST_PER);                  
+    PUT SKIP LIST ('BE24110 - SQL:  ',P_SQLKODE);                       
+                                                                        
+ END SQL_FEJL;                                                          
+ /**********************************************************************
+ * DIVERSE MAKROER                                                     *
+ **********************************************************************/
+                                                                        
+         %INCLUDE BE24010M;              /* BEHANDL FUNKTIONERNE 1-5  */
+                                                                        
+ END BE24110;                                                           

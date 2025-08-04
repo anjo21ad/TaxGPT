@@ -1,0 +1,403 @@
+ PROCESS OPT(TIME);                                                     
+ BH35100: PROCEDURE OPTIONS (MAIN) REORDER;                             
+ /*********************************************************************/
+         DCL COPYRIGHT CHAR (30) STATIC INIT ('COPYRIGHT KMD A/S 2013');
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL: SÆTTE ENHEDSLØBENR PÅ EVS UDTRÆK FRA GL ÅR, SÅ DER ER      * 
+ *         SAMMENHÆNG INDEN SAMSORTERING I BH61200Z                   * 
+ *         ENHEDSLØBENR TAGES FRA ESR HVIS DER FINDES                 * 
+ *         ENHEDSLØBENR = 1 SKRIVES EVS RECORD MED 1                  * 
+ *         HVIS DER FINDES ENHEDSLØBENR = 1 OG ENHEDSLØBENR = 2       * 
+ *         SKRIVES EVS UDTRÆKKET TO GANGE                             * 
+ *         ENGANGS PROGRAM TIL SLUT 2018.                             * 
+ *                                                                    * 
+ * INPUT:  B.H31700D  SAMLET EVS UDTRÆK                               * 
+           B.H32400D  BEHANDLET ESR DATA                              * 
+ *                                                                    * 
+ * OUTPUT: B.H35100D  SAMLET EVS UDTRÆK MED ENHEDSNUMMER              * 
+ *                                                                    * 
+ * PROGRAMMØR: ESBEN BRODERSEN EBD                         OKT 2018   * 
+ *--------------------------------------------------------------------* 
+ *********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *       DECLARE AF REGISTRE                                          * 
+ *********************************************************************/ 
+ DCL     BH317I FILE RECORD INPUT;     /* EVS UDTRÆK                */  
+ DCL     BH324I FILE RECORD INPUT;     /* ESR DATA                  */  
+ DCL     BH351O FILE RECORD OUTPUT;    /* EVS UDTRÆK MED ENHEDSLBNR */  
+ DCL     SYSPRINT FILE EXTERNAL PRINT;                                  
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK FRA ESR                                    * 
+ *********************************************************************/ 
+ DCL     BH317_AR        CHAR      (3000) VAR;                          
+ DCL     BH324_AR        CHAR      (3000) VAR;                          
+                                                                        
+                                                                        
+ DCL     1 BH317        BASED     (ADDR(BH317_AR)),                     
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH31700N;;                                          
+                                                                        
+ DCL     1 BH324        BASED     (ADDR(BH324_AR)),                     
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH32400N;;                                          
+                                                                        
+ DCL     1 EVS_UDTRÆK,                                                  
+           %INCLUDE BH31700N;;                                          
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF DIV. FÆLLESMACROER (ESKEMA/BOY/FORSKUD)           * 
+ *********************************************************************/ 
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     STG             BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 LINIE,                                                        
+          2 CCA         CHAR      (01),                                 
+          2 TEKST       CHAR      (132)     INIT      (' ');            
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ /*DCL     PLIXOPT         CHAR      (40)      VAR STATIC               
+ EXTERNAL INIT ('NOTEST(ALL,,;)'); */                                   
+                                                                        
+ DCL     TV_LÆS_ESR        BIN FIXED (31)    INIT (0);                  
+ DCL     TV_LÆS_EVS        BIN FIXED (31)    INIT (0);                  
+ DCL     TV_SKRIV_EVS      BIN FIXED (31)    INIT (0);                  
+ DCL     TV_ENHEDLBNUM_OVF BIN FIXED (31)    INIT (0);                  
+ DCL     PUT_SKIP_TV       BIN FIXED (31)    INIT (0);                  
+                                                                        
+ DCL     GEM_ESR_SORTCPR    FIXED (11);                                 
+ DCL     GEM_ESR_EKOMNR     FIXED (3);                                  
+ DCL     GEM_ESR_EEJDNR     FIXED (7);                                  
+ DCL     GEM_ESR_EENHEDLBNR BIN FIXED(15);                              
+ DCL     FØRSTE_ESR         BIT       (1)     INIT ('0'B);              
+                                                                        
+ DCL     EOF_BH317         BIT       (1)     INIT ('0'B);               
+ DCL     EOF_BH324         BIT       (1)     INIT ('0'B);               
+                                                                        
+ DCL     JA                BIT       (1)     INIT ('1'B);               
+ DCL     NEJ               BIT       (1)     INIT ('0'B);               
+                                                                        
+ DCL     UDDATO            CHAR      (10);                              
+ DCL     DATO1             CHAR      (26);                              
+ DCL     1 DATO2           DEF DATO1,                                   
+           2 ÅR            CHAR      (04),                              
+           2 F1            CHAR      (01),                              
+           2 MD            CHAR      (02),                              
+           2 F2            CHAR      (01),                              
+           2 DG            CHAR      (02);                              
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+           PUT SKIP LIST('ERROR');                                      
+                                                                        
+                                                                        
+         /* CALL PLIDUMP ('SNHOB'); */                                  
+                                                                        
+         OPEN FILE (BH317I)  TITLE ('BH31700I');                        
+         OPEN FILE (BH324I)  TITLE ('BH32400I');                        
+         OPEN FILE (BH351O)  TITLE ('BH35100O');                        
+                                                                        
+         ON ENDFILE (BH317I)                                            
+            EOF_BH317 = JA;                                             
+                                                                        
+         ON ENDFILE (BH324I)                                            
+            EOF_BH324 = JA;                                             
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH35101Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+                                                                        
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+ /*      OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         OVERLIN1.TEKST2 =                                              
+         '1. UDGAVE AF BEREGNINGSBÅND TIL EVS SLUT ' !!                 
+                          BH65300M.INDKÅR1;                             
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;  */                                    
+                                                                        
+         /*GEM = '';*/                                                  
+         FØRSTE_ESR = JA;                                               
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_BH317;                                                
+         CALL LÆS_BH324;                                                
+                                                                        
+         DO WHILE (EOF_BH317 = NEJ);                                    
+           CALL BEHANDL;                                                
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA EVS                                           * 
+ *********************************************************************/ 
+ LÆS_BH317: PROC;                                                       
+                                                                        
+                                                                        
+         IF EOF_BH317 = NEJ                                             
+         THEN                                                           
+           DO;                                                          
+             READ FILE (BH317I) INTO (BH317_AR);                        
+             TV_LÆS_EVS = TV_LÆS_EVS + 1;                               
+           END;                                                         
+                                                                        
+ END LÆS_BH317;                                                         
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR                                           * 
+ *       VED LÆS EFTER DET FØRSTE UNDERSØGES OM                         
+ *********************************************************************/ 
+ LÆS_BH324: PROC;                                                       
+                                                                        
+                                                                        
+         IF FØRSTE_ESR = JA                                             
+         THEN                                                           
+           DO;                                                          
+              READ FILE (BH324I) INTO (BH324_AR);                       
+              TV_LÆS_ESR = TV_LÆS_ESR + 1;                              
+              GEM_ESR_SORTCPR     = BH324.SORTCPR;                      
+              GEM_ESR_EKOMNR      = BH324.EKOMNR;                       
+              GEM_ESR_EEJDNR      = BH324.EEJDNR;                       
+              GEM_ESR_EENHEDLBNR  = BH324.EENHEDLBNR;                   
+              FØRSTE_ESR = NEJ;                                         
+           END;                                                         
+         ELSE                                                           
+           DO WHILE (GEM_ESR_SORTCPR     = BH324.SORTCPR &              
+                     GEM_ESR_EKOMNR      = BH324.EKOMNR  &              
+                     GEM_ESR_EEJDNR      = BH324.EEJDNR  &              
+                     GEM_ESR_EENHEDLBNR  = BH324.EENHEDLBNR &           
+                     EOF_BH324 = NEJ);                                  
+                                                                        
+                  READ FILE (BH324I) INTO (BH324_AR);                   
+                  TV_LÆS_ESR = TV_LÆS_ESR + 1;                          
+                                                                        
+           END;                                                         
+                                                                        
+         GEM_ESR_SORTCPR     = BH324.SORTCPR;                           
+         GEM_ESR_EKOMNR      = BH324.EKOMNR;                            
+         GEM_ESR_EEJDNR      = BH324.EEJDNR;                            
+         GEM_ESR_EENHEDLBNR  = BH324.EENHEDLBNR;                        
+                                                                        
+ END LÆS_BH324;                                                         
+ /********************************************************************* 
+ *       SKRIV UDTRÆK FRA EVS                                           
+ *********************************************************************/ 
+ SKRIV_EVS_UDTRÆK: PROC;                                                
+                                                                        
+         EVS_UDTRÆK = '';                                               
+                                                                        
+         EVS_UDTRÆK = BH317, BY NAME;                                   
+                                                                        
+         WRITE FILE (BH351O) FROM (EVS_UDTRÆK);                         
+                                                                        
+         TV_SKRIV_EVS = TV_SKRIV_EVS + 1;                               
+                                                                        
+ END SKRIV_EVS_UDTRÆK;                                                  
+ /********************************************************************* 
+ *       PERSONER SOM EVT. SKAL BEHANDLES/BEREGNES                    * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+         IF EOF_BH324 = JA                                              
+         THEN                                                           
+           DO;                                                          
+   /*        PUT SKIP LIST('EOF_BH324');                                
+             PUT SKIP LIST('BH324.SORTCPR =',BH324.SORTCPR);            
+             PUT SKIP LIST('BH324.EKOMNR  =',BH324.EKOMNR);             
+             PUT SKIP LIST('BH324.EEJDNR  =',BH324.EEJDNR);             
+                                                                        
+             PUT SKIP LIST('BH317.DCPRNUM =',BH317.DCPRNUM);            
+             PUT SKIP LIST('BH317.EKOMNUM =',BH317.EKOMNUM);            
+             PUT SKIP LIST('BH317.EEJDNUM =',BH317.EEJDNUM);*/          
+           END;                                                         
+                                                                        
+         IF EOF_BH317 = JA                                              
+         THEN                                                           
+           DO;                                                          
+    /*       PUT SKIP LIST('EOF_BH317');                                
+             PUT SKIP LIST('BH324.SORTCPR =',BH324.SORTCPR);            
+             PUT SKIP LIST('BH324.EKOMNR  =',BH324.EKOMNR);             
+             PUT SKIP LIST('BH324.EEJDNR  =',BH324.EEJDNR);             
+                                                                        
+             PUT SKIP LIST('BH317.DCPRNUM =',BH317.DCPRNUM);            
+             PUT SKIP LIST('BH317.EKOMNUM =',BH317.EKOMNUM);            
+             PUT SKIP LIST('BH317.EEJDNUM =',BH317.EEJDNUM);*/          
+           END;                                                         
+                                                                        
+         SELECT;                                                        
+                                                                        
+           /* MATCH PÅ EJERFORJHOLD */                                  
+           WHEN (BH324.SORTCPR = BH317.DCPRNUM  &                       
+                 BH324.EKOMNR  = BH317.EKOMNUM  &                       
+                 BH324.EEJDNR  = BH317.EEJDNUM)                         
+             DO;                                                        
+               IF BH324.EENHEDLBNR > BH317.EENHEDLBNUM                  
+               THEN                                                     
+                 DO;                                                    
+                   BH317.EENHEDLBNUM = BH324.EENHEDLBNR;                
+                   TV_ENHEDLBNUM_OVF = TV_ENHEDLBNUM_OVF  + 1;          
+                   CALL SKRIV_EVS_UDTRÆK;                               
+                   CALL LÆS_BH324; /*LÆS ESR*/                          
+                   DO WHILE (BH324.SORTCPR = BH317.DCPRNUM  &           
+                             BH324.EKOMNR  = BH317.EKOMNUM  &           
+                             BH324.EEJDNR  = BH317.EEJDNUM  &           
+                             EOF_BH324 = NEJ);                          
+                                                                        
+                    /*IF PUT_SKIP_TV < 5000                             
+                      THEN                                              
+                        DO;                                             
+                                                                        
+                      PUT SKIP LIST('BH324.SORTCPR =',BH324.SORTCPR);   
+                      PUT SKIP LIST('BH324.EKOMNR  =',BH324.EKOMNR);    
+                      PUT SKIP LIST('BH324.EEJDNR  =',BH324.EEJDNR);    
+                      PUT SKIP LIST('BH324.EENHEDLBNR  =',              
+                                                 BH324.EENHEDLBNR);     
+                                                                        
+                      IF EOF_BH324 = JA                                 
+                      THEN                                              
+                        PUT SKIP LIST('EOF_BH324');                     
+                                                                        
+                        END; */                                         
+                                                                        
+                     IF BH324.EENHEDLBNR > BH317.EENHEDLBNUM            
+                     THEN                                               
+                       DO;                                              
+                         BH317.EENHEDLBNUM = BH324.EENHEDLBNR;          
+                         TV_ENHEDLBNUM_OVF = TV_ENHEDLBNUM_OVF  + 1;    
+                         CALL SKRIV_EVS_UDTRÆK;                         
+                         CALL LÆS_BH324; /*LÆS ESR*/                    
+                       END;                                             
+                   END;                                                 
+                   CALL LÆS_BH317; /*LÆS EVS*/                          
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                   CALL SKRIV_EVS_UDTRÆK;                               
+                   IF EOF_BH324 = NEJ                                   
+                   THEN                                                 
+                     DO;                                                
+                       CALL LÆS_BH324;                                  
+                     END;                                               
+                   CALL LÆS_BH317; /*LÆS EVS*/                          
+                 END;                                                   
+             END;                                                       
+                                                                        
+           /* ESR STØRRE END EVS, SKRIV EVS LÆS EVS */                  
+           WHEN (BH324.SORTCPR > BH317.DCPRNUM   !                      
+                 (BH324.SORTCPR = BH317.DCPRNUM  &                      
+                  BH324.EKOMNR  > BH317.EKOMNUM) !                      
+                 (BH324.SORTCPR = BH317.DCPRNUM  &                      
+                  BH324.EKOMNR  = BH317.EKOMNUM  &                      
+                  BH324.EEJDNR  > BH317.EEJDNUM))                       
+             DO;                                                        
+               CALL SKRIV_EVS_UDTRÆK;                                   
+               CALL LÆS_BH317;                                          
+             END;                                                       
+                                                                        
+           /* EVS STØRRE END ESR, LÆS ESR */                            
+           WHEN (BH324.SORTCPR < BH317.DCPRNUM  !                       
+                 (BH324.SORTCPR = BH317.DCPRNUM  &                      
+                  BH324.EKOMNR  < BH317.EKOMNUM) !                      
+                 (BH324.SORTCPR = BH317.DCPRNUM  &                      
+                  BH324.EKOMNR  = BH317.EKOMNUM  &                      
+                  BH324.EEJDNR  < BH317.EEJDNUM))                       
+             DO;                                                        
+               IF EOF_BH324 = NEJ                                       
+               THEN                                                     
+                 DO;                                                    
+                   CALL LÆS_BH324;                                      
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                   CALL SKRIV_EVS_UDTRÆK;                               
+                   CALL LÆS_BH317;                                      
+                 END;                                                   
+             END;                                                       
+         OTHERWISE                                                      
+           DO;                                                          
+             PUT SKIP LIST('FEJL I SAMMENKØRING');                      
+           END;                                                         
+         END; /*SELECT*/                                                
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+                                                                        
+         PUT SKIP LIST('TV_LÆS_EVS  = ',TV_LÆS_EVS);                    
+         PUT SKIP LIST('TV_LÆS_ESR  = ',TV_LÆS_ESR);                    
+         PUT SKIP LIST('TV_SKRIV_EVS =',TV_SKRIV_EVS);                  
+         PUT SKIP LIST('TV_ENHEDLBNUM_OVF =',TV_ENHEDLBNUM_OVF);        
+                                                                        
+         LINIE.CCA    = ZZIK1;                                          
+         LINIE.TEKST = 'X';                                             
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE.CCA    = ZZWS1;                                          
+         LINIE.TEKST = 'Y';                                             
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+ /*      CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV_LÆS_EVS;                                    
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK FRA EVS  B.H31701D';    
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.LÆS_EVS;                                    
+         DETLIN1.TEKST = '   HERAF INDIVIDER FRA EVS             ';     
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.LÆS_EVS_F;                                  
+         DETLIN1.TEKST = '         HERAF KUN FRA FORSKUD ' !!           
+                                   BH65300M.INDKÅR1; */                 
+ END TOTALLISTE;                                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BH317I);                                           
+         CLOSE FILE (BH324I);                                           
+         CLOSE FILE (BH351O);                                           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ END  BH35100;                                                          

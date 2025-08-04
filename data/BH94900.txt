@@ -1,0 +1,246 @@
+ PROCESS OPT(TIME);                                                     
+ BH94900:/* Personer med en eller flere ejendomme med CENKE=5,        */
+         /* overføres til outputfil.  EN gang pr. cprnr               */
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA A/S 2004');       
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : Indlæs behandlet beregningsbånd (fra BH94100) samt        * 
+ *          fil med ejer som skal have undersøgt udfra 8 års regl     * 
+ *          i stedet for 1 års regl.                                  * 
+ ********************************************************************** 
+ *                                                                    * 
+ * INPUT  : B.H94100D  Beregningsbånd opdateret med persontype mv.    * 
+ *                                                                    * 
+ * OUTPUT : B.H94700D  Personer med cenke 5 på ESR-UDTRÆK             * 
+ *                                                                    * 
+ ********************************************************************** 
+ * NYT PROGRAM : Esben Brodersen QEB                      14.11.2017  * 
+ * Skal kun bruges i EVS slut 2017 til planlov derefter udgår det     * 
+ ********************************************************************** 
+ *                                                                    * 
+ '*********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH943I FILE RECORD INPUT;                                      
+ DCL     BH949O FILE RECORD OUTPUT;                                     
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+ DCL     BH943_AR        CHAR      (6000) VAR;                          
+ DCL     1 BH943         BASED     (ADDR(BH943_AR)),                    
+           2 LÆNGDE      BIN FIXED (15),                                
+              %INCLUDE BH90000N;;                                       
+                                                                        
+ DCL     1 BH94399       BASED     (ADDR(BH943_AR)),                    
+           3 LÆNGDE      BIN FIXED (15),                                
+                %INCLUDE BH90000N;;                                     
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. FÆLLESMACROER                        * 
+ *********************************************************************/ 
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE TIL LISTE PRINT                                      */
+ /*********************************************************************/
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ DCL    1 LINIE,                                                        
+          2 CCA          CHAR      (01),                                
+          2 INDHOLD      CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL    HJ_PIC9          PIC       '(8)Z9';                             
+ DCL    UDDATO          CHAR       (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (4),                                 
+           2 F1          CHAR      (1),                                 
+           2 MD          CHAR      (2),                                 
+           2 F2          CHAR      (1),                                 
+           2 DG          CHAR      (2);                                 
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     EOF_BH943       BIT       (1);                                 
+ DCL     ANTAL_LÆST      BIN FIXED (31);                                
+ DCL     ANTAL_SKREVET   BIN FIXED (31);                                
+ DCL     GEMCPRNR        FIXED   (11);  /* Personnr                  */ 
+ DCL     ER_CPR_SKREVET  BIT      (1);                                  
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /*TIMESTAMP    */ 
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS30101         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                       /*??*/ 
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+         EOF_BH943 = '0'B;                                              
+         ON ERROR                                                       
+            CALL PLIDUMP ('SNHOB');                                     
+         CALL ZZ20390 ('*OPEN','BH94901Y');                             
+         OPEN FILE (BH943I) TITLE ('BH94301I');                         
+         OPEN FILE (BH949O) TITLE ('BH94900O');                         
+         ON ENDFILE (BH943I)                                            
+            EOF_BH943 = '1'B;                                           
+                                                                        
+                                                                        
+         CALL ZS38100(DATO1);                   /* Skaf timestamp */    
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+         GEMCPRNR   = 0;                                                
+         ANTAL_LÆST = 0; /* antal læste records */                      
+         ANTAL_SKREVET = 0; /* antal skrevne records  */                
+         ER_CPR_SKREVET = NEJ;                                          
+                                                                        
+         CALL LÆS_BH943;                                                
+                                                                        
+         DO WHILE ( ^EOF_BH943 );                                       
+                                                                        
+         /*  put skip list ('record ' !! i !! ': cprnr: ' !!            
+                           BH943.SORT_CPR !!                            
+                           ' CENKE = ' !!                               
+                            BH943.TIL_EVS.CENKE); */                    
+                                                                        
+            IF GEMCPRNR ^= BH943.SORT_CPR                               
+            THEN                                                        
+              DO;                                                       
+                GEMCPRNR = BH943.SORT_CPR;                              
+                ER_CPR_SKREVET = NEJ;                                   
+                IF BH943.TIL_EVS.CENKE = '5' &                          
+                   BH943.EVS_SLUT_EJER.SIDSTE.CSLET < '1'               
+                THEN                                                    
+                  DO;                                                   
+                    /* der er fundet en CENKE 5 */                      
+                    CALL SKRIV;                                         
+                    ER_CPR_SKREVET = JA;                                
+                  END;                                                  
+              END;                                                      
+            ELSE                                                        
+              DO;                                                       
+                IF BH943.TIL_EVS.CENKE = '5' &                          
+                   BH943.EVS_SLUT_EJER.SIDSTE.CSLET < '1'               
+                THEN                                                    
+                  DO;  /* der er fundet en CENKE 5 */                   
+                    IF ANTAL_LÆST = 1                                   
+                    THEN                                                
+                      DO;                                               
+                        CALL SKRIV;                                     
+                        ER_CPR_SKREVET = JA;                            
+                      END;                                              
+                    ELSE                                                
+                      DO;                                               
+                        IF ER_CPR_SKREVET = NEJ                         
+                        THEN                                            
+                          DO;                                           
+                            CALL SKRIV;                                 
+                            ER_CPR_SKREVET = JA;                        
+                          END;                                          
+                      END;                                              
+                  END;                                                  
+              END;                                                      
+            CALL LÆS_BH943;                                             
+         END; /* end-do while */                                        
+                                                                        
+         /* sørg for et slut cpr på filen format ? */                   
+         /*  BH94399.SORT_CPR = 99999999999;                            
+             CALL SKRIV; */                                             
+                                                                        
+         CALL AFSLUT;                                                   
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR (efter det er behandlet i BH94300         * 
+ *********************************************************************/ 
+ LÆS_BH943:PROC;                                                        
+                                                                        
+         READ FILE (BH943I) INTO (BH943_AR);                            
+         IF BH94399.SORT_CPR = 99999999999     /* OPTÆLLINGSINDIVID */  
+         THEN                                                           
+            DO;                                                         
+               EOF_BH943 = '1'B;                                        
+            END;                                                        
+                                                                        
+         ANTAL_LÆST = ANTAL_LÆST + 1;  /* antal læste records */        
+                                                                        
+ END LÆS_BH943;                                                         
+                                                                        
+ /********************************************************************* 
+ *       SKRIV PERSONNR med mindst EN ejendom med CENKE=5             * 
+ *********************************************************************/ 
+ SKRIV:PROC;                                                            
+                                                                        
+                                                                        
+         ANTAL_SKREVET = ANTAL_SKREVET + 1;                             
+         WRITE FILE (BH949O) FROM (BH943_AR);                           
+                                                                        
+ END SKRIV;                                                             
+                                                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:PROC;                                                           
+                                                                        
+                                                                        
+      /*sideskift*/                                                     
+      LINIE.CCA     = ZZIK1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*overskrift*/                                                    
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'KØRSELS TOTALER FOR BH94900 AFVIKLET DEN ' !!    
+                      UDDATO;                                           
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*mellemrum*/                                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*alm linie*/                                                     
+      HJ_PIC9       = ANTAL_LÆST;                                       
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL LÆSTE RECORDS: ' !! HJ_PIC9;               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*alm linie*/                                                     
+      HJ_PIC9       = ANTAL_SKREVET;                                    
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL SKREVET PERSONER MED CENKE LIG 5: ' !!     
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+                                                                        
+      /*                                                                
+      put skip list ('Antal læste records: ' !! ANTAL_LÆST);            
+      put skip list ('Antal personer med cenke 5: ' !! ANTAL_SKREVET);  
+      */                                                                
+                                                                        
+      CALL ZZ20300(' ','99'); /*luk print datasæt*/                     
+      CLOSE FILE (BH943I),                                              
+            FILE (BH949O);                                              
+                                                                        
+ END AFSLUT;                                                            
+ END  BH94900;                                                          

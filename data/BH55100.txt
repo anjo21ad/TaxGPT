@@ -1,0 +1,471 @@
+ BH55100: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD / EVS SLUT                                 *
+ * PROGRAMNAVN: BH55100.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET LÆSER PENSIONSUDTRÆK OG DANNER DB2-TABEL    *
+ *              MED OPLYSNINGERNE FOR hhv FORSKUD OG SLUT iflg PARM    *
+ * PGMFORLØB:   1. ÅBEN PENSIONS-UDTRÆK                                *
+ *              2. LÆS PENSIONS-UDTRÆK                                 *
+ *              3. LÆS RÆKKE PÅ DB2-TABEL BQ63000T                     *
+ *              4. Hvis række findes, Update BQ63000T ellers Insert    *
+ *              5. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     B.H65000D - PENSIONSUDTRÆK                             *
+ *                                                                     *
+ * UDDATA:      BH55101Y - KONTROLLISTE.                               *
+ *              BQ63000T - EVS UDTRÆK SLUT                             *
+ ***********************************************************************
+ * OPRETTET   : Lene Maj Jensen   QLE             BALLERUP 16.01.2017  *
+ **********************************************************************/
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KOMMUNEDATA A/S 2006');    
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     BH551I FILE RECORD INPUT;     /* Parameter Forskud-Slut */     
+ DCL     BH652I FILE RECORD INPUT;                                      
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+         EXEC SQL INCLUDE BQ63000T;  /* PENSIONSUDTRÆK                */
+         EXEC SQL INCLUDE BQ6300HT;  /* PENSIONSUDTRÆK historik       */
+                                                                        
+         EXEC SQL INCLUDE BQ69000T;  /* Kørselstabel                  */
+         EXEC SQL INCLUDE BQ6900HT;  /* Kørselstabel hist             */
+ /*********************************************************************/
+ /*      DECLARE AF INPUT FRA PENS. SYSTEM                            */
+ /*********************************************************************/
+ DCL     1 BH652,                                                       
+         %INCLUDE BH65200N;                                             
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH55100');              
+                                                                        
+ DCL     1 BH551_PARM,                                                  
+           %INCLUDE BH54900N;                                           
+                                                                        
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_BH551       BIT       (01)      INIT      ('0'B);          
+ DCL     EOF_BH652       BIT       (01)      INIT      ('0'B);          
+ DCL     JA                 BIT       (1)     INIT ('1'B);              
+ DCL     NEJ                BIT       (1)     INIT ('0'B);              
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH55100'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*********************************************************************/
+                                                                        
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (1),                                 
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH55100L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (43)      INIT      (                
+           'PENSIONSUDTRÆK '),                                          
+           2 ÅR          PIC       '9999',                              
+           2 F2          CHAR      (21)      INIT      ((21)' '),       
+           2 TEKST4      CHAR      (14)      INIT      (                
+           'UDSKREVET DEN '),                                           
+           2 DATO        CHAR      (10);                                
+                                                                        
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 F1          CHAR      (53)      INIT      (' '),           
+           2 TEKST1      CHAR      (79)      INIT                       
+           ('KØRSELSKONTROLLISTE');                                     
+                                                                        
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (53),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F1          CHAR      (68)      INIT      (' ');           
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANT_SKR BIN FIXED (31) INIT(0);   /* ANTAL SKREVET PÅ UDTRÆK */
+ DCL     ANT_INS BIN FIXED (31) INIT(0);   /* HERAF INSERTED */         
+ DCL     ANT_UPD BIN FIXED (31) INIT(0);   /* HERAF UPDATED  */         
+ DCL     ANT_COMM BIN FIXED (31) INIT(0);  /* COMMIT TÆLLER */          
+ /*********************************************************************/
+ /* Declare af Cursors                                                */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BH551 = NEJ;                                               
+         EOF_BH652 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH55100L');             
+            END;                                                        
+                                                                        
+         OPEN FILE (BH551I) TITLE ('BH55100P');                         
+         OPEN FILE (BH652I) TITLE ('BH65201I');                         
+                                                                        
+         ON ENDFILE (BH551I)                                            
+         BEGIN;                                                         
+            EOF_BH551 = JA;                                             
+         END;                                                           
+                                                                        
+         ON ENDFILE (BH652I)                                            
+         BEGIN;                                                         
+            EOF_BH652 = JA;                                             
+         END;                                                           
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         READ FILE (BH551I) INTO (BH551_PARM);                          
+                                                                        
+         IF EOF_BH551 = NEJ                                             
+         THEN DO;                                                       
+            SELECT (BH551_PARM.FS_MRK);                                 
+               WHEN ('F')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH551_PARM.FORSKUD_TXT;      
+                     WS_TIL_EVS_AAR = BH65300M.FORSKÅR;                 
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH551_PARM.SLUT_TXT;       
+                     OVERLIN1.TEKST2 = 'PENSIONSUDTRÆK FORSKUD';        
+                  END;                                                  
+               WHEN ('S')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH551_PARM.SLUT_TXT;         
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH551_PARM.SLUT_TXT;       
+                     OVERLIN1.TEKST2 = 'PENSIONSUDTRÆK SLUT';           
+                  END;                                                  
+               WHEN ('U')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH551_PARM.SUPPL_TXT;        
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH551_PARM.SLUT_TXT;       
+                     OVERLIN1.TEKST2 = 'PENSIONSUDTRÆK SUPPLEMENT';     
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+         CALL OPDATER_KØRSELSTABEL('START',BH551_PARM.FS_MRK);          
+                                                                        
+         CALL ZZ20390('*OPEN','BH55101Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.ÅR   = GLSLUTÅR;                                      
+         OVERLIN1.DATO = UDDATO;                                        
+         SIDELIN.CCA   = ZZIK1;                                         
+         OVERLIN1.CCA  = ZZWS2;                                         
+         OVERLIN2.CCA  = ZZWS3;                                         
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         READ FILE (BH652I) INTO (BH652);                               
+                                                                        
+         DO WHILE (^EOF_BH652);                                         
+            IF BH652.DCPRN = 9999999999                                 
+            THEN DO;                                                    
+               EOF_BH652 = '1'B;                                        
+            END;                                                        
+            ELSE DO;                                                    
+               /* check om der findes en række, og  */                  
+               /* insert eller update efterfølgende */                  
+               CALL INSERT_UPDATE_PENSIONSOPL;                          
+               READ FILE (BH652I) INTO (BH652);                         
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 0                                                
+         THEN DO;                                                       
+            EXEC SQL COMMIT;                                            
+            Put skip list ('Commit efter ' !! ANT_COMM !!               
+                           ' opdateringer.  Ialt ' !! ANT_UPD !!        
+                           ' opdateringer');                            
+            ANT_COMM = 0;                                               
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* CHECK OM RÆKKE FINDES OG INSERT/UPDATE herefter            RUTINE */
+ /*********************************************************************/
+ INSERT_UPDATE_PENSIONSOPL: PROC;                                       
+                                                                        
+         DCLBQ63000T = '';                                              
+         DCLBQ63000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                   
+         DCLBQ63000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;              
+         DCLBQ63000T.DCPRN          = BH652.DCPRN;                      
+         DCLBQ63000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+         DCLBQ63000T.DB2FUNKTION    = 'I';                              
+         DCLBQ63000T.CITYP          = BH652.CITYP;                      
+                                                                        
+         EXEC SQL                                                       
+            SELECT TIL_EVS_AAR,DCPRN,PROGRAMNAVN,DB2FUNKTION            
+                  ,AFVIKLINGS_ID,CITYP                                  
+            INTO   :DCLBQ63000T.TIL_EVS_AAR,                            
+                   :DCLBQ63000T.DCPRN,                                  
+                   :DCLBQ63000T.PROGRAMNAVN,                            
+                   :DCLBQ63000T.DB2FUNKTION,                            
+                   :DCLBQ63000T.AFVIKLINGS_ID,                          
+                   :DCLBQ63000T.CITYP                                   
+            FROM BQ63000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBQ63000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ63000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ63000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               CALL UPDATE_PENSIONSOPL;                                 
+            END;                                                        
+            WHEN(100) DO;                                               
+               CALL INSERT_PENSIONSOPL;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ63000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 9999                                             
+         THEN DO;                                                       
+            EXEC SQL COMMIT;                                            
+             Put skip list ('Commit efter ' !! ANT_COMM !!              
+                            ' opdateringer.  Ialt ' !! ANT_SKR !!       
+                            ' opdateringer');                           
+             ANT_COMM = 0;                                              
+         END;                                                           
+                                                                        
+ END INSERT_UPDATE_PENSIONSOPL;                                         
+ /*********************************************************************/
+ /* INSERT række på EVS UDTRÆK                                 RUTINE */
+ /*********************************************************************/
+ INSERT_PENSIONSOPL: PROC;                                              
+                                                                        
+         DCLBQ63000T = '';                                              
+         DCLBQ63000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                   
+         DCLBQ63000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;              
+         DCLBQ63000T.DCPRN          = BH652.DCPRN;                      
+         DCLBQ63000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+         DCLBQ63000T.DB2FUNKTION    = 'I';                              
+         DCLBQ63000T.CITYP          = BH652.CITYP;                      
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BQ63000T                                        
+            (                                                           
+            TIL_EVS_AAR,AFVIKLINGS_ID,DCPRN,PROGRAMNAVN,DB2FUNKTION     
+            ,CITYP                                                      
+            )                                                           
+            values                                                      
+            (                                                           
+             :DCLBQ63000T.TIL_EVS_AAR,                                  
+             :DCLBQ63000T.AFVIKLINGS_ID,                                
+             :DCLBQ63000T.DCPRN,                                        
+             :DCLBQ63000T.PROGRAMNAVN,                                  
+             :DCLBQ63000T.DB2FUNKTION,                                  
+             :DCLBQ63000T.CITYP                                         
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_SKR = ANT_SKR + 1;                                   
+               ANT_INS = ANT_INS + 1;                                   
+               ANT_COMM = ANT_COMM + 1;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 INSERT BQ63000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END INSERT_PENSIONSOPL;                                                
+ /*********************************************************************/
+ /* UPDATE række på EVS UDTRÆK                                 RUTINE */
+ /*********************************************************************/
+ UPDATE_PENSIONSOPL: PROC;                                              
+                                                                        
+         DCLBQ63000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+         DCLBQ63000T.DB2FUNKTION    = 'U';                              
+         DCLBQ63000T.CITYP          = BH652.CITYP;                      
+                                                                        
+         EXEC SQL                                                       
+            UPDATE BQ63000T                                             
+            SET PROGRAMNAVN     = :DCLBQ63000T.PROGRAMNAVN,             
+                DB2FUNKTION     = :DCLBQ63000T.DB2FUNKTION,             
+                CITYP           = :DCLBQ63000T.CITYP                    
+            WHERE TIL_EVS_AAR   = :DCLBQ63000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ63000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ63000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_SKR = ANT_SKR + 1;                                   
+               ANT_UPD = ANT_UPD + 1;                                   
+               ANT_COMM = ANT_COMM + 1;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 UPDATE BQ63000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END UPDATE_PENSIONSOPL;                                                
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+                                                                        
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.TEKST =                                                
+         'ANTAL UDTRUKNE PENSIONSOPLYSNINGER PÅ B.H65200D';             
+         DETLIN1.ANTAL = ANT_SKR;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.TEKST =                                                
+         '   HERAF NYE RÆKKER (INSERT)       ';                         
+         DETLIN1.ANTAL = ANT_INS;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.TEKST =                                                
+         '   HERAF OPDATEREDE RÆKKER (UPDATE)';                         
+         DETLIN1.ANTAL = ANT_UPD;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL KONTROLLISTE;                                             
+         CLOSE FILE (BH551I);                                           
+         CLOSE FILE (BH652I);                                           
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+         CALL OPDATER_KØRSELSTABEL('SLUT',BH551_PARM.FS_MRK);           
+                                                                        
+ END AFSLUT;                                                            
+ %INCLUDE BH54998M; /* OPDATER KØRSELSTABEL */                          
+ END BH55100;                                                           

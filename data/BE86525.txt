@@ -1,0 +1,1482 @@
+ BE86525: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD / EVS SLUT                                 *
+ * PROGRAMNAVN: BE86500.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Konvertering af ESR til DB2-tabeller                   *
+ *              til ønsket år ifølge parameterfil                      *
+ * PGMFORLØB:   1. Slet data i tabeller for ønsket år/afv.id           *
+ *              2. Læs ESR seq dataset                                 *
+ *              3. Check hvilken type input og vælg korrekt struktur   *
+ *              4. SKRIV RÆKKER PÅ DB2-TABELLER                        *
+ *              5. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     ESR dataset (type iflg. BE86PI)                        *
+ *                  ESR1 - BE31800N                                    *
+ *                  ESR2 - BE32400N                                    *
+ *                                                                     *
+ * UDDATA:      BE86501Y - KONTROLLISTE.                               *
+ *              BE65000T - ESR-OPLYSNINGER                             *
+ ***********************************************************************
+ * OPRETTET   : Lene Maj Jensen   QLE             BALLERUP 26.02.2018  *
+ * RETTET     : Esben Brodersen   EBD             BALLERUP 26.09.2018  *
+ * NYE FELTER EENHEDLBNR, TEKFEJLNR                                    *
+ *                                                                     *
+ *FORSKUD20 #02:Edward Laryea, EDL                     22-03-2019      *
+ *              Nyt felt STRAKS_EVS i BH32202N/BH31800N                *
+ *FORSKUD20 #03:Edward Laryea, EDL                     27-03-2019      *
+ *              Nyt felt STRAKS_EVS skrives på BQ65000T                *
+ *FORSKUD2021  :Per Brunk, PBR og EBD                  14-05-2020      *
+ *              Nye felter VURMARK og VUR2001 i BH32202N/BH31800N      *
+ *              Nye felter VURMARK og VUR2001 skrives på BQ65000T i    *
+ *              OPL_VUR2001,  OPL_VURMARK, OPL_VURDNY_VURMARK,         *
+ *              OPL_VURDGL_VURMARK, OPL_VURD02_VURMARK,                *
+ *              OPL_VURD01_VURMARK                                     *
+ *                                                                     *
+ *SLUT2020     :Per Brunk, PBR                         28-10-2020      *
+ *              Nye felter i BH31800N, skrives ikke på BQ65000T        *
+ *                                                                     *
+ * 14122020 PBR: NYE FELTER BFE, VEI, juridiske kategorier og          *
+ *               vurderingstermin samt FORSIGT_EVS og BESKAT_EVS       *
+ * Slut 2020   : Elena Flygenring EFL                     marts 2021   *
+ *              - ny kopi af BH86500                                   *
+ *              - Ny struktur BH31822N i stedet for BH31800N           *
+ *              - struktur BH65300M erstattes med BH55300M             *
+ *              - Brug af FILE BH865I og BH865_PARM fjernes            *
+ *              - BH865_PARM.FS_MARK fjernes                           *
+ *              - BH865_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes  *
+ *                erstattes med brug af BH55300M.AFVIKLINGS_ID         *
+ *              - BH865_PARM.AAR fjernes                               *
+ *                erstattes med brug af BH55300M.TIL_EVS_AAR           *
+ *              - Brug af include BH54999M fjernes                     *
+ *              - BQ65000T: nyt felt DATA_ID tilføjet                  *
+ * FORSKUD25    Tina Carstens, TIC                     BF17 15-05-2023 *
+ *              Årsrulning                                             *
+ * FORSKUD25    Jan Jensen, JJJ                        BF17 19-06-2024 *
+ *              BE55600M erstatter BE55300M                            *
+ **********************************************************************/
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KOMMUNEDATA A/S 2006');    
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     BE86PI FILE RECORD INPUT;     /* Styring af inputtype   */     
+ DCL     BEESRI FILE RECORD INPUT;     /* ESR-fil                */     
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+ /*********************************************************************/
+ /* DECLARE AF Øvrige filer                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     1 KOER_PARM,  /* styrer hvilket input der benyttes */          
+         3 KØRSELS_ID        CHAR(5),  /* MT1, MT2, ESR1, ESR2 osv */   
+         3 REST              CHAR(75);                                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+         EXEC SQL INCLUDE BE65000T;;       /* ESR (FORSKUD)           */
+                                                                        
+ DCL     1 ESR,                                                         
+         %INCLUDE BE6500TN;;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF includes til esr-filer                            */
+ /* hvilken struktur der benyttes er parameterstyret                  */
+ /*********************************************************************/
+                                                                        
+         /* ESR BE31825N */                                             
+ DCL     BE318_AR        CHAR      (3000) VAR;                          
+ DCL     1 BE318         BASED     (ADDR(BE318_AR)),                    
+           4 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BE31825N;                                           
+                                                                        
+         /* ESR BE32400N */                                             
+ DCL     BE324_AR        CHAR      (3000) VAR;   /*RUL*/                
+ DCL     1 BE324        BASED(ADDR(BE324_AR)), /*RUL*/                  
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BE32400N;;                                          
+                                                                        
+ DCL     1 BE32410       BASED(ADDR(BE324_AR)), /*RUL*/                 
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BE32410N;;                   /*RUL*/                
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF gemmefelter                                            */
+ /*********************************************************************/
+ DCL     1 GEM_NØGLE,                                                   
+         3 DCPRN        FIXED (11),                                     
+         3 EKOMNR       FIXED (3),                                      
+         3 EEJDNR       FIXED (7),                                      
+         3 EGENNR       BIN FIXED (15);                                 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_KØRSELS_ID                 CHAR(5);                         
+                                                                        
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_Z_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                  
+                                                                        
+ DCL     WS_Z_TIL_EVS_AAR                 BIN FIXED (15);               
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE86525');              
+                                                                        
+ DCL     WS_ESR_SEKVENS_NR BIN FIXED(31) init (0);                      
+                                                                        
+ DCL     1 BE88Z_PARM,                                                  
+           %INCLUDE BE86500N;                                           
+                                                                        
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_BE88P       BIT       (01)      INIT      ('0'B);          
+ DCL     EOF_BEESR       BIT       (01)      INIT      ('0'B);          
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     TEST_PUT        BIT       (1)     INIT ('0'B);                 
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE86525'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*********************************************************************/
+                                                                        
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (1),                                 
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE86525L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (43)      INIT      (                
+           'ESR INPUT TIL BEREGNING '),                                 
+           2 ÅR          PIC       '9999',                              
+           2 F2          CHAR      (21)      INIT      ((21)' '),       
+           2 TEKST4      CHAR      (14)      INIT      (                
+           'UDSKREVET DEN '),                                           
+           2 DATO        CHAR      (10);                                
+                                                                        
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 F1          CHAR      (53)      INIT      (' '),           
+           2 TEKST1      CHAR      (79)      INIT                       
+           ('KØRSELSKONTROLLISTE');                                     
+                                                                        
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (53),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F1          CHAR      (68)      INIT      (' ');           
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANT_INS_ESR BIN FIXED (31) INIT(0);  /* HERAF INSERTED */      
+ DCL     ANT_LÆS BIN FIXED (31) INIT(0);      /* LÆST PÅ ESR-dataset  */
+ /*********************************************************************/
+ /* Declare af Cursors                                                */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BEESR = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE86525L');             
+            END;                                                        
+                                                                        
+         ON ENDFILE (BEESRI)                                            
+         BEGIN;                                                         
+            EOF_BEESR = JA;                                             
+            /* BE318.DCPRCIR = 9999999999;                              
+            BE324.SORTCPR = 9999999999; */                              
+         END;                                                           
+                                                                        
+         ON ENDFILE (BE86PI)                                            
+         BEGIN;                                                         
+            EOF_BE88P = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (BE86PI) TITLE ('BE8650PZ');                         
+         OPEN FILE (BEESRI) TITLE ('BEESR00I');                         
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+           WHEN ('OPRET_EVS_FORSK')                                     
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;            
+                 OVERLIN1.TEKST2     = 'ESR data FORSKUD';              
+              END;                                                      
+           WHEN ('OPRET_EVS_SLUT ')                                     
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;            
+                 OVERLIN1.TEKST2     = 'ESR data SLUT';                 
+              END;                                                      
+           WHEN ('SUPPL_EVS_SLUT')                                      
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;            
+                 OVERLIN1.TEKST2     = 'ESR data SUPPLEMENT';           
+              END;                                                      
+           OTHERWISE                                                    
+              DO;                                                       
+                 ABENDTXT = 'Afviklings_id skal være '           !!     
+                            'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!       
+                            'eller SUPPL_EVS_SLUT';                     
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+         END; /* select */                                              
+                                                                        
+         READ FILE (BE86PI) INTO (KOER_PARM);                           
+                                                                        
+         IF EOF_BE88P = NEJ                                             
+         THEN DO;                                                       
+            SELECT (KOER_PARM.KØRSELS_ID);                              
+               WHEN ('ESR1')                                            
+                  DO;                                                   
+                     WS_KØRSELS_ID = KOER_PARM.KØRSELS_ID;              
+                  END;                                                  
+               WHEN ('ESR2')                                            
+                  DO;                                                   
+                     WS_KØRSELS_ID = KOER_PARM.KØRSELS_ID;              
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         CALL ZZ20390('*OPEN','BE86501Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.ÅR   = GLSLUTÅR - 1;                                  
+         OVERLIN1.DATO = UDDATO;                                        
+         SIDELIN.CCA   = ZZIK1;                                         
+         OVERLIN1.CCA  = ZZWS2;                                         
+         OVERLIN2.CCA  = ZZWS3;                                         
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL RYD_DB2_TABELLER; /* for:                               */
+                            /* til_evs_aar = BE55600M.TIL_EVS_AAR     */
+                            /* afviklings_id = BE55600M.AFVIKLINGS_ID */
+                            /* kørsels_id = koer_parm.kØRSELS_ID      */
+                                                                        
+         IF WS_KØRSELS_ID = 'ESR1'                                      
+         then do;                                                       
+            CALL BEHANDL_ESR1;                                          
+         end;                                                           
+                                                                        
+         IF WS_KØRSELS_ID = 'ESR2'                                      
+         then do;                                                       
+            CALL BEHANDL_ESR2;                                          
+         end;                                                           
+                                                                        
+         exec sql commit;                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Behandl ESR med struktur BE31825N                                 */
+ /*********************************************************************/
+ BEHANDL_ESR1: PROC;                                                    
+                                                                        
+         WS_ESR_SEKVENS_NR = 0;                                         
+                                                                        
+         CALL LÆS_ESR1_DATASET;                                         
+                                                                        
+         DO WHILE (^EOF_BEESR);                                         
+                                                                        
+            /* Start med at nulstille output struktur */                
+            DCLBE65000T = '';                                           
+            WS_ESR_SEKVENS_NR = WS_ESR_SEKVENS_NR + 1;                  
+            /* flyt data fra esr-dataset til db2-struktur */            
+            CALL FLYT_FELTER_BE318;                                     
+                                                                        
+            CALL INSERT_ESROPL;                                         
+                                                                        
+            CALL LÆS_ESR1_DATASET;                                      
+         END;                                                           
+                                                                        
+ END BEHANDL_ESR1;                                                      
+                                                                        
+ /*********************************************************************/
+ /* Behandl ESR med struktur BE32400N                                 */
+ /*********************************************************************/
+ BEHANDL_ESR2: PROC;                                                    
+                                                                        
+         WS_ESR_SEKVENS_NR = 0;                                         
+                                                                        
+         CALL LÆS_ESR2_DATASET;                                         
+                                                                        
+         DO WHILE (^EOF_BEESR);                                         
+                                                                        
+            /* Start med at nulstille output struktur */                
+            DCLBE65000T = '';                                           
+            WS_ESR_SEKVENS_NR = WS_ESR_SEKVENS_NR + 1;                  
+            /* flyt data fra esr-dataset til db2-struktur */            
+            CALL FLYT_FELTER_BE324;                                     
+                                                                        
+            CALL INSERT_ESROPL;                                         
+                                                                        
+            CALL LÆS_ESR2_DATASET;                                      
+         END;                                                           
+                                                                        
+ END BEHANDL_ESR2;                                                      
+ /*********************************************************************/
+ /* Læs ESR dataset med BE31825N struktur                             */
+ /*********************************************************************/
+ LÆS_ESR1_DATASET: PROC;                                                
+                                                                        
+ LÆS_ESR1_NÆSTE:                                                        
+                                                                        
+       EOF_BEESR = '0'B;                                                
+                                                                        
+       READ FILE (BEESRI) INTO (BE318_AR);                              
+                                                                        
+       ANT_LÆS = ANT_LÆS + 1;                                           
+                                                                        
+       IF ^EOF_BEESR &                                                  
+           BE318.DCPRCIR >= 9999999999                                  
+       THEN                                                             
+          GOTO LÆS_ESR1_NÆSTE;                                          
+                                                                        
+       /* IF BE318.DCPRCIR >= 9999999999                                
+       THEN DO;                                                         
+          EOF_BEESR = '1'B;                                             
+       END; */                                                          
+                                                                        
+ END LÆS_ESR1_DATASET;                                                  
+                                                                        
+ /*********************************************************************/
+ /* Læs ESR dataset med BE32400N struktur                             */
+ /*********************************************************************/
+ LÆS_ESR2_DATASET: PROC;                                                
+                                                                        
+ LÆS_ESR2_NÆSTE:                                                        
+                                                                        
+       EOF_BEESR = '0'B;                                                
+                                                                        
+       READ FILE (BEESRI) INTO (BE324_AR);                              
+                                                                        
+       ANT_LÆS = ANT_LÆS + 1;                                           
+                                                                        
+       IF ^EOF_BEESR &                                                  
+           BE324.SORTCPR >= 9999999999                                  
+       THEN                                                             
+          GOTO LÆS_ESR2_NÆSTE;                                          
+                                                                        
+       /* IF BE324.SORTCPR >= 9999999999                                
+       THEN DO;                                                         
+          EOF_BEESR = '1'B;                                             
+       END; */                                                          
+                                                                        
+ END LÆS_ESR2_DATASET;                                                  
+                                                                        
+ /*********************************************************************/
+ /* FLYT FELTER FRA ESR1-struktur TIL DB2-STRUKTURER  FRA FORSKUD     */
+ /*********************************************************************/
+ FLYT_FELTER_BE318: PROC;                                               
+                                                                        
+    ESR = '';                                                           
+    ESR.TIL_EVS_AAR = WS_TIL_EVS_AAR;                                   
+    ESR.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                            
+    ESR.DATA_ID   = BE55600M.DATA_ID;                                   
+    ESR.ESR_SEKVENS_NR = WS_ESR_SEKVENS_NR;                             
+    ESR.KØRSELS_ID = 'ESR1';                                            
+                                                                        
+    ESR.PROGRAMNAVN = WS_PROGRAMNAVN;                                   
+    ESR.DB2FUNKTION = 'I';                                              
+    ESR.DCPRN = BE318.DCPRCIR;                                          
+    ESR.EKOMNR = BE318.EKOMNR;                                          
+    ESR.EEJDNR = BE318.EEJDNR;                                          
+    ESR.BFENR  = BE318.BFENR;     /* PBR */                             
+    ESR.VUREJENDOMID = BE318.VUREJENDOMID; /* PBR */                    
+    ESR.EENHEDLBNR = 0; /* modtages ikke i BE31825N */                  
+    ESR.SORTCITYP = BE318.CITYP;                                        
+    ESR.EJER_DCPRCIR = BE318.DCPRCIR;                                   
+    ESR.EJER_CITYP = BE318.CITYP;                                       
+    ESR.EJER_DOVTG = BE318.DOVTG;                                       
+    ESR.EJER_DAFSTÅ = BE318.DAFSTÅ;                                     
+    ESR.EJER_DAFGDAT = BE318.DAFGDAT;                                   
+    ESR.EJER_DSLUTS = BE318.DSLUTS;                                     
+    ESR.EJER_DSKØDE = BE318.DSKØDE;                                     
+    ESR.EJER_CEJFOER0107 = BE318.CEJFOER0107;                           
+    ESR.EJER_CEJFORH = BE318.CEJFORH;                                   
+    ESR.EJER_CPENS = BE318.CPENS;                                       
+    ESR.EJER_FEJER = BE318.FEJER;                                       
+    ESR.EJER_GANE = BE318.GANE;                                         
+    ESR.EJER_CHEJD = BE318.CHEJD;                                       
+    ESR.EJER_VEJK_EJER = BE318.VEJK_EJER;                               
+    ESR.EJER_HUSNR_EJER = BE318.HUSNR_EJER;                             
+    ESR.EJER_ETAGE_EJER = BE318.ETAGE_EJER;                             
+    ESR.EJER_SDØR_EJER = BE318.SDØR_EJER;                               
+    ESR.OPL_ABELMAT = BE318.ABELMAT;                                    
+    ESR.OPL_VURDNY_DVURDÅR = BE318.VURDOPLNY.DVURDÅR;                   
+    ESR.OPL_VURDNY_VURMARK = BE318.VURDOPLNY.VURMARK;                   
+    ESR.OPL_VURDNY_CBENYT = BE318.VURDOPLNY.ÅRSVURD.CBENYT;             
+    ESR.OPL_VURDNY_FLEJL = BE318.VURDOPLNY.ÅRSVURD.FLEJL;               
+    ESR.OPL_VURDNY_BEJDVÆR = BE318.VURDOPLNY.ÅRSVURD.BEJDVÆR;           
+        /* PBR nye felter start */                                      
+    ESR.OPL_VURDNY_JUR_KATEGO  =                                        
+        BE318.VURDOPLNY.ÅRSVURD.JUR_KATEGORI;                           
+    ESR.OPL_VURDNY_JUR_UKATEGO =                                        
+        BE318.VURDOPLNY.ÅRSVURD.JUR_UKATEGORI;                          
+    ESR.OPL_VURDNY_VURDATO     =                                        
+        BE318.VURDOPLNY.ÅRSVURD.VURDATO;                                
+    ESR.OPL_VURDNY_FORSIGT_EVS =                                        
+        BE318.VURDOPLNY.ÅRSVURD.FORSIGT_EVS;                            
+    ESR.OPL_VURDNY_BESKAT_EVS  =                                        
+        BE318.VURDOPLNY.ÅRSVURD.BESKAT_EVS;                             
+    /* PBR nye felter slut */                                           
+    ESR.OPL_VURDNY_COMVGR1 = BE318.VURDOPLNY.ÅRSVURD.COMVGR1;           
+    ESR.OPL_VURDNY_COMVGR2 = BE318.VURDOPLNY.ÅRSVURD.COMVGR2;           
+    ESR.OPL_VURDNY_BEJDVÆP4A = BE318.VURDOPLNY.ÅRSVURD.BEJDVÆP4A;       
+    ESR.OPL_VURDNY_BSKOV = BE318.VURDOPLNY.ÅRSVURD.BSKOV;               
+    ESR.OPL_VURDNY_CUOP = BE318.VURDOPLNY.ÅRSVURD.CUOP;                 
+    ESR.OPL_VURDNY_CEJERL = BE318.VURDOPLNY.ÅRSVURD.CEJERL;             
+    ESR.OPL_VURDNY_CFORSKEL = BE318.VURDOPLNY.ÅRSVURD.CFORSKEL;         
+    ESR.OPL_VURDNY_CBANV = BE318.VURDOPLNY.ÅRSVURD.CBANV;               
+    ESR.OPL_VURDNY_DOPFØ = BE318.VURDOPLNY.ÅRSVURD.DOPFØ;               
+    ESR.OPL_VURDNY_DOMTIL = BE318.VURDOPLNY.ÅRSVURD.DOMTIL;             
+    ESR.OPL_VURDNY_EJBOL1_VEJK_EJEB =                                   
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).VEJK_EJEB;                        
+    ESR.OPL_VURDNY_EJBOL1_HUSNR_EJEB =                                  
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).HUSNR_EJEB;                       
+    ESR.OPL_VURDNY_EJBOL1_ETAGE_EJEB =                                  
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).ETAGE_EJEB;                       
+    ESR.OPL_VURDNY_EJBOL1_SDØR_EJEB =                                   
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).SDØR_EJEB;                        
+    ESR.OPL_VURDNY_EJBOL1_EJBOLTYP =                                    
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).EJBOLTYP;                         
+    ESR.OPL_VURDNY_EJBOL1_BEJEBOL =                                     
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(1).BEJEBOL;                          
+    ESR.OPL_VURDNY_EJBOL2_VEJK_EJEB =                                   
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).VEJK_EJEB;                        
+    ESR.OPL_VURDNY_EJBOL2_HUSNR_EJEB =                                  
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).HUSNR_EJEB;                       
+    ESR.OPL_VURDNY_EJBOL2_ETAGE_EJEB =                                  
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).ETAGE_EJEB;                       
+    ESR.OPL_VURDNY_EJBOL2_SDØR_EJEB =                                   
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).SDØR_EJEB;                        
+    ESR.OPL_VURDNY_EJBOL2_EJBOLTYP =                                    
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).EJBOLTYP;                         
+    ESR.OPL_VURDNY_EJBOL2_BEJEBOL =                                     
+    BE318.VURDOPLNY.ÅRSVURD.EJEBOL(2).BEJEBOL;                          
+    ESR.OPL_VURDNY_ANT_FOR_1 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_1;       
+    ESR.OPL_VURDNY_ANT_FOR_2 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_2;       
+    ESR.OPL_VURDNY_ANT_FOR_4 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_4;       
+    ESR.OPL_VURDNY_ANT_FOR_5 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_5;       
+    ESR.OPL_VURDNY_ANT_FOR_6 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_6;       
+    ESR.OPL_VURDNY_ANT_FOR_8 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_8;       
+    ESR.OPL_VURDNY_ANT_FOR_9 = BE318.VURDOPLNY.ÅRSVURD.ANT_FOR_9;       
+    ESR.OPL_VURDNY_OMB01_1_KONSEKVENS =                                 
+    BE318.VURDOPLNY.OMBER01(1).KONSEKVENS;                              
+    ESR.OPL_VURDNY_OMB01_1_STK12 = BE318.VURDOPLNY.OMBER01(1).STK12;    
+    ESR.OPL_VURDNY_OMB01_1_STK13 = BE318.VURDOPLNY.OMBER01(1).STK13;    
+    ESR.OPL_VURDNY_OMB01_1_STK14 = BE318.VURDOPLNY.OMBER01(1).STK14;    
+    ESR.OPL_VURDNY_OMB01_1_STK15 = BE318.VURDOPLNY.OMBER01(1).STK15;    
+    ESR.OPL_VURDNY_OMB01_2_KONSEKVENS =                                 
+    BE318.VURDOPLNY.OMBER01(2).KONSEKVENS;                              
+    ESR.OPL_VURDNY_OMB01_2_STK12 = BE318.VURDOPLNY.OMBER01(2).STK12;    
+    ESR.OPL_VURDNY_OMB01_2_STK13 = BE318.VURDOPLNY.OMBER01(2).STK13;    
+    ESR.OPL_VURDNY_OMB01_2_STK14 = BE318.VURDOPLNY.OMBER01(2).STK14;    
+    ESR.OPL_VURDNY_OMB01_2_STK15 = BE318.VURDOPLNY.OMBER01(2).STK15;    
+    ESR.OPL_VURDGL_DVURDÅR = BE318.VURDOPLGL.DVURDÅR;                   
+    ESR.OPL_VURDGL_VURMARK = BE318.VURDOPLGL.VURMARK;                   
+    ESR.OPL_VURDGL_CBENYT = BE318.VURDOPLGL.ÅRSVURD.CBENYT;             
+    ESR.OPL_VURDGL_FLEJL = BE318.VURDOPLGL.ÅRSVURD.FLEJL;               
+    ESR.OPL_VURDGL_BEJDVÆR = BE318.VURDOPLGL.ÅRSVURD.BEJDVÆR;           
+        /* PBR nye felter start */                                      
+    ESR.OPL_VURDGL_JUR_KATEGO  =                                        
+        BE318.VURDOPLGL.ÅRSVURD.JUR_KATEGORI;                           
+    ESR.OPL_VURDGL_JUR_UKATEGO =                                        
+        BE318.VURDOPLGL.ÅRSVURD.JUR_UKATEGORI;                          
+    ESR.OPL_VURDGL_VURDATO     =                                        
+        BE318.VURDOPLGL.ÅRSVURD.VURDATO;                                
+    ESR.OPL_VURDGL_FORSIGT_EVS =                                        
+        BE318.VURDOPLGL.ÅRSVURD.FORSIGT_EVS;                            
+    ESR.OPL_VURDGL_BESKAT_EVS  =                                        
+        BE318.VURDOPLGL.ÅRSVURD.BESKAT_EVS;                             
+    /* PBR nye felter slut */                                           
+    ESR.OPL_VURDGL_CUOP = BE318.VURDOPLGL.ÅRSVURD.CUOP;                 
+    ESR.OPL_VURDGL_CEJERL = BE318.VURDOPLGL.ÅRSVURD.CEJERL;             
+    ESR.OPL_VURDGL_CBANV = BE318.VURDOPLGL.ÅRSVURD.CBANV;               
+    ESR.OPL_VURDGL_DOPFØ = BE318.VURDOPLGL.ÅRSVURD.DOPFØ;               
+    ESR.OPL_VURDGL_DOMTIL = BE318.VURDOPLGL.ÅRSVURD.DOMTIL;             
+    ESR.OPL_VURDGL_EJBOL1_VEJK_EJEB =                                   
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).VEJK_EJEB;                        
+    ESR.OPL_VURDGL_EJBOL1_HUSNR_EJEB =                                  
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).HUSNR_EJEB;                       
+    ESR.OPL_VURDGL_EJBOL1_ETAGE_EJEB =                                  
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).ETAGE_EJEB;                       
+    ESR.OPL_VURDGL_EJBOL1_SDØR_EJEB =                                   
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).SDØR_EJEB;                        
+    ESR.OPL_VURDGL_EJBOL1_EJBOLTYP =                                    
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).EJBOLTYP;                         
+    ESR.OPL_VURDGL_EJBOL1_BEJEBOL =                                     
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(1).BEJEBOL;                          
+    ESR.OPL_VURDGL_EJBOL2_VEJK_EJEB =                                   
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).VEJK_EJEB;                        
+    ESR.OPL_VURDGL_EJBOL2_HUSNR_EJEB =                                  
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).HUSNR_EJEB;                       
+    ESR.OPL_VURDGL_EJBOL2_ETAGE_EJEB =                                  
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).ETAGE_EJEB;                       
+    ESR.OPL_VURDGL_EJBOL2_SDØR_EJEB =                                   
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).SDØR_EJEB;                        
+    ESR.OPL_VURDGL_EJBOL2_EJBOLTYP =                                    
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).EJBOLTYP;                         
+    ESR.OPL_VURDGL_EJBOL2_BEJEBOL =                                     
+    BE318.VURDOPLGL.ÅRSVURD.EJEBOL(2).BEJEBOL;                          
+    ESR.OPL_VURDGL_ANT_FOR_1 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_1;       
+    ESR.OPL_VURDGL_ANT_FOR_2 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_2;       
+    ESR.OPL_VURDGL_ANT_FOR_4 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_4;       
+    ESR.OPL_VURDGL_ANT_FOR_5 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_5;       
+    ESR.OPL_VURDGL_ANT_FOR_6 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_6;       
+    ESR.OPL_VURDGL_ANT_FOR_8 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_8;       
+    ESR.OPL_VURDGL_ANT_FOR_9 = BE318.VURDOPLGL.ÅRSVURD.ANT_FOR_9;       
+    ESR.OPL_VURDGL_OMB01_1_KONSEKVENS =                                 
+    BE318.VURDOPLGL.OMBER01(1).KONSEKVENS;                              
+    ESR.OPL_VURDGL_OMB01_1_STK12 = BE318.VURDOPLGL.OMBER01(1).STK12;    
+    ESR.OPL_VURDGL_OMB01_1_STK13 = BE318.VURDOPLGL.OMBER01(1).STK13;    
+    ESR.OPL_VURDGL_OMB01_1_STK14 = BE318.VURDOPLGL.OMBER01(1).STK14;    
+    ESR.OPL_VURDGL_OMB01_1_STK15 = BE318.VURDOPLGL.OMBER01(1).STK15;    
+    ESR.OPL_VURDGL_OMB01_2_KONSEKVENS =                                 
+    BE318.VURDOPLGL.OMBER01(2).KONSEKVENS;                              
+    ESR.OPL_VURDGL_OMB01_2_STK12 = BE318.VURDOPLGL.OMBER01(2).STK12;    
+    ESR.OPL_VURDGL_OMB01_2_STK13 = BE318.VURDOPLGL.OMBER01(2).STK13;    
+    ESR.OPL_VURDGL_OMB01_2_STK14 = BE318.VURDOPLGL.OMBER01(2).STK14;    
+    ESR.OPL_VURDGL_OMB01_2_STK15 = BE318.VURDOPLGL.OMBER01(2).STK15;    
+    ESR.OPL_BEJDVÆP4B = BE318.BEJDVÆP4B;                                
+    ESR.OPL_GL_CBENYT = BE318.GL_CBENYT;                                
+    ESR.OPL_FLEJL = BE318.GL_FLEJL;                                     
+    ESR.OPL_BEJDV = BE318.GL_BEJDV;                                     
+    ESR.OPL_BEJEB = BE318.GL_BEJEB;                                     
+    ESR.OPL_BSTUE = BE318.GL_BSTUE;                                     
+    ESR.OPL_BSTUGR = BE318.GL_BSTUGR;                                   
+    ESR.OPL_GBOANDPCT = BE318.GBOANDPCT;                                
+    ESR.OPL_BFSKAT = BE318.BFSKAT;                                      
+    ESR.OPL_BYDAF = BE318.BYDAF;                                        
+    ESR.OPL_BDAF = BE318.BDAF;                                          
+    ESR.OPL_BAFPGRVKOM = BE318.BAFPGRVKOM;                              
+    ESR.OPL_BFKOMSKAT = BE318.BFKOMSKAT;                                
+    ESR.OPL_BFKOMSKST = BE318.BFKOMSKST;                                
+    ESR.OPL_EMATNR = BE318.EMATNR;                                      
+    ESR.OPL_ABGSTSK = BE318.ABGSTSK;                                    
+    ESR.OPL_HEJLTX = BE318.HEJLTX;                                      
+    ESR.OPL_EMATAR = BE318.EMATAR;                                      
+    ESR.OPL_CDIFF = BE318.CDIFF;                                        
+    ESR.OPL_CFRED = BE318.CFRED;                                        
+    ESR.OPL_CEJSO = BE318.CEJSO;                                        
+    ESR.OPL_CEJ_100 = BE318.CEJ_100;                                    
+    ESR.OPL_CEANV = BE318.CEANV;                                        
+    ESR.OPL_BBRF379 = BE318.BBRF379;                                    
+    ESR.OPL_BBRF380 = BE318.BBRF380;                                    
+    ESR.OPL_VEJK_EJD = BE318.VEJK_EJD;                                  
+    ESR.OPL_HUSNR_EJD = BE318.HUSNR_EJD;                                
+    ESR.OPL_ETAGE_EJD = BE318.ETAGE_EJD;                                
+    ESR.OPL_SDØR_EJD = BE318.SDØR_EJD;                                  
+    ESR.OPL_ENHEDBELIG = '';   /* modtages ikke i BE31825N */           
+    ESR.OPL_VEJK_ENHED = 0;    /* modtages ikke i BE31825N */           
+    ESR.OPL_HUSNR_ENHED = '';  /* modtages ikke i BE31825N */           
+    ESR.OPL_ETAGE_ENHED = '';  /* modtages ikke i BE31825N */           
+    ESR.OPL_SDØR_ENHED = '';   /* modtages ikke i BE31825N */           
+                                                                        
+ END FLYT_FELTER_BE318;                                                 
+ /*********************************************************************/
+ /* FLYT FELTER FRA ESR2-struktur TIL DB2-STRUKTURER  FRA FORSKUD     */
+ /*********************************************************************/
+ FLYT_FELTER_BE324: PROC;                                               
+                                                                        
+   ESR = '';                                                            
+   ESR.TIL_EVS_AAR = WS_TIL_EVS_AAR;                                    
+   ESR.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                             
+   ESR.DATA_ID       = BE55600M.DATA_ID;                                
+   ESR.ESR_SEKVENS_NR = WS_ESR_SEKVENS_NR;                              
+   ESR.KØRSELS_ID = 'ESR2';                                             
+                                                                        
+   ESR.PROGRAMNAVN = WS_PROGRAMNAVN;                                    
+   ESR.DB2FUNKTION = 'I';                                               
+   ESR.DCPRN = BE324.SORTCPR;                                           
+   ESR.EKOMNR = BE324.EKOMNR;                                           
+   ESR.EEJDNR = BE324.EEJDNR;                                           
+   ESR.BFENR  = BE324.BFENR;     /* PBR */                              
+   ESR.VUREJENDOMID = BE324.VUREJENDOMID; /* PBR */                     
+   ESR.EENHEDLBNR = BE324.EENHEDLBNR;                                   
+   ESR.SORTCITYP = BE324.SORTCITYP;                                     
+   ESR.SORTTYPE = BE324.SORTTYPE;                                       
+   ESR.ESR_SORTDATO = BE324.SORTDATO;                                   
+   ESR.ESR_CCIVS = BE324.CCIVS;                                         
+   ESR.ESR_CSBSK = BE324.CSBSK;                                         
+   ESR.EJER_DCPRCIR = BE324.EJER.DCPRCIR;                               
+   ESR.EJER_CITYP = BE324.EJER.CITYP;                                   
+   ESR.EJER_CTILKØB = BE324.EJER.CTILKØB;                               
+   ESR.EJER_DRGNÅRFRA = BE324.EJER.DRGNÅRFRA;                           
+   ESR.EJER_DRGNÅRTIL = BE324.EJER.DRGNÅRTIL;                           
+   ESR.EJER_DOVTG = BE324.EJER.DOVTG;                                   
+   ESR.EJER_DOVTG_GL = BE324.EJER.DOVTG_GL;                             
+   ESR.EJER_DINDFLYT = BE324.EJER.DINDFLYT;                             
+   ESR.EJER_DAFSTÅ = BE324.EJER.DAFSTÅ;                                 
+   ESR.EJER_DFRAFLYT = BE324.EJER.DFRAFLYT;                             
+   ESR.EJER_DAFGDAT = BE324.EJER.DAFGDAT;                               
+   ESR.EJER_DSLUTS = BE324.EJER.DSLUTS;                                 
+   ESR.EJER_DSKØDE = BE324.EJER.DSKØDE;                                 
+   ESR.EJER_CEJFOER0107 = BE324.EJER.CEJFOER0107;                       
+   ESR.EJER_CEJFORH = BE324.EJER.CEJFORH;                               
+   ESR.EJER_CPENS = BE324.EJER.CPENS;                                   
+   ESR.EJER_FEJER = BE324.EJER.FEJER;                                   
+   ESR.EJER_GANE = BE324.EJER.GANE;                                     
+   ESR.EJER_CEJ_100 = BE324.EJER.CEJ_100;                               
+   ESR.EJER_CHEJD = BE324.EJER.CHEJD;                                   
+   ESR.EJER_TEKFEJLNR = BE324.EJER.TEKFEJLNR;                           
+   ESR.EJER_VEJK_EJER = BE324.EJER.VEJK_EJER;                           
+   ESR.EJER_HUSNR_EJER = BE324.EJER.HUSNR_EJER;                         
+   ESR.EJER_ETAGE_EJER = BE324.EJER.ETAGE_EJER;                         
+   ESR.EJER_SDØR_EJER = BE324.EJER.SDØR_EJER;                           
+   ESR.EJER_BOPÆLSKODE = BE324.EJER.BOPÆLSKODE;                         
+   ESR.EJER_COMPLA = BE324.EJER.COMPLA;                                 
+   ESR.EJER_DOMPLACPR = BE324.EJER.DOMPLACPR;                           
+   ESR.EJER_DOMPLAÅR = BE324.EJER.DOMPLAÅR;                             
+   ESR.ÆGTE_DCPRCIR = BE324.ÆGTF.DCPRCIR;                               
+   ESR.ÆGTE_CITYP = BE324.ÆGTF.CITYP;                                   
+   ESR.ÆGTE_CTILKØB = BE324.ÆGTF.CTILKØB;                               
+   ESR.ÆGTE_DRGNÅRFRA = BE324.ÆGTF.DRGNÅRFRA;                           
+   ESR.ÆGTE_DRGNÅRTIL = BE324.ÆGTF.DRGNÅRTIL;                           
+   ESR.ÆGTE_DOVTG = BE324.ÆGTF.DOVTG;                                   
+   ESR.ÆGTE_DOVTG_GL = BE324.ÆGTF.DOVTG_GL;                             
+   ESR.ÆGTE_DINDFLYT = BE324.ÆGTF.DINDFLYT;                             
+   ESR.ÆGTE_DAFSTÅ = BE324.ÆGTF.DAFSTÅ;                                 
+   ESR.ÆGTE_DFRAFLYT = BE324.ÆGTF.DFRAFLYT;                             
+   ESR.ÆGTE_DAFGDAT = BE324.ÆGTF.DAFGDAT;                               
+   ESR.ÆGTE_DSLUTS = BE324.ÆGTF.DSLUTS;                                 
+   ESR.ÆGTE_DSKØDE = BE324.ÆGTF.DSKØDE;                                 
+   ESR.ÆGTE_CEJFOER0107 = BE324.ÆGTF.CEJFOER0107;                       
+   ESR.ÆGTE_CEJFORH = BE324.ÆGTF.CEJFORH;                               
+   ESR.ÆGTE_CPENS = BE324.ÆGTF.CPENS;                                   
+   ESR.ÆGTE_FEJER = BE324.ÆGTF.FEJER;                                   
+   ESR.ÆGTE_GANE = BE324.ÆGTF.GANE;                                     
+   ESR.ÆGTE_CEJ_100 = BE324.ÆGTF.CEJ_100;                               
+   ESR.ÆGTE_CHEJD = BE324.ÆGTF.CHEJD;                                   
+   ESR.ÆGTE_TEKFEJLNR = BE324.ÆGTF.TEKFEJLNR;                           
+   ESR.ÆGTE_VEJK_EJER = BE324.ÆGTF.VEJK_EJER;                           
+   ESR.ÆGTE_HUSNR_EJER = BE324.ÆGTF.HUSNR_EJER;                         
+   ESR.ÆGTE_ETAGE_EJER = BE324.ÆGTF.ETAGE_EJER;                         
+   ESR.ÆGTE_SDØR_EJER = BE324.ÆGTF.SDØR_EJER;                           
+   ESR.ÆGTE_BOPÆLSKODE = BE324.ÆGTF.BOPÆLSKODE;                         
+   ESR.ÆGTE_COMPLA = BE324.ÆGTF.COMPLA;                                 
+   ESR.ÆGTE_DOMPLACPR = BE324.ÆGTF.DOMPLACPR;                           
+   ESR.ÆGTE_DOMPLAÅR = BE324.ÆGTF.DOMPLAÅR;                             
+   ESR.OPL_ABELMAT = BE324.STAMOPL.ABELMAT;                             
+   ESR.OPL_VURDNY_DVURDÅR = BE324.STAMOPL.VURDOPLNY.DVURDÅR;            
+   ESR.OPL_VURDNY_VURMARK = BE324.STAMOPL.VURDOPLNY.VURMARK; /*EBD*/    
+   ESR.OPL_VURDNY_CBENYT = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.CBENYT;      
+   ESR.OPL_VURDNY_FLEJL = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.FLEJL;        
+   ESR.OPL_VURDNY_BEJDVÆR = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.BEJDVÆR;    
+       /* PBR nye felter start */                                       
+   ESR.OPL_VURDNY_JUR_KATEGO  =                                         
+       BE324.STAMOPL.VURDOPLNY.ÅRSVURD.JUR_KATEGORI;                    
+   ESR.OPL_VURDNY_JUR_UKATEGO =                                         
+       BE324.STAMOPL.VURDOPLNY.ÅRSVURD.JUR_UKATEGORI;                   
+   ESR.OPL_VURDNY_VURDATO     =                                         
+       BE324.STAMOPL.VURDOPLNY.ÅRSVURD.VURDATO;                         
+   ESR.OPL_VURDNY_FORSIGT_EVS =                                         
+       BE324.STAMOPL.VURDOPLNY.ÅRSVURD.FORSIGT_EVS;                     
+   ESR.OPL_VURDNY_BESKAT_EVS  =                                         
+       BE324.STAMOPL.VURDOPLNY.ÅRSVURD.BESKAT_EVS;                      
+   /* PBR nye felter slut */                                            
+   ESR.OPL_VURDNY_COMVGR1 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.COMVGR1;    
+   ESR.OPL_VURDNY_COMVGR2 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.COMVGR2;    
+   ESR.OPL_VURDNY_BEJDVÆP4A = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.BEJDVÆP4A;
+   ESR.OPL_VURDNY_BSKOV = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.BSKOV;        
+   ESR.OPL_VURDNY_CUOP = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.CUOP;          
+   ESR.OPL_VURDNY_CEJERL = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.CEJERL;      
+   ESR.OPL_VURDNY_CFORSKEL = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.CFORSKEL;  
+   ESR.OPL_VURDNY_CBANV = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.CBANV;        
+   ESR.OPL_VURDNY_DOPFØ = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.DOPFØ;        
+   ESR.OPL_VURDNY_DOMTIL = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.DOMTIL;      
+   ESR.OPL_VURDNY_EJBOL1_VEJK_EJEB =                                    
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).VEJK_EJEB;                 
+   ESR.OPL_VURDNY_EJBOL1_HUSNR_EJEB =                                   
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).HUSNR_EJEB;                
+   ESR.OPL_VURDNY_EJBOL1_ETAGE_EJEB =                                   
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).ETAGE_EJEB;                
+   ESR.OPL_VURDNY_EJBOL1_SDØR_EJEB =                                    
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).SDØR_EJEB;                 
+   ESR.OPL_VURDNY_EJBOL1_EJBOLTYP =                                     
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).EJBOLTYP;                  
+   ESR.OPL_VURDNY_EJBOL1_BEJEBOL =                                      
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(1).BEJEBOL;                   
+   ESR.OPL_VURDNY_EJBOL2_VEJK_EJEB =                                    
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).VEJK_EJEB;                 
+   ESR.OPL_VURDNY_EJBOL2_HUSNR_EJEB =                                   
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).HUSNR_EJEB;                
+   ESR.OPL_VURDNY_EJBOL2_ETAGE_EJEB =                                   
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).ETAGE_EJEB;                
+   ESR.OPL_VURDNY_EJBOL2_SDØR_EJEB =                                    
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).SDØR_EJEB;                 
+   ESR.OPL_VURDNY_EJBOL2_EJBOLTYP =                                     
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).EJBOLTYP;                  
+   ESR.OPL_VURDNY_EJBOL2_BEJEBOL =                                      
+   BE324.STAMOPL.VURDOPLNY.ÅRSVURD.EJEBOL(2).BEJEBOL;                   
+   ESR.OPL_VURDNY_ANT_FOR_1 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_1;
+   ESR.OPL_VURDNY_ANT_FOR_2 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_2;
+   ESR.OPL_VURDNY_ANT_FOR_4 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_4;
+   ESR.OPL_VURDNY_ANT_FOR_5 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_5;
+   ESR.OPL_VURDNY_ANT_FOR_6 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_6;
+   ESR.OPL_VURDNY_ANT_FOR_8 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_8;
+   ESR.OPL_VURDNY_ANT_FOR_9 = BE324.STAMOPL.VURDOPLNY.ÅRSVURD.ANT_FOR_9;
+   ESR.OPL_VURDNY_OMB01_1_KONSEKVENS =                                  
+   BE324.STAMOPL.VURDOPLNY.OMBER01(1).KONSEKVENS;                       
+   ESR.OPL_VURDNY_OMB01_1_STK12 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(1).STK12;                            
+   ESR.OPL_VURDNY_OMB01_1_STK13 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(1).STK13;                            
+   ESR.OPL_VURDNY_OMB01_1_STK14 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(1).STK14;                            
+   ESR.OPL_VURDNY_OMB01_1_STK15 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(1).STK15;                            
+   ESR.OPL_VURDNY_OMB01_2_KONSEKVENS =                                  
+   BE324.STAMOPL.VURDOPLNY.OMBER01(2).KONSEKVENS;                       
+   ESR.OPL_VURDNY_OMB01_2_STK12 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(2).STK12;                            
+   ESR.OPL_VURDNY_OMB01_2_STK13 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(2).STK13;                            
+   ESR.OPL_VURDNY_OMB01_2_STK14 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(2).STK14;                            
+   ESR.OPL_VURDNY_OMB01_2_STK15 =                                       
+   BE324.STAMOPL.VURDOPLNY.OMBER01(2).STK15;                            
+   ESR.OPL_VURDGL_DVURDÅR = BE324.STAMOPL.VURDOPLGL.DVURDÅR;            
+   ESR.OPL_VURDGL_VURMARK = BE324.STAMOPL.VURDOPLGL.VURMARK; /* EBD*/   
+   ESR.OPL_VURDGL_CBENYT = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.CBENYT;      
+   ESR.OPL_VURDGL_FLEJL = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.FLEJL;        
+   ESR.OPL_VURDGL_BEJDVÆR = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.BEJDVÆR;    
+       /* PBR nye felter start */                                       
+   ESR.OPL_VURDGL_JUR_KATEGO  =                                         
+       BE324.STAMOPL.VURDOPLGL.ÅRSVURD.JUR_KATEGORI;                    
+   ESR.OPL_VURDGL_JUR_UKATEGO =                                         
+       BE324.STAMOPL.VURDOPLGL.ÅRSVURD.JUR_UKATEGORI;                   
+   ESR.OPL_VURDGL_VURDATO     =                                         
+       BE324.STAMOPL.VURDOPLGL.ÅRSVURD.VURDATO;                         
+   ESR.OPL_VURDGL_FORSIGT_EVS =                                         
+       BE324.STAMOPL.VURDOPLGL.ÅRSVURD.FORSIGT_EVS;                     
+   ESR.OPL_VURDGL_BESKAT_EVS  =                                         
+       BE324.STAMOPL.VURDOPLGL.ÅRSVURD.BESKAT_EVS;                      
+   /* PBR nye felter slut */                                            
+   ESR.OPL_VURDGL_CUOP = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.CUOP;          
+   ESR.OPL_VURDGL_CEJERL = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.CEJERL;      
+   ESR.OPL_VURDGL_CBANV = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.CBANV;        
+   ESR.OPL_VURDGL_DOPFØ = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.DOPFØ;        
+   ESR.OPL_VURDGL_DOMTIL = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.DOMTIL;      
+   ESR.OPL_VURDGL_EJBOL1_VEJK_EJEB =                                    
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).VEJK_EJEB;                 
+   ESR.OPL_VURDGL_EJBOL1_HUSNR_EJEB =                                   
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).HUSNR_EJEB;                
+   ESR.OPL_VURDGL_EJBOL1_ETAGE_EJEB =                                   
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).ETAGE_EJEB;                
+   ESR.OPL_VURDGL_EJBOL1_SDØR_EJEB =                                    
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).SDØR_EJEB;                 
+   ESR.OPL_VURDGL_EJBOL1_EJBOLTYP =                                     
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).EJBOLTYP;                  
+   ESR.OPL_VURDGL_EJBOL1_BEJEBOL =                                      
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(1).BEJEBOL;                   
+   ESR.OPL_VURDGL_EJBOL2_VEJK_EJEB =                                    
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).VEJK_EJEB;                 
+   ESR.OPL_VURDGL_EJBOL2_HUSNR_EJEB =                                   
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).HUSNR_EJEB;                
+   ESR.OPL_VURDGL_EJBOL2_ETAGE_EJEB =                                   
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).ETAGE_EJEB;                
+   ESR.OPL_VURDGL_EJBOL2_SDØR_EJEB =                                    
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).SDØR_EJEB;                 
+   ESR.OPL_VURDGL_EJBOL2_EJBOLTYP =                                     
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).EJBOLTYP;                  
+   ESR.OPL_VURDGL_EJBOL2_BEJEBOL =                                      
+   BE324.STAMOPL.VURDOPLGL.ÅRSVURD.EJEBOL(2).BEJEBOL;                   
+   ESR.OPL_VURDGL_ANT_FOR_1 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_1;
+   ESR.OPL_VURDGL_ANT_FOR_2 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_2;
+   ESR.OPL_VURDGL_ANT_FOR_4 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_4;
+   ESR.OPL_VURDGL_ANT_FOR_5 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_5;
+   ESR.OPL_VURDGL_ANT_FOR_6 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_6;
+   ESR.OPL_VURDGL_ANT_FOR_8 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_8;
+   ESR.OPL_VURDGL_ANT_FOR_9 = BE324.STAMOPL.VURDOPLGL.ÅRSVURD.ANT_FOR_9;
+   ESR.OPL_VURDGL_OMB01_1_KONSEKVENS =                                  
+   BE324.STAMOPL.VURDOPLGL.OMBER01(1).KONSEKVENS;                       
+   ESR.OPL_VURDGL_OMB01_1_STK12 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(1).STK12;                            
+   ESR.OPL_VURDGL_OMB01_1_STK13 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(1).STK13;                            
+   ESR.OPL_VURDGL_OMB01_1_STK14 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(1).STK14;                            
+   ESR.OPL_VURDGL_OMB01_1_STK15 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(1).STK15;                            
+   ESR.OPL_VURDGL_OMB01_2_KONSEKVENS =                                  
+   BE324.STAMOPL.VURDOPLGL.OMBER01(2).KONSEKVENS;                       
+   ESR.OPL_VURDGL_OMB01_2_STK12 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(2).STK12;                            
+   ESR.OPL_VURDGL_OMB01_2_STK13 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(2).STK13;                            
+   ESR.OPL_VURDGL_OMB01_2_STK14 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(2).STK14;                            
+   ESR.OPL_VURDGL_OMB01_2_STK15 =                                       
+   BE324.STAMOPL.VURDOPLGL.OMBER01(2).STK15;                            
+   ESR.OPL_BEJDVÆP4B = BE324.STAMOPL.BEJDVÆP4B;                         
+   ESR.OPL_GL_CBENYT = BE324.STAMOPL.GL_CBENYT;                         
+   ESR.OPL_FLEJL = BE324.STAMOPL.GL_FLEJL;                              
+   ESR.OPL_BEJDV = BE324.STAMOPL.GL_BEJDV;                              
+   ESR.OPL_BEJEB = BE324.STAMOPL.GL_BEJEB;                              
+   ESR.OPL_BSTUE = BE324.STAMOPL.GL_BSTUE;                              
+   ESR.OPL_BSTUGR = BE324.STAMOPL.GL_BSTUGR;                            
+   ESR.OPL_GBOANDPCT = BE324.STAMOPL.GBOANDPCT;                         
+   ESR.OPL_BFSKAT = BE324.STAMOPL.BFSKAT;                               
+   ESR.OPL_BYDAF = BE324.STAMOPL.BYDAF;                                 
+   ESR.OPL_BDAF = BE324.STAMOPL.BDAF;                                   
+   ESR.OPL_BAFPGRVKOM = BE324.STAMOPL.BAFPGRVKOM;                       
+   ESR.OPL_BFKOMSKAT = BE324.STAMOPL.BFKOMSKAT;                         
+   ESR.OPL_BFKOMSKST = BE324.STAMOPL.BFKOMSKST;                         
+   ESR.OPL_EMATNR = BE324.STAMOPL.EMATNR;                               
+   ESR.OPL_ABGSTSK = BE324.STAMOPL.ABGSTSK;                             
+   ESR.OPL_HEJLTX = BE324.STAMOPL.HEJLTX;                               
+   ESR.OPL_EMATAR = BE324.STAMOPL.EMATAR;                               
+   ESR.OPL_CDIFF = BE324.STAMOPL.CDIFF;                                 
+   ESR.OPL_CFRED = BE324.STAMOPL.CFRED;                                 
+   ESR.OPL_CEJSO = BE324.STAMOPL.CEJSO;                                 
+   ESR.OPL_CEJ_100 = BE324.STAMOPL.CEJ_100;                             
+   ESR.OPL_CEANV = BE324.STAMOPL.CEANV;                                 
+   ESR.OPL_BBRF379 = BE324.STAMOPL.BBRF379;                             
+   ESR.OPL_BBRF380 = BE324.STAMOPL.BBRF380;                             
+   ESR.OPL_VEJK_EJD = BE324.STAMOPL.VEJK_EJD;                           
+   ESR.OPL_HUSNR_EJD = BE324.STAMOPL.HUSNR_EJD;                         
+   ESR.OPL_ETAGE_EJD = BE324.STAMOPL.ETAGE_EJD;                         
+   ESR.OPL_SDØR_EJD = BE324.STAMOPL.SDØR_EJD;                           
+   ESR.OPL_ENHEDBELIG = BE324.STAMOPL.ENHEDBELIG;                       
+   ESR.OPL_VEJK_ENHED = BE324.STAMOPL.VEJK_ENHED;                       
+   ESR.OPL_HUSNR_ENHED = BE324.STAMOPL.HUSNR_ENHED;                     
+   ESR.OPL_ETAGE_ENHED = BE324.STAMOPL.ETAGE_ENHED;                     
+   ESR.OPL_SDØR_ENHED = BE324.STAMOPL.SDØR_ENHED;                       
+                                                                        
+ END FLYT_FELTER_BE324;                                                 
+ /*********************************************************************/
+ /* INSERT række på DB2-tabel til ESR                          RUTINE */
+ /*********************************************************************/
+ INSERT_ESROPL: PROC;                                                   
+                                                                        
+         if ANT_INS_ESR < 100                                           
+         then do;                                                       
+            put skip list ('ESR TIL_EVS_AAR ' !! ESR.TIL_EVS_AAR !!     
+                           ' AFVIKLINGS_ID ' !! ESR.AFVIKLINGS_ID !!    
+                           ' DATA_ID       ' !! ESR.DATA_ID   !!        
+                           ' SEKVENS ' !! ESR.ESR_SEKVENS_NR !!         
+                           ' KØRSELS_ID ' !! ESR.KØRSELS_ID !!          
+                           ' DCPRN ' !! ESR.DCPRN !!                    
+                           ' EKOMNR ' !! ESR.EKOMNR !!                  
+                           ' EEJDNR ' !! ESR.EEJDNR !!                  
+                           ' EENHEDLBNR '  !! ESR.EENHEDLBNR !!         
+                           ' SORTCITYP ' !! ESR.SORTCITYP !!            
+                           ' SORTTYPE ' !! ESR.SORTTYPE !!              
+                           ' ESR_SORTDATO ' !! ESR.ESR_SORTDATO);       
+         end;                                                           
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BE65000T                                        
+            (                                                           
+         TIL_EVS_AAR,                                                   
+         AFVIKLINGS_ID,                                                 
+         DATA_ID,                                                       
+         ESR_SEKVENS_NR,                                                
+         KØRSELS_ID,                                                    
+         PROGRAMNAVN,                                                   
+         DB2FUNKTION,                                                   
+         DCPRN,                                                         
+         EKOMNR,                                                        
+         EEJDNR,                                                        
+         BFENR,                                                         
+         VUREJENDOMID,                                                  
+         EENHEDLBNR,                                                    
+         OPRET_TS,                                                      
+         SORTCITYP,                                                     
+         SORTTYPE,                                                      
+         ESR_SORTDATO,                                                  
+         ESR_CCIVS,                                                     
+         ESR_CSBSK,                                                     
+         EJER_DCPRCIR,                                                  
+         EJER_CITYP,                                                    
+         EJER_CTILKØB,                                                  
+         EJER_DRGNÅRFRA,                                                
+         EJER_DRGNÅRTIL,                                                
+         EJER_DOVTG,                                                    
+         EJER_DOVTG_GL,                                                 
+         EJER_DINDFLYT,                                                 
+         EJER_DAFSTÅ,                                                   
+         EJER_DFRAFLYT,                                                 
+         EJER_DAFGDAT,                                                  
+         EJER_DSLUTS,                                                   
+         EJER_DSKØDE,                                                   
+         EJER_CEJFOER0107,                                              
+         EJER_CEJFORH,                                                  
+         EJER_CPENS,                                                    
+         EJER_FEJER,                                                    
+         EJER_GANE,                                                     
+         EJER_CEJ_100,                                                  
+         EJER_CHEJD,                                                    
+         EJER_TEKFEJLNR,                                                
+         EJER_VEJK_EJER,                                                
+         EJER_HUSNR_EJER,                                               
+         EJER_ETAGE_EJER,                                               
+         EJER_SDØR_EJER,                                                
+         EJER_BOPÆLSKODE,                                               
+         EJER_COMPLA,                                                   
+         EJER_DOMPLACPR,                                                
+         EJER_DOMPLAÅR,                                                 
+         ÆGTE_DCPRCIR,                                                  
+         ÆGTE_CITYP,                                                    
+         ÆGTE_CTILKØB,                                                  
+         ÆGTE_DRGNÅRFRA,                                                
+         ÆGTE_DRGNÅRTIL,                                                
+         ÆGTE_DOVTG,                                                    
+         ÆGTE_DOVTG_GL,                                                 
+         ÆGTE_DINDFLYT,                                                 
+         ÆGTE_DAFSTÅ,                                                   
+         ÆGTE_DFRAFLYT,                                                 
+         ÆGTE_DAFGDAT,                                                  
+         ÆGTE_DSLUTS,                                                   
+         ÆGTE_DSKØDE,                                                   
+         ÆGTE_CEJFOER0107,                                              
+         ÆGTE_CEJFORH,                                                  
+         ÆGTE_CPENS,                                                    
+         ÆGTE_FEJER,                                                    
+         ÆGTE_GANE,                                                     
+         ÆGTE_CEJ_100,                                                  
+         ÆGTE_CHEJD,                                                    
+         ÆGTE_TEKFEJLNR,                                                
+         ÆGTE_VEJK_EJER,                                                
+         ÆGTE_HUSNR_EJER,                                               
+         ÆGTE_ETAGE_EJER,                                               
+         ÆGTE_SDØR_EJER,                                                
+         ÆGTE_BOPÆLSKODE,                                               
+         ÆGTE_COMPLA,                                                   
+         ÆGTE_DOMPLACPR,                                                
+         ÆGTE_DOMPLAÅR,                                                 
+         OPL_ABELMAT,                                                   
+         OPL_VURDNY_DVURDÅR,                                            
+         OPL_VURDNY_VURMARK,                                            
+         OPL_VURDNY_CBENYT,                                             
+         OPL_VURDNY_FLEJL,                                              
+         OPL_VURDNY_BEJDVÆR,                                            
+         OPL_VURDNY_JUR_KATEGO,                                         
+         OPL_VURDNY_JUR_UKATEGO,                                        
+         OPL_VURDNY_VURDATO,                                            
+         OPL_VURDNY_FORSIGT_EVS,                                        
+         OPL_VURDNY_BESKAT_EVS,                                         
+         OPL_VURDNY_COMVGR1,                                            
+         OPL_VURDNY_COMVGR2,                                            
+         OPL_VURDNY_BEJDVÆP4A,                                          
+         OPL_VURDNY_BSKOV,                                              
+         OPL_VURDNY_CUOP,                                               
+         OPL_VURDNY_CEJERL,                                             
+         OPL_VURDNY_CFORSKEL,                                           
+         OPL_VURDNY_CBANV,                                              
+         OPL_VURDNY_DOPFØ,                                              
+         OPL_VURDNY_DOMTIL,                                             
+         OPL_VURDNY_EJBOL1_VEJK_EJEB,                                   
+         OPL_VURDNY_EJBOL1_HUSNR_EJEB,                                  
+         OPL_VURDNY_EJBOL1_ETAGE_EJEB,                                  
+         OPL_VURDNY_EJBOL1_SDØR_EJEB,                                   
+         OPL_VURDNY_EJBOL1_EJBOLTYP,                                    
+         OPL_VURDNY_EJBOL1_BEJEBOL,                                     
+         OPL_VURDNY_EJBOL2_VEJK_EJEB,                                   
+         OPL_VURDNY_EJBOL2_HUSNR_EJEB,                                  
+         OPL_VURDNY_EJBOL2_ETAGE_EJEB,                                  
+         OPL_VURDNY_EJBOL2_SDØR_EJEB,                                   
+         OPL_VURDNY_EJBOL2_EJBOLTYP,                                    
+         OPL_VURDNY_EJBOL2_BEJEBOL,                                     
+         OPL_VURDNY_ANT_FOR_1,                                          
+         OPL_VURDNY_ANT_FOR_2,                                          
+         OPL_VURDNY_ANT_FOR_4,                                          
+         OPL_VURDNY_ANT_FOR_5,                                          
+         OPL_VURDNY_ANT_FOR_6,                                          
+         OPL_VURDNY_ANT_FOR_8,                                          
+         OPL_VURDNY_ANT_FOR_9,                                          
+         OPL_VURDNY_OMB01_1_KONSEKVENS,                                 
+         OPL_VURDNY_OMB01_1_STK12,                                      
+         OPL_VURDNY_OMB01_1_STK13,                                      
+         OPL_VURDNY_OMB01_1_STK14,                                      
+         OPL_VURDNY_OMB01_1_STK15,                                      
+         OPL_VURDNY_OMB01_2_KONSEKVENS,                                 
+         OPL_VURDNY_OMB01_2_STK12,                                      
+         OPL_VURDNY_OMB01_2_STK13,                                      
+         OPL_VURDNY_OMB01_2_STK14,                                      
+         OPL_VURDNY_OMB01_2_STK15,                                      
+         OPL_VURDGL_DVURDÅR,                                            
+         OPL_VURDGL_VURMARK,                                            
+         OPL_VURDGL_CBENYT,                                             
+         OPL_VURDGL_FLEJL,                                              
+         OPL_VURDGL_BEJDVÆR,                                            
+         OPL_VURDGL_JUR_KATEGO,                                         
+         OPL_VURDGL_JUR_UKATEGO,                                        
+         OPL_VURDGL_VURDATO,                                            
+         OPL_VURDGL_FORSIGT_EVS,                                        
+         OPL_VURDGL_BESKAT_EVS,                                         
+         OPL_VURDGL_CUOP,                                               
+         OPL_VURDGL_CEJERL,                                             
+         OPL_VURDGL_CBANV,                                              
+         OPL_VURDGL_DOPFØ,                                              
+         OPL_VURDGL_DOMTIL,                                             
+         OPL_VURDGL_EJBOL1_VEJK_EJEB,                                   
+         OPL_VURDGL_EJBOL1_HUSNR_EJEB,                                  
+         OPL_VURDGL_EJBOL1_ETAGE_EJEB,                                  
+         OPL_VURDGL_EJBOL1_SDØR_EJEB,                                   
+         OPL_VURDGL_EJBOL1_EJBOLTYP,                                    
+         OPL_VURDGL_EJBOL1_BEJEBOL,                                     
+         OPL_VURDGL_EJBOL2_VEJK_EJEB,                                   
+         OPL_VURDGL_EJBOL2_HUSNR_EJEB,                                  
+         OPL_VURDGL_EJBOL2_ETAGE_EJEB,                                  
+         OPL_VURDGL_EJBOL2_SDØR_EJEB,                                   
+         OPL_VURDGL_EJBOL2_EJBOLTYP,                                    
+         OPL_VURDGL_EJBOL2_BEJEBOL,                                     
+         OPL_VURDGL_ANT_FOR_1,                                          
+         OPL_VURDGL_ANT_FOR_2,                                          
+         OPL_VURDGL_ANT_FOR_4,                                          
+         OPL_VURDGL_ANT_FOR_5,                                          
+         OPL_VURDGL_ANT_FOR_6,                                          
+         OPL_VURDGL_ANT_FOR_8,                                          
+         OPL_VURDGL_ANT_FOR_9,                                          
+         OPL_VURDGL_OMB01_1_KONSEKVENS,                                 
+         OPL_VURDGL_OMB01_1_STK12,                                      
+         OPL_VURDGL_OMB01_1_STK13,                                      
+         OPL_VURDGL_OMB01_1_STK14,                                      
+         OPL_VURDGL_OMB01_1_STK15,                                      
+         OPL_VURDGL_OMB01_2_KONSEKVENS,                                 
+         OPL_VURDGL_OMB01_2_STK12,                                      
+         OPL_VURDGL_OMB01_2_STK13,                                      
+         OPL_VURDGL_OMB01_2_STK14,                                      
+         OPL_VURDGL_OMB01_2_STK15,                                      
+         OPL_BEJDVÆP4B,                                                 
+         OPL_GL_CBENYT,                                                 
+         OPL_FLEJL,                                                     
+         OPL_BEJDV,                                                     
+         OPL_BEJEB,                                                     
+         OPL_BSTUE,                                                     
+         OPL_BSTUGR,                                                    
+         OPL_GBOANDPCT,                                                 
+         OPL_BFSKAT,                                                    
+         OPL_BYDAF,                                                     
+         OPL_BDAF,                                                      
+         OPL_BAFPGRVKOM,                                                
+         OPL_BFKOMSKAT,                                                 
+         OPL_BFKOMSKST,                                                 
+         OPL_EMATNR,                                                    
+         OPL_ABGSTSK,                                                   
+         OPL_HEJLTX,                                                    
+         OPL_EMATAR,                                                    
+         OPL_CDIFF,                                                     
+         OPL_CFRED,                                                     
+         OPL_CEJSO,                                                     
+         OPL_CEJ_100,                                                   
+         OPL_CEANV,                                                     
+         OPL_BBRF379,                                                   
+         OPL_BBRF380,                                                   
+         OPL_VEJK_EJD,                                                  
+         OPL_HUSNR_EJD,                                                 
+         OPL_ETAGE_EJD,                                                 
+         OPL_SDØR_EJD,                                                  
+         OPL_ENHEDBELIG,                                                
+         OPL_VEJK_ENHED,                                                
+         OPL_HUSNR_ENHED,                                               
+         OPL_ETAGE_ENHED,                                               
+         OPL_SDØR_ENHED                                                 
+            )                                                           
+            values                                                      
+            (                                                           
+         :ESR.TIL_EVS_AAR,                                              
+         :ESR.AFVIKLINGS_ID,                                            
+         :ESR.DATA_ID,                                                  
+         :ESR.ESR_SEKVENS_NR,                                           
+         :ESR.KØRSELS_ID,                                               
+         :ESR.PROGRAMNAVN,                                              
+         :ESR.DB2FUNKTION,                                              
+         :ESR.DCPRN,                                                    
+         :ESR.EKOMNR,                                                   
+         :ESR.EEJDNR,                                                   
+         :ESR.BFENR,                                                    
+         :ESR.VUREJENDOMID,                                             
+         :ESR.EENHEDLBNR,                                               
+         current timestamp,                                             
+         :ESR.SORTCITYP,                                                
+         :ESR.SORTTYPE,                                                 
+         :ESR.ESR_SORTDATO,                                             
+         :ESR.ESR_CCIVS,                                                
+         :ESR.ESR_CSBSK,                                                
+         :ESR.EJER_DCPRCIR,                                             
+         :ESR.EJER_CITYP,                                               
+         :ESR.EJER_CTILKØB,                                             
+         :ESR.EJER_DRGNÅRFRA,                                           
+         :ESR.EJER_DRGNÅRTIL,                                           
+         :ESR.EJER_DOVTG,                                               
+         :ESR.EJER_DOVTG_GL,                                            
+         :ESR.EJER_DINDFLYT,                                            
+         :ESR.EJER_DAFSTÅ,                                              
+         :ESR.EJER_DFRAFLYT,                                            
+         :ESR.EJER_DAFGDAT,                                             
+         :ESR.EJER_DSLUTS,                                              
+         :ESR.EJER_DSKØDE,                                              
+         :ESR.EJER_CEJFOER0107,                                         
+         :ESR.EJER_CEJFORH,                                             
+         :ESR.EJER_CPENS,                                               
+         :ESR.EJER_FEJER,                                               
+         :ESR.EJER_GANE,                                                
+         :ESR.EJER_CEJ_100,                                             
+         :ESR.EJER_CHEJD,                                               
+         :ESR.EJER_TEKFEJLNR,                                           
+         :ESR.EJER_VEJK_EJER,                                           
+         :ESR.EJER_HUSNR_EJER,                                          
+         :ESR.EJER_ETAGE_EJER,                                          
+         :ESR.EJER_SDØR_EJER,                                           
+         :ESR.EJER_BOPÆLSKODE,                                          
+         :ESR.EJER_COMPLA,                                              
+         :ESR.EJER_DOMPLACPR,                                           
+         :ESR.EJER_DOMPLAÅR,                                            
+         :ESR.ÆGTE_DCPRCIR,                                             
+         :ESR.ÆGTE_CITYP,                                               
+         :ESR.ÆGTE_CTILKØB,                                             
+         :ESR.ÆGTE_DRGNÅRFRA,                                           
+         :ESR.ÆGTE_DRGNÅRTIL,                                           
+         :ESR.ÆGTE_DOVTG,                                               
+         :ESR.ÆGTE_DOVTG_GL,                                            
+         :ESR.ÆGTE_DINDFLYT,                                            
+         :ESR.ÆGTE_DAFSTÅ,                                              
+         :ESR.ÆGTE_DFRAFLYT,                                            
+         :ESR.ÆGTE_DAFGDAT,                                             
+         :ESR.ÆGTE_DSLUTS,                                              
+         :ESR.ÆGTE_DSKØDE,                                              
+         :ESR.ÆGTE_CEJFOER0107,                                         
+         :ESR.ÆGTE_CEJFORH,                                             
+         :ESR.ÆGTE_CPENS,                                               
+         :ESR.ÆGTE_FEJER,                                               
+         :ESR.ÆGTE_GANE,                                                
+         :ESR.ÆGTE_CEJ_100,                                             
+         :ESR.ÆGTE_CHEJD,                                               
+         :ESR.ÆGTE_TEKFEJLNR,                                           
+         :ESR.ÆGTE_VEJK_EJER,                                           
+         :ESR.ÆGTE_HUSNR_EJER,                                          
+         :ESR.ÆGTE_ETAGE_EJER,                                          
+         :ESR.ÆGTE_SDØR_EJER,                                           
+         :ESR.ÆGTE_BOPÆLSKODE,                                          
+         :ESR.ÆGTE_COMPLA,                                              
+         :ESR.ÆGTE_DOMPLACPR,                                           
+         :ESR.ÆGTE_DOMPLAÅR,                                            
+         :ESR.OPL_ABELMAT,                                              
+         :ESR.OPL_VURDNY_DVURDÅR,                                       
+         :ESR.OPL_VURDNY_VURMARK,                                       
+         :ESR.OPL_VURDNY_CBENYT,                                        
+         :ESR.OPL_VURDNY_FLEJL,                                         
+         :ESR.OPL_VURDNY_BEJDVÆR,                                       
+         :ESR.OPL_VURDNY_JUR_KATEGO,                                    
+         :ESR.OPL_VURDNY_JUR_UKATEGO,                                   
+         :ESR.OPL_VURDNY_VURDATO,                                       
+         :ESR.OPL_VURDNY_FORSIGT_EVS,                                   
+         :ESR.OPL_VURDNY_BESKAT_EVS,                                    
+         :ESR.OPL_VURDNY_COMVGR1,                                       
+         :ESR.OPL_VURDNY_COMVGR2,                                       
+         :ESR.OPL_VURDNY_BEJDVÆP4A,                                     
+         :ESR.OPL_VURDNY_BSKOV,                                         
+         :ESR.OPL_VURDNY_CUOP,                                          
+         :ESR.OPL_VURDNY_CEJERL,                                        
+         :ESR.OPL_VURDNY_CFORSKEL,                                      
+         :ESR.OPL_VURDNY_CBANV,                                         
+         :ESR.OPL_VURDNY_DOPFØ,                                         
+         :ESR.OPL_VURDNY_DOMTIL,                                        
+         :ESR.OPL_VURDNY_EJBOL1_VEJK_EJEB,                              
+         :ESR.OPL_VURDNY_EJBOL1_HUSNR_EJEB,                             
+         :ESR.OPL_VURDNY_EJBOL1_ETAGE_EJEB,                             
+         :ESR.OPL_VURDNY_EJBOL1_SDØR_EJEB,                              
+         :ESR.OPL_VURDNY_EJBOL1_EJBOLTYP,                               
+         :ESR.OPL_VURDNY_EJBOL1_BEJEBOL,                                
+         :ESR.OPL_VURDNY_EJBOL2_VEJK_EJEB,                              
+         :ESR.OPL_VURDNY_EJBOL2_HUSNR_EJEB,                             
+         :ESR.OPL_VURDNY_EJBOL2_ETAGE_EJEB,                             
+         :ESR.OPL_VURDNY_EJBOL2_SDØR_EJEB,                              
+         :ESR.OPL_VURDNY_EJBOL2_EJBOLTYP,                               
+         :ESR.OPL_VURDNY_EJBOL2_BEJEBOL,                                
+         :ESR.OPL_VURDNY_ANT_FOR_1,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_2,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_4,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_5,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_6,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_8,                                     
+         :ESR.OPL_VURDNY_ANT_FOR_9,                                     
+         :ESR.OPL_VURDNY_OMB01_1_KONSEKVENS,                            
+         :ESR.OPL_VURDNY_OMB01_1_STK12,                                 
+         :ESR.OPL_VURDNY_OMB01_1_STK13,                                 
+         :ESR.OPL_VURDNY_OMB01_1_STK14,                                 
+         :ESR.OPL_VURDNY_OMB01_1_STK15,                                 
+         :ESR.OPL_VURDNY_OMB01_2_KONSEKVENS,                            
+         :ESR.OPL_VURDNY_OMB01_2_STK12,                                 
+         :ESR.OPL_VURDNY_OMB01_2_STK13,                                 
+         :ESR.OPL_VURDNY_OMB01_2_STK14,                                 
+         :ESR.OPL_VURDNY_OMB01_2_STK15,                                 
+         :ESR.OPL_VURDGL_DVURDÅR,                                       
+         :ESR.OPL_VURDGL_VURMARK,                                       
+         :ESR.OPL_VURDGL_CBENYT,                                        
+         :ESR.OPL_VURDGL_FLEJL,                                         
+         :ESR.OPL_VURDGL_BEJDVÆR,                                       
+         :ESR.OPL_VURDGL_JUR_KATEGO,                                    
+         :ESR.OPL_VURDGL_JUR_UKATEGO,                                   
+         :ESR.OPL_VURDGL_VURDATO,                                       
+         :ESR.OPL_VURDGL_FORSIGT_EVS,                                   
+         :ESR.OPL_VURDGL_BESKAT_EVS,                                    
+         :ESR.OPL_VURDGL_CUOP,                                          
+         :ESR.OPL_VURDGL_CEJERL,                                        
+         :ESR.OPL_VURDGL_CBANV,                                         
+         :ESR.OPL_VURDGL_DOPFØ,                                         
+         :ESR.OPL_VURDGL_DOMTIL,                                        
+         :ESR.OPL_VURDGL_EJBOL1_VEJK_EJEB,                              
+         :ESR.OPL_VURDGL_EJBOL1_HUSNR_EJEB,                             
+         :ESR.OPL_VURDGL_EJBOL1_ETAGE_EJEB,                             
+         :ESR.OPL_VURDGL_EJBOL1_SDØR_EJEB,                              
+         :ESR.OPL_VURDGL_EJBOL1_EJBOLTYP,                               
+         :ESR.OPL_VURDGL_EJBOL1_BEJEBOL,                                
+         :ESR.OPL_VURDGL_EJBOL2_VEJK_EJEB,                              
+         :ESR.OPL_VURDGL_EJBOL2_HUSNR_EJEB,                             
+         :ESR.OPL_VURDGL_EJBOL2_ETAGE_EJEB,                             
+         :ESR.OPL_VURDGL_EJBOL2_SDØR_EJEB,                              
+         :ESR.OPL_VURDGL_EJBOL2_EJBOLTYP,                               
+         :ESR.OPL_VURDGL_EJBOL2_BEJEBOL,                                
+         :ESR.OPL_VURDGL_ANT_FOR_1,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_2,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_4,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_5,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_6,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_8,                                     
+         :ESR.OPL_VURDGL_ANT_FOR_9,                                     
+         :ESR.OPL_VURDGL_OMB01_1_KONSEKVENS,                            
+         :ESR.OPL_VURDGL_OMB01_1_STK12,                                 
+         :ESR.OPL_VURDGL_OMB01_1_STK13,                                 
+         :ESR.OPL_VURDGL_OMB01_1_STK14,                                 
+         :ESR.OPL_VURDGL_OMB01_1_STK15,                                 
+         :ESR.OPL_VURDGL_OMB01_2_KONSEKVENS,                            
+         :ESR.OPL_VURDGL_OMB01_2_STK12,                                 
+         :ESR.OPL_VURDGL_OMB01_2_STK13,                                 
+         :ESR.OPL_VURDGL_OMB01_2_STK14,                                 
+         :ESR.OPL_VURDGL_OMB01_2_STK15,                                 
+         :ESR.OPL_BEJDVÆP4B,                                            
+         :ESR.OPL_GL_CBENYT,                                            
+         :ESR.OPL_FLEJL,                                                
+         :ESR.OPL_BEJDV,                                                
+         :ESR.OPL_BEJEB,                                                
+         :ESR.OPL_BSTUE,                                                
+         :ESR.OPL_BSTUGR,                                               
+         :ESR.OPL_GBOANDPCT,                                            
+         :ESR.OPL_BFSKAT,                                               
+         :ESR.OPL_BYDAF,                                                
+         :ESR.OPL_BDAF,                                                 
+         :ESR.OPL_BAFPGRVKOM,                                           
+         :ESR.OPL_BFKOMSKAT,                                            
+         :ESR.OPL_BFKOMSKST,                                            
+         :ESR.OPL_EMATNR,                                               
+         :ESR.OPL_ABGSTSK,                                              
+         :ESR.OPL_HEJLTX,                                               
+         :ESR.OPL_EMATAR,                                               
+         :ESR.OPL_CDIFF,                                                
+         :ESR.OPL_CFRED,                                                
+         :ESR.OPL_CEJSO,                                                
+         :ESR.OPL_CEJ_100,                                              
+         :ESR.OPL_CEANV,                                                
+         :ESR.OPL_BBRF379,                                              
+         :ESR.OPL_BBRF380,                                              
+         :ESR.OPL_VEJK_EJD,                                             
+         :ESR.OPL_HUSNR_EJD,                                            
+         :ESR.OPL_ETAGE_EJD,                                            
+         :ESR.OPL_SDØR_EJD,                                             
+         :ESR.OPL_ENHEDBELIG,                                           
+         :ESR.OPL_VEJK_ENHED,                                           
+         :ESR.OPL_HUSNR_ENHED,                                          
+         :ESR.OPL_ETAGE_ENHED,                                          
+         :ESR.OPL_SDØR_ENHED                                            
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_INS_ESR = ANT_INS_ESR + 1;                           
+            END;                                                        
+            OTHERWISE DO;                                               
+               put skip list ('FJL TIL_EVS_AAR ' !! ESR.TIL_EVS_AAR !!  
+                           ' AFVIKLINGS_ID ' !! ESR.AFVIKLINGS_ID !!    
+                           ' DATA_ID '       !! ESR.DATA_ID   !!        
+                           ' SEKVENS ' !! ESR.ESR_SEKVENS_NR !!         
+                           ' KØRSELS_ID ' !! ESR.KØRSELS_ID !!          
+                           ' DCPRN ' !! ESR.DCPRN !!                    
+                           ' EKOMNR ' !! ESR.EKOMNR !!                  
+                           ' EEJDNR ' !! ESR.EEJDNR !!                  
+                           ' SORTCITYP ' !! ESR.SORTCITYP !!            
+                           ' SORTTYPE ' !! ESR.SORTTYPE !!              
+                           ' ESR_SORTDATO ' !! ESR.ESR_SORTDATO);       
+               ABENDTXT  = '101 INSERT BE65000T';                       
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END INSERT_ESROPL;                                                     
+                                                                        
+ /*********************************************************************/
+ /* Ryd db2-tabeller før start                                 RUTINE */
+ /*********************************************************************/
+ RYD_DB2_TABELLER: PROC;                                                
+                                                                        
+         EXEC SQL                                                       
+            Delete from BE65000T                                        
+            where til_evs_aar = :WS_TIL_EVS_AAR                         
+            and   afviklings_id = :WS_FORSKUD_SLUT_TXT                  
+            AND   DATA_ID       = :BE55600M.DATA_ID                     
+            and   kØrsels_id = :WS_KØRSELS_ID;                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 DELETE BE65000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END RYD_DB2_TABELLER;                                                  
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         /* CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE); */           
+         CALL ZS30101(5,ABENDMEDD,2);                                   
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(5,ABENDMEDD,2);                                   
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+                                                                        
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.TEKST =                                                
+         'ANTAL LÆSTE RECORDS PÅ ESR DATASET';                          
+         DETLIN1.ANTAL = ANT_LÆS;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DETLIN1.TEKST =                                                
+         'ANTAL SKREVNE RÆKKER PÅ BE65000T ESR     ';                   
+         DETLIN1.ANTAL = ANT_INS_ESR;                                   
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL KONTROLLISTE;                                             
+         CLOSE FILE (BE86PI);                                           
+         CLOSE FILE (BEESRI);                                           
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+ END AFSLUT;                                                            
+ END BE86525;                                                           

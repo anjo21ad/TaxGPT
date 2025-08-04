@@ -1,0 +1,608 @@
+  PROCESS OPT(TIME);                                                    
+ BE31100: /* EVS - BEHANDL EJERE AF UDENLANDSKE EJENDOMME */            
+         PROC OPTIONS (MAIN) REORDER;                                   
+ /*********************************************************************/
+                                                                        
+         DCL COPYRIGHT CHAR (30) STATIC                                 
+         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');                       
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      ÅRSTILRETNING VIL 'NORMALT' KUN BESTÅ AF REKOMPILERING       */
+ /*      PÅ GRUND AF ÆNDRING(ER) AF STRUKTURER.                       */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      PROGRAMMET BEHANDLER UDENLANDSKE EJENDOMME UDTRUKKET         */
+ /*      FRA EVS SLUT OG/ELLER EVS FORSKUD.                           */
+ /*                                                                   */
+ /*      PROGRAMMETS FORMÅL ER AT UNDERSØGE OM EN PERSON EJER EN      */
+ /*      ELLER FLERE EJENDOMME, OM DISSE KUN EJES JVF. EVS SLUT ELLER */
+ /*      KUN JVF. EVS FORSKUD SAMT OM DER ER TALE OM SAMME EJENDOM(ME)*/
+ /*      HVIS DER EJES EJENDOMME BÅDE I EVS SLUT OG I EVS FORSKUD.    */
+ /*                                                                   */
+ /*      INDDATA : B.H31000D SAMSORTEREDE UDTRÆK FRA SLUT OG FORSKUD  */
+ /*                                                                   */
+ /*      UDDATA  : B.H31100D BEHANDLET UDTRÆK                         */
+ /*              : B.H31110D OVERLÆSTE EJENDOMME (EEJDNR > 999999)    */
+ /*              : BE31101Y  KONTROLLISTE                             */
+ /*                                                                   */
+ /*      EXT. REF: ZS61900   (SSI-DATO)                               */
+ /*                                                                   */
+ /* PROGRAMMØR:    AAGE RASMUSSEN, LSU T&S  NOV.   2001               */
+ /* ÅRSTILRETTET:  OLUF MØRK,      LSU T&S  JUNI   2002 SE SEKV  ?->80*/
+ /* RETTET:        AAGE RASMUSSEN, LSU T&S  NOV.   2002 EEJDNR>99999  */
+ /* RETTET:        GERD HOLM-PEDERSEN  PKF  OKT.   2009 EEJDNR>999999 */
+ /* RETTET         ESBEN BRODERSEN          SEP    2018               */
+ /*                TIL SLUT 2018 EJENDOMME KAN NU VÆRE OPDELT MED     */
+ /*                EENHEDLBNR SOM VIL VÆRE UDFYLDT FOR 2 FAMILIE      */
+ /*                BOLIG                                              */
+ /* RETTET         ESBEN BRODERSEN          JUN    2019               */
+ /*                TIL FORSKUD 2020 RETTELSE TIL OPTÆLINGER I  TOTAL  */
+ /*                INDIVID DA DER KAN VÆRE SLETTEDE EJERFORHOLD I     */
+ /*                SLUT ELLER FORSKUD PÅ UDENLANDSKE                  */
+ /*                DEFECT 248 FORSKUD 2020                            */
+ /*                Bemærk enhedsløbenummer altid er nul for           */
+ /*                udenlandske ejendomme                              */
+ /* Forskud 2021   Per Brunk                Marts 2020                */
+ /* Forskud 2024   Per Brunk                Januar 2021 MP            */
+ /*                nye strukturer BE30000N og BE30100N                */
+ /* Forskud 2024   Per Brunk                August 2021 KS46          */
+ /*                ny struktur BE30100N                               */
+ /* Forskud 2025   Tina Carstens            Okt. 2023                 */
+ /*                ny struktur BE30100N                               */
+ /* SLUT 2025      Per Jensen PEN Ændret struktur BE30000N   Okt 2023 */
+ /*********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES OG BUILTINS                               */
+ /*********************************************************************/
+ DCL     ZS61900   ENTRY OPTIONS (INTER ASM);          /* UDSKRIV SSI */
+ DCL     ZS38100   ENTRY OPTIONS (INTER ASM);          /* TIMESTAMP   */
+ DCL     ADDR      BUILTIN;                                             
+ /*********************************************************************/
+ /*      DECLARE AF FILER                                             */
+ /*********************************************************************/
+ DCL     BE310I          FILE RECORD INPUT;                             
+ DCL     BE311O          FILE RECORD OUTPUT;                            
+ DCL     BE3111O         FILE RECORD OUTPUT;                            
+ /*********************************************************************/
+ /*      DECLARE AF INPUT/OUTPUT                                      */
+ /*********************************************************************/
+ DCL     BE310_AR   CHAR      (1500) VAR;                               
+                                                                        
+ DCL     1 BE310              BASED(ADDR(BE310_AR)),                    
+   4 LÆNGDE       BIN FIXED (15),                                       
+   4 DCPRN        FIXED (11),          /* PERSONNUMMER                */
+   4 EKOMNR       BIN FIXED (15) UNAL, /* KOMMUNENR                   */
+   4 EEJDNR       BIN FIXED (31) UNAL, /* EJENDOMSNUMMER              */
+   4 EENHEDLBNR   BIN FIXED (15) UNAL, /* ENHEDSNR 2 FAM BOLIG        */
+   4 CFRATYPE     CHAR  (1);           /* KODE FOR UDTRÆK FRA?        */
+                                       /*  2=FRA EVS SLUT             */
+                                       /*  4=FRA EVS FORSKUD          */
+                                                                        
+ DCL     GEM_AR          CHAR      (1500) VAR;                          
+                                                                        
+ DCL     1 GEM           BASED(ADDR(GEM_AR)),                           
+   4 LÆNGDE       BIN FIXED (15),                                       
+   4 DCPRN        FIXED (11),          /* PERSONNUMMER                */
+   4 EKOMNR       BIN FIXED (15) UNAL, /* KOMMUNENR                   */
+   4 EEJDNR       BIN FIXED (31) UNAL, /* EJENDOMSNUMMER              */
+   4 EENHEDLBNR   BIN FIXED (15) UNAL, /* ENHEDSNR 2 FAM BOLIG        */
+   4 CFRATYPE     CHAR  (1);           /* KODE FOR UDTRÆK FRA?        */
+                                       /*  2=FRA EVS SLUT             */
+                                       /*  4=FRA EVS FORSKUD          */
+                                                                        
+ DCL     1 TOT_INDV,                                                    
+           %INCLUDE BE31100N;;                                          
+                                                                        
+ /* Nye til forskud 2020 håndtering af sletning af udenlandsk ejendom */
+ DCL     1 BE310_SLUT         BASED(ADDR(BE310_AR)),                    
+         4 LÆNGDE             BIN FIXED (15),                           
+           %INCLUDE BE30000N;;                                          
+                                                                        
+ DCL     1 BE310_FORSK        BASED(ADDR(BE310_AR)),                    
+         4 LÆNGDE             BIN FIXED (15),                           
+           %INCLUDE BE30100N;;                                          
+                                                                        
+ DCL     1 GEM_SLUT           BASED(ADDR(GEM_AR)),                      
+         4 LÆNGDE             BIN FIXED (15),                           
+           %INCLUDE BE30000N;;                                          
+                                                                        
+ DCL     1 GEM_FORSK          BASED(ADDR(GEM_AR)),                      
+         4 LÆNGDE             BIN FIXED (15),                           
+           %INCLUDE BE30100N;;                                          
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*********************************************************************/
+ DCL     1 TV,                                                          
+           2  LÆSTE_IALT     FIXED DEC (7),                             
+           2  LÆSTE_SLUT     FIXED DEC (7),                             
+           2  LÆSTE_FORSKUD  FIXED DEC (7),                             
+           2  OVSPR_SLUT     FIXED DEC (7), /* SKAL VÆRE LIG 0?    */   
+           2  OVSPR_FORSKUD  FIXED DEC (7), /* SKAL VÆRE LIG 0?    */   
+           2  DROP_IALT      FIXED DEC (7), /* EEJDNR > 999999     */   
+           2  DROP_SLUT      FIXED DEC (7), /*   HERAF FRA SLUT    */   
+           2  DROP_FORS      FIXED DEC (7), /*   HERAF FRA FORSKUD */   
+           2  SKRIV_IALT     FIXED DEC (7),                             
+           2  SKRIV_EJEND    FIXED DEC (7),                             
+           2  SKRIV_EJERE    FIXED DEC (7), /* ANTAL EJERE         */   
+           2  SKRIV_SLUT     FIXED DEC (7), /* EJER KUN I SLUT     */   
+           2  SKRIV_FORSKUD  FIXED DEC (7), /* EJER KUN I FORSKUD  */   
+           2  SKRIV_BÅDE_OG  FIXED DEC (7), /* SAMME EJENDOMME I   */   
+                                            /* SLUT OG FORSKUD     */   
+           2  SKRIV_EJ_SAMME FIXED DEC (7); /* EJ SAMME EJENDOMME  */   
+                                            /* I SLUT OG FORSKUD   */   
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF DIVERSE FELTER                                    */
+ /*********************************************************************/
+ DCL     EOF_BE310       BIT       (1);                                 
+ DCL     JA              BIT       (1)       INIT ('1'B);               
+ DCL     NEJ             BIT       (1)       INIT ('0'B);               
+                                                                        
+ DCL     SLETTET         BIT       (1)       INIT ('0'B);               
+ DCL     EJENDOM_SLET    BIT       (1)       INIT ('0'B);               
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTE                      */
+ /*********************************************************************/
+ DCL     1 OVLIN1,                                                      
+           2 CTL         CHAR      (01),                                
+           2 TXT1        CHAR      (50) INIT ('PROGRAM: BE31100L'),     
+           2 TXT2        CHAR      (58) INIT                            
+             ('OPSÆT EJERSTATUS FOR UDENLANDSKE EJENDOMME'),            
+           2 TXT3        CHAR      (14) INIT ('UDSKREVET DEN'),         
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVLIN2,                                                      
+           2 CTL         CHAR      (01),                                
+           2 F1          CHAR      (51) INIT (' '),                     
+           2 TXT1        CHAR      (91) INIT                            
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     LINIE           CHAR      (133);                               
+ DCL     1  DETAIL                           DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (70),                                
+          2  ANTAL       PIC       'Z.ZZZ.ZZ9';                         
+         %INCLUDE ZZ20301M;                                             
+ /*********************************************************************/
+ /*      H O U S E - K E E P I N G                                    */
+ /*********************************************************************/
+                                                                        
+         CALL ZS61900;                                                  
+                                                                        
+         OPEN FILE (BE310I)  TITLE ('BE31000I');                        
+         OPEN FILE (BE311O)  TITLE ('BE31100O');                        
+         OPEN FILE (BE3111O) TITLE ('BE31110O');                        
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE31101Y');                             
+                                                                        
+         ON ENDFILE (BE310I)                                            
+         BEGIN;                                                         
+            EOF_BE310 = JA;                                             
+         END;                                                           
+                                                                        
+         TV = '';                                                       
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+                                                                        
+ /*********************************************************************/
+ /*      P R O C E S S                                                */
+ /*********************************************************************/
+                                                                        
+         CALL LÆS;                                                      
+                                                                        
+         GEM_AR = BE310_AR;                                             
+         TOT_INDV = '';                                                 
+                                                                        
+         CALL LÆS;                                                      
+                                                                        
+         DO WHILE (EOF_BE310 = NEJ);                                    
+                                                                        
+            DO WHILE (EOF_BE310 = NEJ &                                 
+                      GEM.DCPRN ^= BE310.DCPRN);                        
+                                                                        
+                                                                        
+               /* Undersøg om slettet i Forskud hvis forskud individ */ 
+               IF GEM.CFRATYPE = '4'                                    
+               THEN                                                     
+                 DO;                                                    
+                   IF GEM_FORSK.CSLET  = '1'                            
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+               /* Undersøg om slettet i Slut hvis slut individ */       
+               IF GEM.CFRATYPE = '2'                                    
+               THEN                                                     
+                 DO;                                                    
+                   IF GEM_SLUT.SIDSTE.CSLET  = '1'                      
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+                                                                        
+               CALL SKRIV;                                              
+                                                                        
+               IF SLETTET = NEJ &                                       
+                  EJENDOM_SLET = NEJ                                    
+               THEN                                                     
+                 TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_IALT + 1;         
+                                                                        
+               CALL SKRIV_TOTAL_INDV;                                   
+                                                                        
+               GEM_AR = BE310_AR;                                       
+               EJENDOM_SLET = NEJ;                                      
+               CALL LÆS;                                                
+                                                                        
+            END;     /* DO WHILE NY PERSON */                           
+                                                                        
+            DO WHILE (EOF_BE310 = NEJ &                                 
+                      GEM.DCPRN = BE310.DCPRN &                         
+                      GEM.EEJDNR ^= BE310.EEJDNR);                      
+                                                                        
+               /* Undersøg om slettet i Forskud hvis forskud individ */ 
+               IF GEM.CFRATYPE = '4'                                    
+               THEN                                                     
+                 DO;                                                    
+                   IF GEM_FORSK.CSLET  = '1'                            
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+               /* Undersøg om slettet i Slut hvis slut individ */       
+               IF GEM.CFRATYPE = '2'                                    
+               THEN                                                     
+                 DO;                                                    
+                   IF GEM_SLUT.SIDSTE.CSLET  = '1'                      
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+                                                                        
+               CALL SKRIV;                                              
+                                                                        
+               IF SLETTET = NEJ  &                                      
+                  EJENDOM_SLET = NEJ                                    
+               THEN                                                     
+                 TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_IALT + 1;         
+                                                                        
+               GEM_AR = BE310_AR;                                       
+               EJENDOM_SLET = NEJ;                                      
+               CALL LÆS;                                                
+                                                                        
+            END; /* DO WHILE SAMME PERSON OG NY EJENDOM ELLER ENHED */  
+                                                                        
+            DO WHILE (EOF_BE310 = NEJ &                                 
+                      GEM.DCPRN      = BE310.DCPRN  &                   
+                      GEM.EEJDNR     = BE310.EEJDNR);                   
+                                                                        
+               /* undersøg om slettet i Forskud eller Slut */           
+               IF BE310.CFRATYPE = '2'                                  
+               THEN                                                     
+                 DO;                                                    
+                   IF BE310_SLUT.SIDSTE.CSLET = '1' !                   
+                      GEM_FORSK.CSLET  = '1'                            
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                   IF BE310_FORSK.CSLET = '1' !                         
+                      GEM_SLUT.SIDSTE.CSLET  = '1'                      
+                   THEN                                                 
+                     SLETTET = JA;                                      
+                   ELSE                                                 
+                     SLETTET = NEJ;                                     
+                 END;                                                   
+                                                                        
+               IF SLETTET = JA                                          
+               THEN                                                     
+                 EJENDOM_SLET = JA;                                     
+               ELSE                                                     
+                 EJENDOM_SLET = NEJ;                                    
+                                                                        
+                                                                        
+               IF GEM.CFRATYPE = BE310.CFRATYPE                         
+               THEN                                                     
+                  DO;                                                   
+                     IF BE310.CFRATYPE = '2'                            
+                     THEN                                               
+                        TV.OVSPR_SLUT = TV.OVSPR_SLUT + 1;              
+                     ELSE                                               
+                        TV.OVSPR_FORSKUD = TV.OVSPR_FORSKUD + 1;        
+                  END;                                                  
+               ELSE                                                     
+                  DO;                                                   
+                    IF SLETTET = NEJ                                    
+                    THEN                                                
+                      TOT_INDV.FEJET_BÅDEOG =                           
+                             TOT_INDV.FEJET_BÅDEOG + 1;                 
+                    CALL SKRIV;                                         
+                  END;                                                  
+                                                                        
+               GEM_AR = BE310_AR;                                       
+               CALL LÆS;                                                
+                                                                        
+            END;     /* DO WHILE SAMME PERSON OG EJENDOM OG ENHED */    
+                                                                        
+         END; /* DO WHILE EOF_BE310 = NEJ */                            
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /*      LÆS SAMSORTEREDE UDTRÆK MED UDENLANDSKE EJENDOMME            */
+ /*********************************************************************/
+ LÆS:                                                                   
+ PROC;                                                                  
+                                                                        
+         READ FILE (BE310I) INTO (BE310_AR);                            
+                                                                        
+         DO WHILE (EOF_BE310 = NEJ & BE310.EEJDNR > 999999);            
+                                                                        
+            TV.LÆSTE_IALT = TV.LÆSTE_IALT + 1;                          
+                                                                        
+            IF BE310.CFRATYPE = '2'                                     
+            THEN                                                        
+               TV.LÆSTE_SLUT = TV.LÆSTE_SLUT + 1;                       
+            ELSE                                                        
+               TV.LÆSTE_FORSKUD = TV.LÆSTE_FORSKUD + 1;                 
+                                                                        
+            WRITE FILE (BE3111O) FROM (BE310_AR);                       
+                                                                        
+            TV.DROP_IALT = TV.DROP_IALT + 1;                            
+                                                                        
+            IF BE310.CFRATYPE = '2'                                     
+            THEN                                                        
+               TV.DROP_SLUT = TV.DROP_SLUT + 1;                         
+            ELSE                                                        
+               TV.DROP_FORS = TV.DROP_FORS + 1;                         
+                                                                        
+            READ FILE (BE310I) INTO (BE310_AR);                         
+                                                                        
+         END;                                                           
+                                                                        
+         IF EOF_BE310 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               TV.LÆSTE_IALT = TV.LÆSTE_IALT + 1;                       
+                                                                        
+               IF BE310.CFRATYPE = '2'                                  
+               THEN                                                     
+                  TV.LÆSTE_SLUT = TV.LÆSTE_SLUT + 1;                    
+               ELSE                                                     
+                  TV.LÆSTE_FORSKUD = TV.LÆSTE_FORSKUD + 1;              
+            END;                                                        
+                                                                        
+ END LÆS;                                                               
+ /*********************************************************************/
+ /*      SKRIV BEHANDLET UDTRÆK MED UDENLANDSKE EJENDOMME             */
+ /*********************************************************************/
+ SKRIV: PROC;                                                           
+                                                                        
+         WRITE FILE (BE311O) FROM (GEM_AR);                             
+                                                                        
+         TV.SKRIV_EJEND = TV.SKRIV_EJEND + 1;                           
+         TV.SKRIV_IALT = TV.SKRIV_IALT + 1;                             
+                                                                        
+         /* Det er kun optællingerne der rettes */                      
+         IF SLETTET = NEJ                                               
+         THEN                                                           
+           DO;                                                          
+             IF GEM.CFRATYPE = '2'                                      
+             THEN                                                       
+                TOT_INDV.FEJET_SLUT = TOT_INDV.FEJET_SLUT + 1;          
+             ELSE                                                       
+                TOT_INDV.FEJET_FORSKU = TOT_INDV.FEJET_FORSKU + 1;      
+           END;                                                         
+                                                                        
+                                                                        
+ END SKRIV;                                                             
+ /*********************************************************************/
+ /*      OPTÆL TIL KONTROLLISTE OG                                    */
+ /*      SKRIV TOTAL-INDIVID FOR AKTUEL EJER                          */
+ /*********************************************************************/
+ SKRIV_TOTAL_INDV:                                                      
+ PROC;                                                                  
+                                                                        
+         TOT_INDV.DCPRN = GEM.DCPRN;                                    
+                                                                        
+         TOT_INDV.FILLER01 = 999;                                       
+         TOT_INDV.FILLER03 = '0';                                       
+                                                                        
+         WRITE FILE (BE311O) FROM (TOT_INDV);                           
+                                                                        
+         TV.SKRIV_IALT = TV.SKRIV_IALT + 1;                             
+         TV.SKRIV_EJERE = TV.SKRIV_EJERE + 1;                           
+                                                                        
+         SELECT;                                                        
+                                                                        
+           WHEN (TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_SLUT &            
+                 TOT_INDV.FEJET_FORSKU = 0)                             
+              DO;                                                       
+                 /* ALLE EJES KUN I SLUT */                             
+                 TV.SKRIV_SLUT = TV.SKRIV_SLUT + 1;                     
+              END;                                                      
+                                                                        
+           WHEN (TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_FORSKU &          
+                 TOT_INDV.FEJET_SLUT = 0)                               
+              DO;                                                       
+                 /* ALLE EJES KUN I FORSKUD */                          
+                 TV.SKRIV_FORSKUD = TV.SKRIV_FORSKUD + 1;               
+              END;                                                      
+                                                                        
+           WHEN (TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_BÅDEOG &          
+                 TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_SLUT &            
+                 TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_FORSKU)           
+              DO;                                                       
+                 /* ALLE EJES BÅDE I SLUT OG FORSKUD */                 
+                 TV.SKRIV_BÅDE_OG = TV.SKRIV_BÅDE_OG + 1;               
+              END;                                                      
+                                                                        
+           OTHERWISE                                                    
+              DO;                                                       
+                 /* IKKE SAMME EJENDOMME I SLUT OG FORSKUD */           
+                 TV.SKRIV_EJ_SAMME = TV.SKRIV_EJ_SAMME + 1;             
+              END;                                                      
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+         TOT_INDV = '';                                                 
+                                                                        
+ END SKRIV_TOTAL_INDV;                                                  
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         LINIE = ZZIK1;                                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         OVLIN1.CTL= ZZWS1;                                             
+         OVLIN1.DATO = UDDATO;                                          
+         CALL ZZ20300 (OVLIN1,'01');                                    
+                                                                        
+         OVLIN2.CTL= ZZWS2;                                             
+         CALL ZZ20300 (OVLIN2,'01');                                    
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL LÆSTE IALT                    B.H31000D';
+         DETAIL.ANTAL = TV.LÆSTE_IALT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF FRA SLUT';                         
+         DETAIL.ANTAL = TV.LÆSTE_SLUT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = '            HERAF OVERLÆSTE SLUT';             
+         DETAIL.ANTAL = TV.OVSPR_SLUT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF FRA FORSKUD';                      
+         DETAIL.ANTAL = TV.LÆSTE_FORSKUD;                               
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = '            HERAF OVERLÆSTE FORSKUD';          
+         DETAIL.ANTAL = TV.OVSPR_FORSKUD;                               
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL SKREVET IALT                  B.H31100D';
+         DETAIL.ANTAL = TV.SKRIV_IALT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = 'ANTAL SKREVET UDENLANDSKE EJENDOMME';          
+         DETAIL.ANTAL = TV.SKRIV_EJEND;                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = 'ANTAL SKREVET EJERE STATUS UDL. EJENDOMME';    
+         DETAIL.ANTAL = TV.SKRIV_EJERE;                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF KUN MED EJENDOMME FRA SLUT';       
+         DETAIL.ANTAL = TV.SKRIV_SLUT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF KUN MED EJENDOMME FRA FORSKUD';    
+         DETAIL.ANTAL = TV.SKRIV_FORSKUD;                               
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF MED SAMME EJENDOMME I SLUT OG FORSK
+ UD';                                                                   
+         DETAIL.ANTAL = TV.SKRIV_BÅDE_OG;                               
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = '      HERAF IKKE MED SAMME EJENDOMME I SLUT OG 
+ FORSKUD';                                                              
+         DETAIL.ANTAL = TV.SKRIV_EJ_SAMME;                              
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = 'ANTAL FRAVALGTE EJDNR > 999999      B.H31110D';
+         DETAIL.ANTAL = TV.DROP_IALT;                                   
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF FRA SLUT';                         
+         DETAIL.ANTAL = TV.DROP_SLUT;                                   
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS1;                                           
+         DETAIL.TEKST = '      HERAF FRA FORSKUD';                      
+         DETAIL.ANTAL = TV.DROP_FORS;                                   
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /*      AFSLUTNING                                                   */
+ /*********************************************************************/
+ AFSLUT:                                                                
+ PROC;                                                                  
+                                                                        
+         CALL SKRIV; /* SIDSTE EJERS SIDSTE INDIVID */                  
+                                                                        
+         TOT_INDV.FEJET_IALT = TOT_INDV.FEJET_IALT + 1;                 
+                                                                        
+         CALL SKRIV_TOTAL_INDV; /* FOR SIDSTE EJER */                   
+                                                                        
+         CALL KONTROLLISTE;                                             
+                                                                        
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+         CLOSE FILE (BE310I),                                           
+               FILE (BE311O),                                           
+               FILE (BE3111O);                                          
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END BE31100;                                                           

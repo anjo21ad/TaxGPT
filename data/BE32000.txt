@@ -1,0 +1,377 @@
+ BE32000: /* EVS - BEHANDLING AF 2-EJERES EJERANDELSPROCENT */          
+         PROC OPTIONS (MAIN) REORDER;                                   
+ /*********************************************************************/
+ /*                                                                  */ 
+ /*      ÅRSTILRETNING VIL 'NORMALT' KUN BESTÅ AF REKOMPILERING       */
+ /*      PÅ GRUND AF ÆNDRING(ER) I INPUT-STRUKTURER.                  */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      PROGRAMMET BEHANDLER EJENDOMME MED 2 EJERE.                  */
+ /*      PROGRAMMETS FORMÅL ER AT KONTROLLERE OG EVT. OPSÆTTE         */
+ /*      OG/ELLER NULSTILLE EJERANDELS-PROCENTEN.                     */
+ /*                                                                   */
+ /*      INDDATA : B.H31811D (SORTERET UDTRÆK AF 2-EJERE)             */
+ /*                                                                   */
+ /*      UDDATA  : B.H32000D (BEHANDLET UDTRÆK AF 2-EJERE)            */
+ /*              : BE32001Y  KONTROLLISTE                             */
+ /*                                                                   */
+ /*      EXT. REF: ZS61900   (SSI-DATO)                               */
+ /*                                                                   */
+ /* PROGRAMMØR:    AAGE RASMUSSEN, LSU T&S  NOV. 2001 (P.G.A. BE90300)*/
+ /* ÅRSTILRETTET:  OLUF MØRK,      LSU T&S  JULI 2002                 */
+ /*                                                                   */
+ /* SLUT 2012    OMCOMPILERET P.G.A.            LKA OKTOBER 2012      */
+ /*              NYT FELT CEANV I STRUKTUR BE31800N                   */
+ /*              KRAV 18-01 - BENYTTELSESKODE 25                      */
+ /* FORSKUD 2014    Lars Harritshøj                   maj 2013        */
+ /*                 Omcompileret                                      */
+ /* SLUT 2013    OMCOMPILERET                   QQS OKTOBER 2013      */
+ /* FORSKUD2015  Jørgen Saugmann                      jun 2014        */
+ /*              Compileret Ingen ændringer                           */
+ /* SLUT2014     Jørgen Saugmann                      OKT 2014        */
+ /*              Compileret Ingen ændringer                           */
+ /* FORSKUD2016  Z6JNK                                   08.06.2015   */
+ /*              Compileret. Ingen ændringer                          */
+ /* SLUT2018     Esben Brodersen                      Sep  2018       */
+ /*              Skiftet struktur BE31800N - > BE33700N               */
+ /*              2 Familiehuse samt check på samme ejendom            */
+ /*              udvidet med EENHEDLBNR                              */ 
+ /* Rettelse #02: Edward Laryea, EDL                     22-03-2019   */
+ /*               Nyt felt STRAKS_EVS i BE33700N                      */
+ /* Forskud2021 Per Brunk                              Marts 2020     */
+ /*               Nye felter i BE33700N VURMARK og VUR2001            */
+ /* Slut 2020 : Per Brunk PBR Ny struktur BE33700N     Okt 2020       */
+ /*********************************************************************/
+                                                                        
+ DCL COPYRIGHT CHAR (30) STATIC INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+ DCL     ZS61900   ENTRY OPTIONS (INTER ASM);          /* UDSKRIV SSI */
+ DCL     ZS38100   ENTRY OPTIONS (INTER ASM);          /* TIMESTAMP   */
+ DCL     ADDR      BUILTIN;                                             
+ /*********************************************************************/
+ /*      DECLARE AF FILER                                             */
+ /*********************************************************************/
+ DCL     BE318I          FILE RECORD INPUT;                             
+ DCL     BE320O          FILE RECORD OUTPUT;                            
+ /*********************************************************************/
+ /*      DECLARE AF INPUT                                             */
+ /*********************************************************************/
+ DCL     BE318_P1   CHAR      (2000) VAR;   /* BEREGNINGSBÅND         */
+ DCL     1 PERSON1                        BASED(ADDR(BE318_P1)),        
+           4 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BE33700N;                                           
+ DCL     BE318_P2   CHAR      (2000) VAR;   /* BEREGNINGSBÅND         */
+ DCL     1 PERSON2                        BASED(ADDR(BE318_P2)),        
+           4 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BE33700N;                                           
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*********************************************************************/
+ DCL     1 TV,                                                          
+           2  LÆSTE1     FIXED DEC (7),      /* LÆSTE PERSON1         */
+           2  LÆSTE2     FIXED DEC (7),      /* LÆSTE PERSON2         */
+           2  OVF1       FIXED DEC (7),      /* OVERFØRTE PERSON1     */
+           2  OVF2       FIXED DEC (7),      /* OVERFØRTE PERSON2     */
+           2  DELING     FIXED DEC (7);      /* DELING AF ANDEL LAVET */
+ DCL     IALT            FIXED DEC (7);                                 
+ /*********************************************************************/
+ /*      DECLARE AF DIVERSE FELTER                                    */
+ /*********************************************************************/
+ DCL     EOF_318         BIT       (1)       INIT ('0'B);               
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     SKRIVES         CHAR      (01);                                
+ DCL     1 GEM,                              /* BRUGES VED FORDELING  */
+           2 EEJDNR      FIXED     (7),      /* AF EJERANDEL FOR      */
+           2 EENHEDLBNR  BIN FIXED(15),      /* 2-EJERE UDEN MAKKER   */
+           2 GANE        FIXED     (5);                                 
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTE                      */
+ /*********************************************************************/
+ DCL     1 OVLIN1,                                                      
+           2 CTL         CHAR      (01),                                
+           2 TXT1        CHAR      (50) INIT ('PROGRAM: BE32000L'),     
+           2 TXT2        CHAR      (58) INIT                            
+             ('BEHANDLE TO-EJERE FØR EVS-BEREGNING   '),                
+           2 TXT3        CHAR      (14) INIT ('UDSKREVET DEN'),         
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVLIN2,                                                      
+           2 CTL         CHAR      (01),                                
+           2 F1          CHAR      (51) INIT (' '),                     
+           2 TXT1        CHAR      (91) INIT                            
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     LINIE           CHAR      (133);                               
+ DCL     1  DETAIL                           DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (44),                                
+          2  ANTAL1      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE1     CHAR      (8),                                 
+          2  ANTAL2      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE2     CHAR      (11),                                
+          2  ANTALF      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE3     CHAR      (11),                                
+          2  ANTALIALT   PIC       'Z.ZZZ.ZZ9';                         
+ DCL     1  DETAIL2                          DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (44),                                
+          2  BLANKE      CHAR      (37),                                
+          2  IALT        PIC       'Z.ZZZ.ZZ9';                         
+         %INCLUDE ZZ20301M;                                             
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL FEJLLISTE                         */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ /*********************************************************************/
+ /*      H O U S E - K E E P I N G                                    */
+ /*********************************************************************/
+         CALL ZS61900;                                                  
+         CALL ZZ20390 ('*OPEN','BE32001Y');                             
+         ON ENDFILE (BE318I)                                            
+         BEGIN;                                                         
+            EOF_318 = '1'B;                                             
+         END;                                                           
+         OPEN FILE (BE318I)  TITLE ('BE31811I');                        
+         OPEN FILE (BE320O)  TITLE ('BE32000O');                        
+         TV = '';                                                       
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+ /*********************************************************************/
+ /*      P R O C E S S                                                */
+ /*********************************************************************/
+         READ FILE (BE318I) INTO (BE318_P1);                            
+         READ FILE (BE318I) INTO (BE318_P2);                            
+         TV.LÆSTE1 = 1;                                                 
+         TV.LÆSTE2 = 1;                                                 
+         GEM = '';                                                      
+         DO WHILE (^EOF_318);                                           
+                                                                        
+            /* 2 PERSONER DER EJER SAMME EJENDOM OG ENHED */            
+            IF PERSON1.EEJDNR = PERSON2.EEJDNR &                        
+               PERSON1.EENHEDLBNR = PERSON2.EENHEDLBNR                  
+            THEN                                                        
+               DO;                                                      
+                  GEM = '';                                             
+                  CALL BEHANDL_SAMBO;                                   
+                  READ FILE (BE318I) INTO (BE318_P1);                   
+                  IF ^EOF_318                                           
+                  THEN                                                  
+                     DO;                                                
+                        TV.LÆSTE1 = TV.LÆSTE1 + 1;                      
+                        READ FILE (BE318I) INTO (BE318_P2);             
+                        IF ^EOF_318                                     
+                        THEN                                            
+                           TV.LÆSTE2 = TV.LÆSTE2 + 1;                   
+                        ELSE                                            
+                           CALL BEHANDL_ENLIG;                          
+                     END;                                               
+               END;                                                     
+            ELSE                /* HVIS DER IKKE FINDES NOGEN MAKKER */ 
+               DO;                                                      
+                  CALL BEHANDL_ENLIG;                                   
+                  PERSON1 = PERSON2, BY NAME;                           
+                  READ FILE (BE318I) INTO (BE318_P2);                   
+                  IF ^EOF_318                                           
+                  THEN                                                  
+                     TV.LÆSTE2 = TV.LÆSTE2 + 1;                         
+                  ELSE                                                  
+                     CALL BEHANDL_ENLIG;                                
+               END;                                                     
+         END;     /* DO WHILE */                                        
+         CALL KONTROLLISTE;                                             
+         CALL AFSLUT;                                                   
+ /*********************************************************************/
+ /*         BEHANDL TO-EJERE                                          */
+ /*********************************************************************/
+ BEHANDL_SAMBO:                                                         
+         PROC;                                                          
+         CALL FORETAG_DELING;                                           
+         WRITE FILE (BE320O) FROM (BE318_P1);                           
+         WRITE FILE (BE320O) FROM (BE318_P2);                           
+         TV.OVF1 = TV.OVF1 + 1;                                         
+         TV.OVF2 = TV.OVF2 + 1;                                         
+ END BEHANDL_SAMBO;                                                     
+ /*********************************************************************/
+ /*         BEHANDL TO-EJER, HVORTIL DER IKKE ER FUNDET EN MAKKER.    */
+ /*         DET KAN F.EKS. FOREKOMME HVIS KUN EN I ET TO-EJER FOR-    */
+ /*         HOLD SÆLGER.                                              */
+ /*********************************************************************/
+ BEHANDL_ENLIG:                                                         
+         PROC;                                                          
+         IF PERSON1.GANE > 0  /* BEHOLD INDBERETTET ANDEL */            
+         THEN;                                                          
+         ELSE                                                           
+            IF PERSON1.GANE = 0 &                                       
+               PERSON1.EEJDNR = GEM.EEJDNR &                            
+               PERSON1.EENHEDLBNR = GEM.EENHEDLBNR                      
+            THEN                                                        
+               DO;                                                      
+                   /* MODREGN MEDEJERS ANDEL */                         
+                   PERSON1.GANE = 10000 - GEM.GANE;                     
+                   TV.DELING = TV.DELING + 1;                           
+               END;                                                     
+         IF PERSON1.GANE = 0                                            
+         THEN                                                           
+            PERSON1.CEJ_100 = ' '; /* UNDLAD EFTERFØLGENDE BEREGNING */ 
+         WRITE FILE (BE320O) FROM (BE318_P1);                           
+         TV.OVF1 = TV.OVF1 + 1;                                         
+         GEM = '';                                                      
+ END BEHANDL_ENLIG;                                                     
+ /*********************************************************************/
+ /*      FORDELING AF EJERANDELE                                      */
+ /*********************************************************************/
+ FORETAG_DELING: PROC;                                                  
+         IF PERSON1.GANE = 0 !                                          
+            PERSON2.GANE = 0                                            
+         THEN                                                           
+            CALL CHECK_EJET_EEN_DAG;                                    
+         IF PERSON1.GANE = 0                 /* FORDELING AF EJER-    */
+         THEN                                /* ANDELE                */
+            IF PERSON2.GANE = 0                                         
+            THEN                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 2;                            
+                  PERSON1.GANE = 5000;                                  
+                  PERSON2.GANE = 5000;                                  
+               END;                                                     
+            ELSE                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 1;                            
+                  PERSON1.GANE = 10000 - PERSON2.GANE;                  
+               END;                                                     
+         ELSE                                                           
+            IF PERSON2.GANE = 0                                         
+            THEN                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 1;                            
+                  PERSON2.GANE = 10000 - PERSON1.GANE;                  
+               END;                                                     
+         IF PERSON1.CITYP < 5 & PERSON2.CITYP < 5                       
+         THEN                                                           
+            DO;                                                         
+               /* A.H.T. TO 'KØBERE', SOM EVT. EFTERFØLGES AF  */       
+               /* EN 'ENLIG' SÆLGER', GEMMES EJERANDELEN FOR   */       
+               /* DEN PERSON, DER EJEDE EJENDOMMEN SAMTIDIG    */       
+               /* MED SÆLGEREN, FOR AT KUNNE BEREGNE SÆLGERENS */       
+               /* EJERANDEL, NÅR DENNE ER LIG 0.               */       
+               GEM.EEJDNR     = PERSON1.EEJDNR;                         
+               GEM.EENHEDLBNR = PERSON1.EENHEDLBNR;                     
+               IF PERSON1.DOVTG < PERSON2.DOVTG                         
+               THEN                                                     
+                  GEM.GANE = PERSON1.GANE;                              
+               ELSE                                                     
+                  GEM.GANE = PERSON2.GANE;                              
+            END;                                                        
+ END FORETAG_DELING;                                                    
+ /*********************************************************************/
+ /*      HVIS DEN ENE EJER KUN HAR EJET EJENDOMMEN EEN DAG            */
+ /*      SKAL DER EVT. IKKE FORETAGES DELING AF EJERANDEL             */
+ /*********************************************************************/
+ CHECK_EJET_EEN_DAG:                                                    
+         PROC;                                                          
+         IF (PERSON1.DAFSTÅ > 0 &                                       
+            (PERSON1.DAFSTÅ = PERSON1.DOVTG)) &                         
+            (PERSON2.DAFSTÅ > 0 &                                       
+            (PERSON2.DAFSTÅ = PERSON2.DOVTG)) &                         
+            (PERSON1.DAFSTÅ = PERSON2.DAFSTÅ)                           
+         THEN                                                           
+            RETURN; /* NORMAL DELING HVIS EJET SAMME ENE DAG */         
+         IF (PERSON1.DAFSTÅ > 0 &                                       
+            (PERSON1.DAFSTÅ = PERSON1.DOVTG)) !                         
+            (PERSON2.DAFSTÅ > 0 &                                       
+            (PERSON2.DAFSTÅ = PERSON2.DOVTG))                           
+         THEN                                                           
+            DO;                                                         
+               /* LAV 'DELING' HVIS KUN DEN ENE EJER */                 
+               /* HAR EJET EJENDOMMEN NETOP EEN DAG  */                 
+               IF PERSON1.GANE = 0 &                                    
+                  PERSON2.GANE = 0                                      
+               THEN                                                     
+                  DO;                                                   
+                     TV.DELING = TV.DELING + 2;                         
+                     PERSON1.GANE = 10000;                              
+                     PERSON2.GANE = 10000;                              
+                     RETURN;                                            
+                  END;                                                  
+               IF PERSON1.GANE = 0                                      
+               THEN                                                     
+                  DO;                                                   
+                     TV.DELING = TV.DELING + 1;                         
+                     PERSON1.GANE = 10000;                              
+                  END;                                                  
+               ELSE                                                     
+                  IF PERSON2.GANE = 0                                   
+                  THEN                                                  
+                     DO;                                                
+                        TV.DELING = TV.DELING + 1;                      
+                        PERSON2.GANE = 10000;                           
+                     END;                                               
+            END;                                                        
+ END CHECK_EJET_EEN_DAG;                                                
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+         PROC;                                                          
+         LINIE = ZZIK1;                                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+         OVLIN1.CTL= ZZWS1;                                             
+         OVLIN1.DATO = UDDATO;                                          
+         CALL ZZ20300 (OVLIN1,'01');                                    
+         OVLIN2.CTL= ZZWS2;                                             
+         CALL ZZ20300 (OVLIN2,'01');                                    
+         LINIE = ZZWS2 !! (40)' ' !! 'PERSON 1            PERSON 2  ' !!
+                 '    DELING FORETAGET' !!                              
+                 (16)' ' !! 'IALT';                                     
+         CALL ZZ20300 (LINIE,'01');                                     
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL LÆSTE TO-EJERE';                         
+         DETAIL.ANTAL1 = TV.LÆSTE1;                                     
+         DETAIL.ANTAL2 = TV.LÆSTE2;                                     
+         IALT = TV.LÆSTE1 + TV.LÆSTE2;                                  
+         ANTALIALT = IALT;                                              
+         CALL ZZ20300 (LINIE,'01');                                     
+         DETAIL.TEKST = 'ANTAL OVERFØRTE ';                             
+         DETAIL.ANTAL1 = TV.OVF1;                                       
+         DETAIL.ANTAL2 = TV.OVF2;                                       
+         DETAIL.ANTALF = TV.DELING;                                     
+         IALT = TV.OVF1 + TV.OVF2;                                      
+         ANTALIALT = IALT;                                              
+         DETAIL.STYR = ZZWS3;                                           
+         CALL ZZ20300 (LINIE,'01');                                     
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /*      AFSLUTNING                                                   */
+ /*********************************************************************/
+ AFSLUT:                                                                
+         PROC;                                                          
+         CALL ZZ20300(' ','99');                                        
+         CLOSE FILE (BE318I),                                           
+               FILE (BE320O);                                           
+ END AFSLUT;                                                            
+ END BE32000;                                                           

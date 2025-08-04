@@ -1,0 +1,542 @@
+  PROCESS OPT(TIME);                                                    
+ BH71100: /* SKAF EVS SLUT-AKTUELT-ÅR-BELØB TIL BOT-NÆSTE-ÅR-PROD.   */ 
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /********************************************************************/ 
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KMD A/S 2004');               
+ /********************************************************************  
+ *                                                                    * 
+ * FORMÅL : AT SKAFFE EJENDOMSVÆRDISKATTEN FOR NÆSTE ÅR TIL BRUG VED  * 
+ *          BRUGERTEST AF BOLIGYDELSESBEREGNINGEN FOR AKTUELLE ÅR.    * 
+ *          EJENDOMSVÆRDISKATTEN HENTES FRA FORSKUD-"KOMMENDE ÅR"     * 
+ *          EVS-PERSON-TABEL FOR DE AF BOT ØNSKEDE PERSONER/EJENDOMME * 
+ *          UDTRUKKET FRA ESR OG BOT.                                 * 
+ *                                                                    * 
+ * INPUT  : BQ77000T BEREGNINGS TABEL MED EVS TIL SIDSTE FORSKUDS ÅR  * 
+ *          C.N57131D  UDTRÆK FRA ESR - SORTERET                      * 
+ *                                                                    * 
+ * OUTPUT : B.H71100D  UDTRÆK MED ØNSKEDE PERSONER/EJENDOMME TIL BOT  * 
+ *          BH71101Y   KØRSELSKONTROLLISTE                            * 
+ *                                                                    * 
+ * PROGRAMMØR: AAGE RASMUSSEN   PUS T&S FORSKUD     OKTOBER 2000      * 
+ *--------------------------------------------------------------------* 
+ * ÅRSRUL:     SUSANNE VILLUMSEN  *FORSKUD06*       AUGUST  2005      * 
+ * ÅRSRUL:     BO SCHMIDT         *FORSKUD07*       AUGUST  2006      * 
+ * ÅRSRUL:     BO SCHMIDT         *FORSKUD08*       AUGUST  2007      * 
+ * ÅRSRUL:     BO SCHMIDT         *FORSKUD09*       JUN     2008      * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN *FORSKUD10*       APRIL   2009      * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN *FORSKUD11*       JUNI    2010      * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN *FORSKUD12*       JUNI    2011      * 
+ * ÅRSRUL:     LARS KAAE HARRITSHØJ *FORSKUD13*     JUNI    2012      * 
+ * ÅRSRUL:     LARS KAAE HARRITSHØJ *FORSKUD14*     MAJ     2013      * 
+ * ÅRSRUL:     JØRGEN SAUGMANN      *FORSKUD15*     OKT     2014      * 
+ * ÅRSRUL:     JNK                  *FORSKUD16*     NOV     2015      * 
+ * ÅRSRUL:     QEB OMLAGT TIL       *FORSKUD17*     JUN     2016      * 
+ *             ÅRSTALS MACRO BH65300M                                 * 
+ * BH71100 oprettet som tilrettet kopi af BH71200.                      
+ * Beregnings bånd er omlagt til DB2. Tabel BQ77000T indeholder       * 
+ * udtræk af EVS Forskud.                                           *   
+ * SKAL IKKE ÅRSRULLES                                                * 
+ * Parameter filen skal altid pege på F for FORSKUD                   * 
+ *********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     CN571I  FILE RECORD INPUT;          /* ESR UDTRÆK           */ 
+ DCL     BH711O  FILE RECORD OUTPUT;         /* BOY UDTRÆK           */ 
+ DCL     BH711I  FILE RECORD INPUT;          /* PARMFIL              */ 
+                                                                        
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK FRA ESR                                    * 
+ *********************************************************************/ 
+ DCL     1 CN571,                                                       
+           %INCLUDE CN57100N;                                           
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK TIL BOY                                    * 
+ *********************************************************************/ 
+ DCL     1 BH711,                                                       
+           %INCLUDE BH81100N;                                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ÅRSTALS INCLUDE                                   * 
+ *********************************************************************/ 
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ /*********************************************************************/
+ /* DECLARES TIL DB2 OMLÆGNING FÆLLES KODE                            */
+ /*********************************************************************/
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BH71100');      
+                                                                        
+ DCL     1 BH711_PARM,                                                  
+           %INCLUDE BH54900N;                                           
+                                                                        
+ DCL     EOF_BH711_PARM                 BIT       (1);                  
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */        
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                        /* TÆLLEVÆRKER TIL TOTALLISTEN */ 
+           2 LÆS_CN571    FIXED DEC (7),                                
+           2 LÆS_BQ77000T FIXED DEC (7),                                
+           2 SKREVET      FIXED DEC (7),                                
+           2 EJFUNDET     FIXED DEC (7),                                
+           2 FUNDET       FIXED DEC (7),                                
+           2 BEREGNET     FIXED DEC (7),                                
+           2 EVS          FIXED DEC (15,2),                             
+           2 EJBEREGN     FIXED DEC (7);                                
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     EOF_CN571       BIT       (1);                                 
+ DCL     SLUT_FORSKUD_CUR BIT       (1);                                
+                                                                        
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     HJPCT           FIXED     (5,4);                               
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     MULTIPLY        BUILTIN;                                       
+ DCL     DIVIDE          BUILTIN;                                       
+                                                                        
+ DCL     ZS30101         ENTRY;                       /*ABEND*/         
+ DCL     ZS67000         ENTRY;                       /*SQL FEJL */     
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS61900         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH71100L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (55)      INIT      (' '),           
+           2 F2          CHAR      (14)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (63)      INIT      ((63)' ');       
+ DCL     1 DETLIN3,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (26)      INIT      ((26)' ');       
+                                                                        
+          % INCLUDE ZZ20301M;                                           
+ /*********************************************************************/
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*********************************************************************/
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH71100'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /* M A C R O E R der SKAL ligge før koden grundet declare af cursors */
+ /*********************************************************************/
+ %INCLUDE BH54999M; /* CHECK OM OMKØRSEL, OG UDFØR EVT OPRYDNING */     
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+                                                                        
+         OVERLIN1.TEKST2 =  'SKAF EVS ' !! BH65300M.INDKÅR1 !!          
+                     ' TIL BRUGERTEST ' !! BH65300M.INDKÅR2 !!          
+                      ' AF BOLIGYDELSE';                                
+                                                                        
+         CALL ZS61900;     /* UDSKRIVNING AF SSI */                     
+         EOF_CN571 = NEJ;                                               
+                                                                        
+         ON ERROR CALL PLIDUMP ('SNHOB');                               
+         OPEN FILE (CN571I)   TITLE ('CN57131I');                       
+         OPEN FILE (BH711O)   TITLE ('BH71100O');                       
+                                                                        
+         /* SKAL DER VÆRES ET SLUT INDIVID ??*/                         
+         ON ENDFILE (CN571I)                                            
+         BEGIN;                                                         
+            EOF_CN571 = JA;                                             
+         END;                                                           
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH71101Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+                                                                        
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         TV = '';                                                       
+         EOF_BH711_PARM = NEJ;                                          
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH71100L');             
+            END;                                                        
+                                                                        
+         OPEN FILE (BH711I) TITLE ('BH71100P');                         
+                                                                        
+         ON ENDFILE (BH711I)                                            
+         BEGIN;                                                         
+            EOF_BH711_PARM = JA;                                        
+         END;                                                           
+                                                                        
+         READ FILE (BH711I) INTO (BH711_PARM);                          
+                                                                        
+         IF EOF_BH711_PARM = NEJ                                        
+         THEN DO;                                                       
+            SELECT (BH711_PARM.FS_MRK);                                 
+               WHEN ('F')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH711_PARM.FORSKUD_TXT;      
+                     WS_TIL_EVS_AAR = BH65300M.FORSKÅR;                 
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH711_PARM.SLUT_TXT;       
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     PUT SKIP LIST(                                     
+                       'BH71100 SKAL KUN AFVIKLES FOR FORSKUD');        
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+         CALL OPDATER_KØRSELSTABEL('START',BH711_PARM.FS_MRK);          
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *       CN571 ER SORTERT PÅ DCPRCIR, EKOMNR, EEJDNR                  * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_CN571;                                                
+         CALL OPEN_BOT_FORSKUD_CUR;                                     
+         CALL FETCH_BOT_FORSKUD_CUR;   /* BQ77000T */                   
+                                                                        
+         DO WHILE (EOF_CN571 = NEJ ! SLUT_FORSKUD_CUR = NEJ);           
+            SELECT;                                                     
+               WHEN (DCLBQ77000T.DCPRN < CN571.DCPRCIR)                 
+                 CALL FETCH_BOT_FORSKUD_CUR;                            
+               WHEN (DCLBQ77000T.DCPRN  = CN571.DCPRCIR &               
+                     DCLBQ77000T.EKOMNR < CN571.EKOMNR)                 
+                 CALL FETCH_BOT_FORSKUD_CUR;                            
+               WHEN (DCLBQ77000T.DCPRN  = CN571.DCPRCIR &               
+                     DCLBQ77000T.EKOMNR = CN571.EKOMNR  &               
+                     DCLBQ77000T.EEJDNR < CN571.EEJDNR)                 
+                 CALL FETCH_BOT_FORSKUD_CUR;                            
+               OTHERWISE                                                
+                  DO;                                                   
+                     CALL BEHANDL;                                      
+                     CALL LÆS_CN571;                                    
+                  END;                                                  
+            END; /*SELECT*/                                             
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR                                           * 
+ *********************************************************************/ 
+ LÆS_CN571: PROC;                                                       
+                                                                        
+         READ FILE (CN571I) INTO (CN571);                               
+                                                                        
+         IF EOF_CN571 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               TV.LÆS_CN571 = TV.LÆS_CN571 + 1;                         
+            END;                                                        
+                                                                        
+ END LÆS_CN571;                                                         
+ /********************************************************************* 
+ *       PERSONER SOM SKAL BEHANDLES                                  * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+         BH711.DCPRCIR = CN571.DCPRCIR;                                 
+         BH711.EKOMNR  = CN571.EKOMNR;                                  
+         BH711.EEJDNR  = CN571.EEJDNR;                                  
+                                                                        
+         IF DCLBQ77000T.DCPRN   = CN571.DCPRCIR &                       
+            DCLBQ77000T.EKOMNR  = CN571.EKOMNR  &                       
+            DCLBQ77000T.EEJDNR  = CN571.EEJDNR                          
+         THEN                                                           
+            DO;                                                         
+               TV.FUNDET = TV.FUNDET + 1;                               
+               IF DCLBQ77000T.EVSFEJ_BBRUTTO_SW = 0                     
+               THEN                                                     
+                 DO;                                                    
+                   TV.BEREGNET = TV.BEREGNET + 1;                       
+                   BH711.BEVSBOY = DCLBQ77000T.EVSFEJ_BBRUTTO;          
+                   /* PERSONEN ER BEREGNET IFLG. EVS-UDTRÆK */          
+                   IF BH711.BEVSBOY = 0                                 
+                   THEN;                                                
+                   ELSE                                                 
+                     DO;                                                
+                       /* EJER HAN MINDRE END 100%? */                  
+                       IF DCLBQ77000T.EVSFEJ_GPCTEJER > 0 &             
+                          DCLBQ77000T.EVSFEJ_GPCTEJER < 10000           
+                       THEN                                             
+                         DO;                                            
+                           HJPCT =                                      
+                               DCLBQ77000T.EVSFEJ_GPCTEJER / 10000;     
+                           BH711.BEVSBOY = MULTIPLY                     
+                               (BH711.BEVSBOY,HJPCT,11,4);              
+                         END;                                           
+                       TV.EVS = TV.EVS + BH711.BEVSBOY;                 
+                       BH711.CBOYBER = '1';                             
+                     END;                                               
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                   /* PERSONEN ER IKKE BEREGNET IFLG. BQ77000T */       
+                   TV.EJBEREGN = TV.EJBEREGN + 1;                       
+                   BH711.BEVSBOY = 0;                                   
+                   BH711.CBOYBER = '2';                                 
+                 END;                                                   
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+            /* PERSONEN IKKE FUNDET PÅ EVS-UDTRÆK TABEL */              
+               TV.EJFUNDET = TV.EJFUNDET + 1;                           
+               BH711.BEVSBOY = 0;                                       
+               BH711.CBOYBER = '3';                                     
+            END;                                                        
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+         WRITE FILE (BH711O) FROM (BH711);                              
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.LÆS_CN571;                                  
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK FRA ESR     C.N57131D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.LÆS_BQ77000T;                               
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ EVS UDTRÆK  TABEL   BQ77000T'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'ANTAL SKREVNE PERSONER TIL BOT    B.H71100D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.EJFUNDET;                                   
+         DETLIN1.TEKST = 'HERAF IKKE FUNDET PÅ EVS-UDTRÆK            '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.FUNDET;                                     
+         DETLIN1.TEKST = 'HERAF FUNDET PÅ EVS-UDTRÆK                 '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN3.CCA = ZZWS1;                                           
+         DETLIN3.ANTAL = TV.BEREGNET;                                   
+         DETLIN3.TEKST = '      HERAF MED BEREGNET EVS         ANTAL:'; 
+         DETLIN3.BELØB = TV.EVS;                                        
+         CALL ZZ20300 (DETLIN3,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBEREGN;                                   
+         DETLIN1.TEKST = '      HERAF UDEN EVS BEREGNING       ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+  END TOTALLISTE;                                                       
+ /*********************************************************************/
+ /*      CLOSE AF FILER OG SPOOL                                      */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+                                                                        
+         CLOSE FILE (CN571I),                                           
+               FILE (BH711O);                                           
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+         CALL OPDATER_KØRSELSTABEL('SLUT',BH711_PARM.FS_MRK);           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* DECLARE AF CURSOR                                                 */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL DECLARE BOT_FORSKUD_CUR CURSOR FOR                    
+         SELECT                                                         
+            T77.TIL_EVS_AAR,                                            
+            T77.AFVIKLINGS_ID,                                          
+            T77.DCPRN,                                                  
+            T77.EKOMNR,                                                 
+            T77.EEJDNR,                                                 
+            T77.EGENNR,                                                 
+            T77.EVSFEJ_BBRUTTO,                                         
+            T77.EVSFEJ_GPCTEJER                                         
+                                                                        
+         FROM BQ77000T T77                                              
+         WHERE T77.TIL_EVS_AAR   = :WS_TIL_EVS_AAR                      
+           AND T77.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                 
+           AND T77.EVSFEJ_DAFSTAA  = 0                                  
+           AND T77.EVSFEJ_DFRAFLYT = 0                                  
+           AND T77.EVSFEJ_CEJBEVS ^= '9'                                
+                                                                        
+         ORDER BY T77.DCPRN, T77.EKOMNR, T77.EEJDNR, T77.EGENNR;        
+                                                                        
+ /*********************************************************************/
+ /* FETCH AF CURSOR                                                   */
+ /*********************************************************************/
+ FETCH_BOT_FORSKUD_CUR: PROC;                                           
+                                                                        
+                                                                        
+         DCLBQ77000T = ''; /*HUSK RIGTIG NULSTILLING*/                  
+                                                                        
+         EXEC SQL FETCH BOT_FORSKUD_CUR                                 
+                                                                        
+         INTO                                                           
+            :DCLBQ77000T.TIL_EVS_AAR,                                   
+            :DCLBQ77000T.AFVIKLINGS_ID,                                 
+            :DCLBQ77000T.DCPRN,                                         
+            :DCLBQ77000T.EKOMNR,                                        
+            :DCLBQ77000T.EEJDNR,                                        
+            :DCLBQ77000T.EGENNR,                                        
+            :DCLBQ77000T.EVSFEJ_BBRUTTO,                                
+            :DCLBQ77000T.EVSFEJ_GPCTEJER                                
+                                                                        
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               TV.LÆS_BQ77000T = TV.LÆS_BQ77000T + 1;                   
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+               SLUT_FORSKUD_CUR = JA;                                   
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH BOT_FORSKUD_CUR';                  
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_BOT_FORSKUD_CUR;                                             
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF EVS FORSKUD OPLYSNINGER TIL BOT              
+ /*********************************************************************/
+ OPEN_BOT_FORSKUD_CUR: PROC;                                            
+                                                                        
+         EXEC SQL OPEN BOT_FORSKUD_CUR;                                 
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN BOT_FORSKUD_CUR';                    
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_BOT_FORSKUD_CUR;                                              
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF TIL LÆS AF EVS FORSKUD OPLYSNINGER TIL BOT  
+ /*********************************************************************/
+ CLOSE_BOT_FORSKUD_CUR: PROC;                                           
+                                                                        
+         EXEC SQL CLOSE BOT_FORSKUD_CUR;                                
+                                                                        
+ END CLOSE_BOT_FORSKUD_CUR;                                             
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST('SQL_FEJL.....');                                
+         PUT SKIP LIST('SQLCA',SQLCA);                                  
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDTXT = '101 SQL FEJL ' !! FEJLTEKST;                       
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ %INCLUDE BH54998M; /* OPDATER KØRSELSTABEL */                          
+                                                                        
+ END  BH71100;                                                          

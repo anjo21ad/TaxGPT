@@ -1,0 +1,319 @@
+ PROCESS OPT(TIME);                                                     
+ BH36121: PROCEDURE OPTIONS (MAIN) REORDER;                             
+ /*********************************************************************/
+         DCL COPYRIGHT CHAR (30) STATIC INIT ('COPYRIGHT KMD A/S 2019');
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL: Der oprettes program til udvælgelse af givne ejerforhold.  * 
+ *         Udvælgelsen sker på baggrund af en liste med ejerforhold   * 
+ *         identificeret ved  personnummer, kommunenummer og          * 
+ *         ejENDOmsnummer.                                            * 
+ *                                                                    * 
+ * INPUT:  B.H36100D  Filtreringsliste                                * 
+ *         C.N57000D  Data fra ESR/VUR (CN57000)                      * 
+ *                                                                    * 
+ * OUTPUT: B.H36110D  UDTRÆK fra ESR/VUR (CN57000)                    * 
+ *                                                                    * 
+ * PROGRAMMØR: Per Brunk PBR Nyt program            Sept 2022         * 
+ *                                                                    * 
+ *--------------------------------------------------------------------* 
+ *********************************************************************/ 
+ /********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *       DECLARE AF REGISTRE                                          * 
+ *********************************************************************/ 
+ DCL     BH361I FILE RECORD INPUT;      /* Filter-data               */ 
+ DCL     BH361O FILE RECORD OUTPUT;     /* Udtræk ESR/VUR (CN57000)  */ 
+                                                                        
+ DCL     SYSPRINT FILE EXTERNAL PRINT;                                  
+ /*********************************************************************/
+ /********************************************************************/ 
+ /* CN570I - Grund- eller supplementsleverancen fra ESR/VUR (CN57000)*/ 
+ /********************************************************************/ 
+ DCL   CN570I          FILE RECORD INPUT;                               
+                                                                        
+ DCL   CN570_AREA      CHAR(2000) VAR;                                  
+                                                                        
+ DCL 1 CN570           BASED(ADDR(CN570_AREA)),                         
+       4 CN570_LENGTH  FIXED BIN(15),                                   
+       %INCLUDE BH31821N;                                               
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH36121');              
+                                                                        
+ /***************************************************************       
+ /*      DECLARE AF ABEND-RUTINE                                        
+ /**************************************************************/       
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH36121'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS67000         ENTRY;                       /* SQL-ABEND    */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF EVS UDTRÆK INPUT                                  * 
+ *********************************************************************/ 
+ DCL     1 BH361,                                                       
+           %INCLUDE BH36121N;;                                          
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     STG             BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 LINIE,                                                        
+          2 CCA         CHAR      (01),                                 
+          2 TEKST       CHAR      (132)     INIT      (' ');            
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     1 HJ,                                                          
+           2 PERS        PIC'(10)9', /* CPR-/SENR.                */    
+           2 KOM         PIC'(03)9', /* KOM.NR. BELIG.            */    
+           2 EJDNR       PIC'(07)9'; /* EJENDOMSNR.               */    
+                                                                        
+ DCL     1 FILTER (30000),                                              
+           2 PERS        FIXED    (11), /* CPR-/SENR.                */ 
+           2 KOM         FIXED    (03), /* KOM.NR. BELIG.            */ 
+           2 EJDNR       FIXED    (07); /* EJENDOMSNR.               */ 
+                                                                        
+ DCL     TV_LÆS_FILTER     BIN FIXED (31)    INIT (0);                  
+ DCL     TV_SKRIV_EVS      BIN FIXED (31)    INIT (0);                  
+ DCL     TV_LÆS_ESR        BIN FIXED (31)    INIT (0);                  
+                                                                        
+ DCL     JA                BIT       (1)     INIT ('1'B);               
+ DCL     NEJ               BIT       (1)     INIT ('0'B);               
+ DCL     EOF_BH361         BIT       (1)     INIT ('0'B);               
+ DCL     EOF_CN570         BIT       (1)     INIT ('0'B);               
+                                                                        
+ DCL     UDDATO            CHAR      (10);                              
+ DCL     DATO1             CHAR      (26);                              
+ DCL     1 DATO2           DEF DATO1,                                   
+           2 ÅR            CHAR      (04),                              
+           2 F1            CHAR      (01),                              
+           2 MD            CHAR      (02),                              
+           2 F2            CHAR      (01),                              
+           2 DG            CHAR      (02);                              
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH36121');                 
+            END;                                                        
+                                                                        
+         OPEN FILE (BH361I)  TITLE ('BH36100I');                        
+         OPEN FILE (CN570I)  TITLE ('CN57000I'); /*ESR data*/           
+         OPEN FILE (BH361O)  TITLE ('BH36100O'); /*ESR data*/           
+                                                                        
+         ON ENDFILE (BH361I)                                            
+            EOF_BH361= JA;                                              
+                                                                        
+         ON ENDFILE (CN570I)                                            
+            EOF_CN570 = JA;                                             
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH36101Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+                                                                        
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+         LINIE.CCA    = ZZWS1;                                          
+         LINIE.TEKST = 'BH36121 Filtrer CN57000 ' !! UDDATO;            
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_FILTER;                                               
+                                                                        
+         IF TV_LÆS_FILTER > 0                                           
+         THEN DO;                                                       
+                                                                        
+            CALL LÆS_CN570; /*LÆS ESR*/                                 
+                                                                        
+            DO WHILE (EOF_CN570 = NEJ );                                
+                                                                        
+               IF MATCH_FILTER = JA                                     
+               THEN                                                     
+                  CALL SKRIV_EVS_UDTRÆK;                                
+                                                                        
+               CALL LÆS_CN570; /*LÆS ESR*/                              
+                                                                        
+               END; /* DO while */                                      
+                                                                        
+            END; /* if */                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS FILTER / Opbyg tabel                                     * 
+ *********************************************************************/ 
+ LÆS_FILTER:PROC;                                                       
+                                                                        
+       READ FILE (BH361I) INTO (BH361);                                 
+                                                                        
+       DO WHILE (EOF_BH361 = NEJ);                                      
+                                                                        
+          TV_LÆS_FILTER =  TV_LÆS_FILTER + 1;                           
+          IF TV_LÆS_FILTER > 30000                                      
+          THEN DO;                                                      
+             ABENDTXT = '101 Fejl på FILTER data. Mere END 30.000';     
+             CALL PROGRAM_FEJL;                                         
+             END;                                                       
+                                                                        
+          IF VERIFY(BH361.DCPRN,'0123456789') = 0                       
+          THEN DO;                                                      
+             HJ.PERS  = BH361.DCPRN;                                    
+             END;                                                       
+          ELSE DO;                                                      
+             ABENDTXT = '102 Fejl på FILTER data. DCPRN = '!!           
+                        BH361.DCPRN;                                    
+             CALL PROGRAM_FEJL;                                         
+             END;                                                       
+          IF VERIFY(BH361.EKOMNR,'0123456789') = 0                      
+          THEN DO;                                                      
+             HJ.KOM   = BH361.EKOMNR;                                   
+             END;                                                       
+          ELSE DO;                                                      
+             ABENDTXT = '103 Fejl på FILTER data. EKOMNR = '!!          
+                        BH361.EKOMNR;                                   
+             CALL PROGRAM_FEJL;                                         
+             END;                                                       
+          IF VERIFY(BH361.EEJDNR,'0123456789') = 0                      
+          THEN                                                          
+             HJ.EJDNR = BH361.EEJDNR;                                   
+          ELSE DO;                                                      
+             ABENDTXT = '104 Fejl på FILTER data. EEJDNR = '!!          
+                        BH361.EEJDNR;                                   
+             CALL PROGRAM_FEJL;                                         
+             END;                                                       
+                                                                        
+          FILTER(TV_LÆS_FILTER).PERS   = HJ.PERS;                       
+          FILTER(TV_LÆS_FILTER).KOM    = HJ.KOM;                        
+          FILTER(TV_LÆS_FILTER).EJDNR  = HJ.EJDNR;                      
+                                                                        
+          READ FILE (BH361I) INTO (BH361);                              
+          END;                                                          
+                                                                        
+          IF TV_LÆS_FILTER = 0                                          
+          THEN DO;                                                      
+             ABENDTXT = '105 Fejl på FILTER data. Er tomt ';            
+             CALL PROGRAM_FEJL;                                         
+             END;                                                       
+                                                                        
+ END LÆS_FILTER;                                                        
+ /*********************************************************************/
+ LÆS_CN570: PROC;                                                       
+                                                                        
+            READ FILE (CN570I) INTO (CN570_AREA);                       
+            TV_LÆS_ESR = TV_LÆS_ESR + 1;                                
+                                                                        
+ END LÆS_CN570;                                                         
+ /********************************************************************* 
+ * Findes forhold i filter-data                                       * 
+ *********************************************************************/ 
+ MATCH_FILTER: PROC RETURNS (BIT(1));                                   
+ DCL SKRIV_DATA    BIT (1);                                             
+ DCL I             BIN FIXED (31);                                      
+                                                                        
+       SKRIV_DATA = NEJ;                                                
+                                                                        
+       DO I = 1 to TV_LÆS_FILTER UNTIL (SKRIV_DATA = JA);               
+                                                                        
+          IF CN570.DCPRCIR = FILTER(I).PERS  &                          
+             CN570.EKOMNR  = FILTER(I).KOM   &                          
+             CN570.EEJDNR  = FILTER(I).EJDNR                            
+          THEN                                                          
+             SKRIV_DATA = JA;                                           
+                                                                        
+          END;                                                          
+                                                                        
+       RETURN (SKRIV_DATA);                                             
+                                                                        
+ END MATCH_FILTER;                                                      
+ /********************************************************************* 
+ *       SKRIV UDTRÆK FRA EVS                                         * 
+ *********************************************************************/ 
+ SKRIV_EVS_UDTRÆK: PROC;                                                
+                                                                        
+            WRITE FILE (BH361O) FROM (CN570_AREA);                      
+            TV_SKRIV_EVS = TV_SKRIV_EVS + 1;                            
+                                                                        
+ END SKRIV_EVS_UDTRÆK;                                                  
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         LINIE.CCA    = ZZWS1;                                          
+         LINIE.TEKST = 'ANTAL LÆST FILTER DATA     = ' !!               
+                       TV_LÆS_FILTER;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE.CCA    = ZZWS1;                                          
+         LINIE.TEKST = 'ANTAL SKREVET på udtræk    = ' !!               
+                        TV_SKRIV_EVS ;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE.CCA    = ZZWS1;                                          
+         LINIE.TEKST = 'ANTAL LÆST PÅ ESR          = ' !!               
+                        TV_LÆS_ESR;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+ END TOTALLISTE;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*       AFSLUT PROGRAM                                              */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BH361I);                                           
+         CLOSE FILE (CN570I);                                           
+         CLOSE FILE (BH361O);                                           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ END  BH36121;                                                          

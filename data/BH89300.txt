@@ -1,0 +1,582 @@
+ BH89300: PROCEDURE (EXECPARM) OPTIONS (MAIN);                          
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2020                                       *
+ * PROGRAMNAVN: BH89300.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET SLETTE MARKER PÅ BS00600T UDFRA             *
+ *              OPLYSNINGER OM UDGÅET EJENDOM I BQ89300T               *
+                OPLYSNINGER KOMMER FRA VURD/ESR                        *
+ *              DEFECT 864 EVS FORSKUD 2022 OPRETTELSE                 *
+ *              PROGRAMMET BRUGES KUN I FORSKUD OPRETTELSE             *
+ *                                                                     *
+ *              BS00600T - EVS EJERSKABSTABEL                          *
+ *              BQ89300T - UDTRÆK AF EJENDOMME MED BENYTTELSE KODE 16  *
+ *              BQ89100T - LOGNINGSTABEL                               *
+ *              BH89301Y - KONTROLLISTE.                               *
+ *                                                                     *
+ * FORSKUD22   ESBEN BRODERSEN        Z6EBD                30.08.2021  *
+ **********************************************************************/
+ /*********************************************************************/
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2019');            
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER TESTKØRSEL              */
+ /*      UDEN OPDATERING PÅ BS00600T                                  */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+         EXEC SQL INCLUDE BS00600T;        /* EVS PERSONTABELLEN   */   
+         EXEC SQL INCLUDE BQ89300T;                                     
+         EXEC SQL INCLUDE BQ89100T;                                     
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     JA             BIT(1)           INIT ('1'B);                   
+ DCL     NEJ            BIT(1)           INIT ('0'B);                   
+                                                                        
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     HJ_DATOEN      PIC '(8)9';                                     
+ DCL     1 HJ_DATO      BASED(ADDR(HJ_DATOEN)),                         
+           2 AAR        PIC  '9999',                                    
+           2 MD         PIC  '99',                                      
+           2 DG         PIC  '99';                                      
+                                                                        
+ DCL     1 BH55300M,                             /*#01*/                
+           %INCLUDE BH55300M;                    /* DATO OG ÅR MACRO */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+                                                                        
+ DCL     ANTAL_SLET      BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_FETCH     BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_OPRET_LOG BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_OPDAT_LOG BIN FIXED (31) INIT(0);                        
+                                                                        
+                                                                        
+ DCL     ANT_COMM        BIN FIXED (31) INIT(0);                        
+ DCL     EJERSKAB_FUNDET BIT(1)     INIT ('0'B);                        
+                                                                        
+ DCL     SQLKODE         PIC '9999';                                    
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR         BIN FIXED (15);                         
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH89300');              
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ABEND-RUTINE                                      */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH89300'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH89300');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+                                                                        
+         CALL ZZ20390('*OPEN','BH89301Y');                              
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+         DT= DATE;                                                      
+                                                                        
+         CALL OPSTART_INIT;                        /*Parmkort*/         
+                                                                        
+         IF EX_PARM = 'TEST'                                            
+         THEN                                                           
+           PUT SKIP LIST('TEST UDEN OPDATERING AF BS00600T');           
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL OPDATER_KØRSELSTABEL('START');                            
+                                                                        
+         CALL OPEN_SLET_CUR;                                            
+                                                                        
+         CALL FETCH_SLET_CUR;                                           
+                                                                        
+         DO WHILE (EJERSKAB_FUNDET);                                    
+                                                                        
+           IF EX_PARM = 'TEST'                                          
+           THEN                                                         
+             CALL LOG_SLETNING;   /*KUN LOG*/                           
+           ELSE                                                         
+             CALL SLET_EJERSKAB;  /* SLETMARKER OG LOG */               
+                                                                        
+           IF ANT_COMM > 5000                                           
+           THEN                                                         
+             CALL COMMIT;                                               
+           CALL FETCH_SLET_CUR;                                         
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 0                                                
+         THEN                                                           
+           CALL COMMIT;                                                 
+                                                                        
+         CALL CLOSE_SLET_CUR;                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+                                                                        
+         SELECT (BH55300M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SLUT kørsel');         
+              END;                                                      
+            WHEN ('OPRET_EVS_FORSK')                                    
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS FORSKUD kørsel');      
+              END;                                                      
+            WHEN ('SUPPL_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SUPPLEMENT kørsel');   
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                 ABENDTXT = 'Afviklings_id skal være '           !!     
+                            'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!       
+                            'eller SUPPL_EVS_SLUT';                     
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+         END;                                                           
+                                                                        
+         SELECT (BH55300M.AFVIKLINGS_ID);                               
+           WHEN ('OPRET_EVS_FORSK')                                     
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BH55300M.FORSKÅR;                     
+              END;                                                      
+           WHEN ('OPRET_EVS_SLUT')                                      
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BH55300M.SLUTÅR;                      
+              END;                                                      
+           WHEN ('SUPPL_EVS_SLUT')                                      
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BH55300M.SLUTÅR;                      
+              END;                                                      
+           OTHERWISE                                                    
+              DO;                                                       
+                 ABENDTXT = '101 PARAMETERFEJL';                        
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+            END; /* select */                                           
+                                                                        
+  END OPSTART_INIT;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+  /*     FEJLTEKST = ' SQLFEJL ';                                       
+                                                                        
+         ABENDTXT = '250 ' !! FEJLTEKST !! SQLKODE; */                  
+                                                                        
+  /*     ABENDMEDD = 'BH89300 ** 250 ' !! FEJLTEKST !! SQLKODE;*/       
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV TOTALLISTE                           */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+                                                                        
+         LINIE = ZZWS3 !! ' TOTAL FOR SLETNING UDFRA CBENYT LIG 16 '    
+                       !! ' BH89300 FORSKUD '                           
+         /*#01*/       !! BH55300M.FORSKÅR                              
+                       !! ' DATO: '                                     
+                       !! DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH89300 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJERFORHOLD FUNDET PÅ EJERTABEL..........'; 
+         LIN.ANT   = ANTAL_FETCH;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJERFORHOLD SLET MARKET..................'; 
+         LIN.ANT   = ANTAL_SLET;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'NYE LOGNINGER..................................'; 
+         LIN.ANT   = ANTAL_OPRET_LOG;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'OPDATEDE LOGNINGER.............................'; 
+         LIN.ANT   = ANTAL_OPDAT_LOG;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ DECLARE_SLET_CUR: PROC;                                                
+                                                                        
+     EXEC SQL DECLARE SLETTE_CUR CURSOR WITH HOLD FOR                   
+                                                                        
+     SELECT BS00600T.DINDKAAR,                                          
+            BS00600T.PERSONNUMMER,                                      
+            BS00600T.EKOMNR,                                            
+            BS00600T.EEJDNR,                                            
+            BS00600T.EENHEDLBNR,                                        
+            BS00600T.EPLBNR,                                            
+            BS00600T.DFRAGLD,                                           
+            BS00600T.DTILGLD,                                           
+            BQ89300T.CBENYT                                             
+     FROM  BQ89300T, BS00600T, BQ78000T                                 
+     WHERE BS00600T.DINDKAAR      = :WS_TIL_EVS_AAR                     
+       AND BS00600T.EKOMNR        = BQ89300T.EKOMNR                     
+       AND BS00600T.EEJDNR        = BQ89300T.EEJDNR                     
+       AND BS00600T.DTILGLD       = '9999-12-31-23.59.59.999999'        
+       AND BS00600T.CSLET         ^= '1'                                
+       AND BS00600T.CDATAFRA      > '0'                                 
+       AND BQ89300T.CBENYT        = '16'                                
+       AND BS00600T.DINDKAAR      = BQ78000T.TIL_EVS_AAR                
+       AND BS00600T.PERSONNUMMER  = BQ78000T.DCPRN                      
+       AND BS00600T.EKOMNR        = BQ78000T.EKOMNR                     
+       AND BS00600T.EEJDNR        = BQ78000T.EEJDNR                     
+       AND BS00600T.EENHEDLBNR    = BQ78000T.EENHEDLBNR                 
+       AND BQ78000T.AFVIKLINGS_ID = :BH55300M.AFVIKLINGS_ID             
+       AND BQ78000T.DATA_ID       = :BH55300M.DATA_ID;                  
+                                                                        
+ END DECLARE_SLET_CUR;                                                  
+ /*********************************************************************/
+ OPEN_SLET_CUR: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN SLETTE_CUR;                                      
+                                                                        
+ END OPEN_SLET_CUR;                                                     
+ /*********************************************************************/
+ CLOSE_SLET_CUR: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE SLETTE_CUR;                                     
+                                                                        
+ END CLOSE_SLET_CUR;                                                    
+ /*********************************************************************/
+ FETCH_SLET_CUR: PROC;                                                  
+                                                                        
+         EJERSKAB_FUNDET = NEJ;                                         
+         PERSONEJENDOMSOPL = '';                                        
+         DCLBQ89300T       = '';                                        
+         DCLBQ89100T       = '';                                        
+                                                                        
+         EXEC SQL FETCH SLETTE_CUR                                      
+         INTO                                                           
+            :PERSONEJENDOMSOPL.DINDKAAR,                                
+            :PERSONEJENDOMSOPL.PERSONNUMMER,                            
+            :PERSONEJENDOMSOPL.EKOMNR,                                  
+            :PERSONEJENDOMSOPL.EEJDNR,                                  
+            :PERSONEJENDOMSOPL.EENHEDLBNR,                              
+            :PERSONEJENDOMSOPL.EPLBNR,                                  
+            :PERSONEJENDOMSOPL.DFRAGLD,                                 
+            :PERSONEJENDOMSOPL.DTILGLD,                                 
+            :DCLBQ89300T.CBENYT;                                        
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_FETCH = ANTAL_FETCH + 1;                           
+               EJERSKAB_FUNDET = JA;                                    
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+               EJERSKAB_FUNDET = NEJ;                                   
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH_SLET';                             
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_SLET_CUR;                                                    
+ /*********************************************************************/
+ SLET_EJERSKAB: PROC;                                                   
+                                                                        
+     EXEC SQL UPDATE BS00600T T1                                        
+     SET CSLET = '1',                                                   
+         CEJBEVS = '1'       /*#01*/                                    
+     WHERE T1.DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR                
+       AND T1.PERSONNUMMER = :PERSONEJENDOMSOPL.PERSONNUMMER            
+       AND T1.EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR                  
+       AND T1.EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR                  
+       AND T1.EENHEDLBNR   = :PERSONEJENDOMSOPL.EENHEDLBNR              
+       AND T1.EPLBNR       = :PERSONEJENDOMSOPL.EPLBNR                  
+       AND T1.DFRAGLD      = :PERSONEJENDOMSOPL.DFRAGLD                 
+       AND T1.DTILGLD      = :PERSONEJENDOMSOPL.DTILGLD;                
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_SLET = ANTAL_SLET + 1;                             
+               ANT_COMM = ANT_COMM + 1;                                 
+               CALL LOG_SLETNING;                                       
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 ABEND SLET_EJERSKAB';                    
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+     END; /* SELECT*/                                                   
+                                                                        
+ END SLET_EJERSKAB;                                                     
+ /*********************************************************************/
+ /* LOG BQ89300T.DAFSTÅ                                               */
+ /* LOG BS00600T.DFRAGLD                                              */
+ /* LOG TEXT FELT                                                     */
+ /*********************************************************************/
+ LOG_SLETNING: PROC;                                                    
+                                                                        
+ DCL        HJ_COUNT  BIN FIXED (31);                                   
+                                                                        
+            DCLBQ89100T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                
+            DCLBQ89100T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;           
+            DCLBQ89100T.DATA_ID        = BH55300M.DATA_ID;              
+            DCLBQ89100T.DCPRN          = PERSONEJENDOMSOPL.PERSONNUMMER;
+            DCLBQ89100T.EKOMNR         = PERSONEJENDOMSOPL.EKOMNR;      
+            DCLBQ89100T.EEJDNR         = PERSONEJENDOMSOPL.EEJDNR;      
+            DCLBQ89100T.EENHEDLBNR     = PERSONEJENDOMSOPL.EENHEDLBNR;  
+            DCLBQ89100T.EPLBNR         = PERSONEJENDOMSOPL.EPLBNR;      
+            DCLBQ89100T.DTILGLD        = PERSONEJENDOMSOPL.DTILGLD;     
+            DCLBQ89100T.PROGRAM        = WS_PROGRAMNAVN;                
+            DCLBQ89100T.BESKRIVELSE    = 'Slet udfra CBENYT 16';        
+            DCLBQ89100T.DAFSTÅ         = 0;                             
+            DCLBQ89100T.DAFGDAT        = 0;                             
+                                                                        
+            EXEC SQL                                                    
+            SELECT                                                      
+              TIL_EVS_AAR                                               
+            INTO                                                        
+              :DCLBQ89100T.TIL_EVS_AAR                                  
+            FROM                                                        
+              BQ89100T                                                  
+            WHERE BQ89100T.TIL_EVS_AAR    = :DCLBQ89100T.TIL_EVS_AAR    
+              AND BQ89100T.AFVIKLINGS_ID  = :DCLBQ89100T.AFVIKLINGS_ID  
+              AND BQ89100T.DATA_ID        = :DCLBQ89100T.DATA_ID        
+              AND BQ89100T.DCPRN          = :DCLBQ89100T.DCPRN          
+              AND BQ89100T.EKOMNR         = :DCLBQ89100T.EKOMNR         
+              AND BQ89100T.EEJDNR         = :DCLBQ89100T.EEJDNR         
+              AND BQ89100T.EENHEDLBNR     = :DCLBQ89100T.EENHEDLBNR     
+              AND BQ89100T.EPLBNR         = :DCLBQ89100T.EPLBNR;        
+                                                                        
+            SELECT(SQLCA.SQLCODE);                                      
+              WHEN(0)                                                   
+                DO;                                                     
+                  DCLBQ89100T.BESKRIVELSE = 'Slet udfra CBENYT 16 OPD'; 
+                  CALL OPDAT_LOG;                                       
+                END;                                                    
+              WHEN(100)                                                 
+                DO;                                                     
+                  CALL OPRET_LOG;                                       
+                END;                                                    
+            OTHERWISE                                                   
+                DO;                                                     
+                  ABENDTXT  = '101 LOG_SLETNING';                       
+                  CALL SQL_FEJL;                                        
+                END;                                                    
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ OPDAT_LOG :PROC;                                                       
+                                                                        
+     EXEC SQL UPDATE BQ89100T T1                                        
+     SET T1.TS_OPDAT = CURRENT TIMESTAMP,                               
+         T1.PROGRAM  = :DCLBQ89100T.PROGRAM,                            
+         T1.BESKRIVELSE = :DCLBQ89100T.BESKRIVELSE                      
+     WHERE T1.TIL_EVS_AAR   = :DCLBQ89100T.TIL_EVS_AAR                  
+       AND T1.AFVIKLINGS_ID = :DCLBQ89100T.AFVIKLINGS_ID                
+       AND T1.DATA_ID       = :DCLBQ89100T.DATA_ID                      
+       AND T1.DCPRN         = :DCLBQ89100T.DCPRN                        
+       AND T1.EKOMNR        = :DCLBQ89100T.EKOMNR                       
+       AND T1.EEJDNR        = :DCLBQ89100T.EEJDNR                       
+       AND T1.EENHEDLBNR    = :DCLBQ89100T.EENHEDLBNR                   
+       AND T1.EPLBNR        = :DCLBQ89100T.EPLBNR;                      
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_OPDAT_LOG = ANTAL_OPDAT_LOG + 1;                   
+               ANT_COMM = ANT_COMM + 1;                                 
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 ABEND SLET_EJERSKAB';                    
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+     END; /* SELECT*/                                                   
+                                                                        
+ END OPDAT_LOG;                                                         
+ /*********************************************************************/
+ OPRET_LOG :PROC;                                                       
+                                                                        
+            EXEC SQL                                                    
+            INSERT INTO BQ89100T                                        
+            (                                                           
+            TIL_EVS_AAR,                                                
+            AFVIKLINGS_ID,                                              
+            DATA_ID,                                                    
+            DCPRN,                                                      
+            EKOMNR,                                                     
+            EEJDNR,                                                     
+            EENHEDLBNR,                                                 
+            EPLBNR,                                                     
+            DTILGLD,                                                    
+            DAFSTÅ,                                                     
+            DAFGDAT,                                                    
+            TS_OPDAT,                                                   
+            PROGRAM,                                                    
+            BESKRIVELSE                                                 
+            )                                                           
+            VALUES                                                      
+            (                                                           
+            :DCLBQ89100T.TIL_EVS_AAR,                                   
+            :DCLBQ89100T.AFVIKLINGS_ID,                                 
+            :DCLBQ89100T.DATA_ID,                                       
+            :DCLBQ89100T.DCPRN,                                         
+            :DCLBQ89100T.EKOMNR,                                        
+            :DCLBQ89100T.EEJDNR,                                        
+            :DCLBQ89100T.EENHEDLBNR,                                    
+            :DCLBQ89100T.EPLBNR,                                        
+            :DCLBQ89100T.DTILGLD,                                       
+            :DCLBQ89100T.DAFSTÅ,                                        
+            :DCLBQ89100T.DAFGDAT,                                       
+            CURRENT TIMESTAMP,                                          
+            :DCLBQ89100T.PROGRAM,                                       
+            :DCLBQ89100T.BESKRIVELSE                                    
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0)                                                     
+              DO;                                                       
+                ANTAL_OPRET_LOG = ANTAL_OPRET_LOG + 1;                  
+                ANT_COMM = ANT_COMM + 1;                                
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                ABENDTXT  = '101 OPRET_LOG';                            
+                CALL SQL_FEJL;                                          
+              END;                                                      
+         END; /*SELECT*/                                                
+                                                                        
+ END OPRET_LOG;                                                         
+ END LOG_SLETNING;                                                      
+ /*********************************************************************/
+ COMMIT :PROC;                                                          
+                                                                        
+     EXEC SQL COMMIT;                                                   
+     Put skip list ('Commit efter ' !! ANTAL_FETCH !!                   
+                    ' fetch på BS00600T og ' !!                         
+                           ANTAL_SLET !!                                
+                    ' slette markeringer');                             
+     ANT_COMM = 0;                                                      
+                                                                        
+ END COMMIT;                                                            
+ /*********************************************************************/
+ %INCLUDE BH54998M;     /* OPDATER KØRSELSTABEL              */         
+ /*********************************************************************/
+ END BH89300;                                                           

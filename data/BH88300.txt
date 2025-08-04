@@ -1,0 +1,1200 @@
+ BH88300: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD / EVS SLUT                                 *
+ * PROGRAMNAVN: BH88300.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Indlæs fejlliste fra sammenligningsmodul BH87900       *
+ *              Dan liste over alle cprnumre i fejllisten samt         *
+ *              alle ægtefæller, deres ægtefæller osv. indtil der      *
+ *              ikke kommer nye til.                                   *
+ *              Når denne liste er klar, findes alle tilknyttede ejd   *
+ *              samt de personer der hænger på disse ejendomme         *
+ *              og sådan bliver jeg ved til intet nyt                  *
+ *              Skal benyttes til at danne en liste over ønsket        *
+ *              testdata                                               *
+ *              PT udtrækkes kun cpr og ejd fra MANDTAL OG ESR         *
+ *                                                                     *
+ * INDDATA:     Fejlliste fra BH87900 (totfejl                         *
+ *                                                                     *
+ * UDDATA:      BH88301Y - KONTROLLISTE.                               *
+ ***********************************************************************
+ * OPRETTET   : Lene Maj Jensen   QLE             BALLERUP 04.04.2017  *
+ **********************************************************************/
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KOMMUNEDATA A/S 2006');    
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+ DCL     BH883PRM FILE RECORD INPUT;     /* Parm data  */               
+ DCL     CPRLIST  FILE RECORD OUTPUT;    /* Samtlige cpr der ønskes */  
+ DCL     EJDLIST  FILE RECORD OUTPUT;    /* Samtlige ejd der ønskes */  
+ DCL     TOTFEJL  FILE RECORD INPUT;    /* Samtlige fejl skip 1 læs */  
+                                                                        
+ DCL     1 TOTFEJL_DET,                                                 
+         3 OMRAADE      CHAR (11),                                      
+         3 FELTNAVN     CHAR (40),                                      
+         3 F1           CHAR (1),                                       
+         3 NOEGLE       CHAR (81),                                      
+         3 INDHOLD_FIL  CHAR (40),                                      
+         3 INDHOLD_DB2  CHAR (40);                                      
+     /*     %INCLUDE BH87901N; */                                       
+                                                                        
+ DCL     1 HLP_NOEGLE based(addr(totfejl_det.noegle)),                  
+         3 DCPRN        pic '99999999999999',                           
+         3 F2           CHAR (1),                                       
+         3 EKOMNR       pic '999999999',                                
+         3 F3           CHAR (1),                                       
+         3 EEJDNR       pic '99999999999999',                           
+         3 F4           CHAR (1),                                       
+         3 EGENNR       pic '999999999',                                
+         3 F5           CHAR (1),                                       
+         3 F6           CHAR (31);                                      
+                                                                        
+ DCL     GEM_CPR     pic '99999999999999' init (0);                     
+                                                                        
+ DCL     1 CPRLIST_DET,                                                 
+         3 DCPRN          pic '99999999999999';                         
+                                                                        
+ DCL     1 EJDLIST_DET,                                                 
+         3 EKOMNR         pic '999999999',                              
+         3 EEJDNR         pic '99999999999999';                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2 strukturer                                         */
+ /*********************************************************************/
+         EXEC SQL INCLUDE BQ75000T;  /* ESR            */               
+         EXEC SQL INCLUDE BQ76000T;  /* MANDTAL        */               
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH88300');              
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     1 BH883_PARM,                                                  
+           %INCLUDE BH88300N;                                           
+                                                                        
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_FEJL       BIT       (01)      INIT      ('0'B);           
+ DCL     EOF_BH883PRM   BIT       (01)      INIT      ('0'B);           
+ DCL     JA                 BIT       (1)     INIT ('1'B);              
+ DCL     NEJ                BIT       (1)     INIT ('0'B);              
+                                                                        
+ DCL     MT_FUNDET   BIT       (1)     INIT ('0'B);                     
+ DCL     ESR_FUNDET   BIT       (1)     INIT ('0'B);                    
+ DCL     ESRPERS_FUNDET   BIT       (1)     INIT ('0'B);                
+ DCL     NYE_DER_SKAL_BEHANDLES   BIT       (1)     INIT ('0'B);        
+ DCL     cpr_uden_x_i_CPR   BIT       (1)     INIT ('0'B);              
+ DCL     CPR_I_LISTE   BIT       (1)     INIT ('0'B);                   
+ DCL     cpr_uden_x_i_EJD   BIT       (1)     INIT ('0'B);              
+ DCL     EJD_I_LISTE   BIT       (1)     INIT ('0'B);                   
+ DCL     CPRTABEL_STOR_NOK   BIT       (1)     INIT ('1'B);             
+ DCL     EJDTABEL_STOR_NOK   BIT       (1)     INIT ('1'B);             
+ DCL     FOERSTE_GENNEMLOEB BIT (1) INIT ('1'B);                        
+                                                                        
+ DCL     MAX_CPR_IX      pic '999999' init (32000);                     
+ DCL     MAX_EJD_IX      pic '999999' init (32000);                     
+                                                                        
+ DCL     HENT_I_FOERSTE_GENNEMLOEB      pic '999999' init (2000);       
+                                                                        
+ DCL     1 CPR_TAB(32000),                                              
+           3 dcprn       DEC FIXED(11,0),                               
+           3 cprbeh      char (1),                                      
+           3 ejdbeh      char (1);                                      
+                                                                        
+ DCL     1 EJD_TAB(32000),                                              
+           3 ekomnr      bin FIXED(15),                                 
+           3 eejdnr      bin FIXED(31),                                 
+           3 ejdbeh      char (1);                                      
+                                                                        
+ DCL  ANT_SKREVET_CPR       pic '999999' init (0);                      
+ DCL  ANT_SKREVET_EJD       pic '999999' init (0);                      
+ DCL  cprtab_ix                 pic '999999' init (0);                  
+ DCL  ejdtab_ix                 pic '999999' init (0);                  
+ DCL  gem_pa                pic '999999' init (0);                      
+ DCL  cpr_ix                pic '999999' init (0);                      
+ DCL  ejd_ix                pic '999999' init (0);                      
+ DCL  chk_ix                pic '999999' init (0);                      
+ DCL  skriv_ix              pic '999999' init (0);                      
+ DCL  start_cpr_ix          pic '999999' init (0);                      
+ DCL  start_ejd_ix          pic '999999' init (0);                      
+ DCL  uds_ix                pic '99' init (0);                          
+ DCL  Antal_gennemloeb     pic '99' init (0);                           
+                                                                        
+ DCL  ANT_LIST_CPR          dec fixed (11) init (0);                    
+ DCL  ANT_LIST_EJD          dec fixed (11) init (0);                    
+ DCL  ANT_LÆS_TOT           dec fixed (11) init (0);                    
+                                                                        
+ DCL  WS_DCPRN              dec fixed (11) init (0);                    
+ DCL  WS_EKOMNR             bin fixed (15) init (0);                    
+ DCL  WS_EEJDNR             bin fixed (31) init (0);                    
+ DCL  WS_CHK_CPR            dec fixed (11) init (0);                    
+ DCL  WS_CHK_EKOMNR         bin fixed (15) init (0);                    
+ DCL  WS_CHK_EEJDNR         bin fixed (31) init (0);                    
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH88300'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*********************************************************************/
+                                                                        
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (1),                                 
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH88300L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (43)      INIT      (                
+           'BEREGNINGSBÅND '),                                          
+           2 ÅR          PIC       '9999',                              
+           2 F2          CHAR      (21)      INIT      ((21)' '),       
+           2 TEKST4      CHAR      (14)      INIT      (                
+           'UDSKREVET DEN '),                                           
+           2 DATO        CHAR      (10);                                
+                                                                        
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 F1          CHAR      (53)      INIT      (' '),           
+           2 TEKST1      CHAR      (79)      INIT                       
+           ('KØRSELSKONTROLLISTE');                                     
+                                                                        
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (65),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZZ.ZZ9',                     
+           2 F1          CHAR      (54)      INIT      (' ');           
+                                                                        
+ DCL     1 DETLIN3,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TXT1       CHAR      (30),                                 
+           2 TXT2       CHAR      (102);                                
+                                                                        
+ DCL     1 PCTLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (66),                                
+           2 ANTAL       PIC       'Z9V,999999999',                     
+           2 F1          CHAR      (50)      INIT      (' ');           
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /* Declare af CURSORS                                                */
+ /*********************************************************************/
+                                                                        
+                                                                        
+         EXEC SQL DECLARE MT_CURS CURSOR WITH HOLD FOR                  
+              SELECT                                                    
+            T76.DCPRN,                                                  
+            T76.HIST_OPD_SIDSTE_DHENVN,                                 
+            T76.HIST_OPD_DETTE_DHENVN                                   
+          FROM BQ76000T T76                                             
+          WHERE T76.TIL_EVS_AAR = :WS_TIL_EVS_AAR                       
+          AND   T76.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          and   (T76.DCPRN = :WS_DCPRN or                               
+                 T76.HIST_OPD_SIDSTE_DHENVN = :WS_DCPRN or              
+                 T76.HIST_OPD_DETTE_DHENVN = :WS_DCPRN)                 
+          ORDER BY T76.dcprn;                                           
+                                                                        
+         EXEC SQL DECLARE ESR_CURS CURSOR WITH HOLD FOR                 
+              SELECT                                                    
+            T75.DCPRN,                                                  
+            T75.EKOMNR,                                                 
+            T75.EEJDNR                                                  
+          FROM BQ75000T T75                                             
+          WHERE T75.TIL_EVS_AAR = :WS_TIL_EVS_AAR                       
+          AND   T75.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          and   T75.DCPRN = :WS_DCPRN                                   
+          ORDER BY T75.EKOMNR, EEJDNR;                                  
+                                                                        
+          EXEC SQL DECLARE ESRPERS CURSOR WITH HOLD FOR                 
+              SELECT                                                    
+            T75.DCPRN                                                   
+          FROM BQ75000T T75                                             
+          WHERE T75.TIL_EVS_AAR = :WS_TIL_EVS_AAR                       
+          AND   T75.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          and   T75.EKOMNR = :WS_EKOMNR                                 
+          and   T75.EEJDNR = :WS_EEJDNR                                 
+          ORDER BY T75.DCPRN;                                           
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         OPEN FILE (TOTFEJL) TITLE ('BH883TOT');                        
+         OPEN FILE (CPRLIST) TITLE ('BH883CPR');                        
+         OPEN FILE (EJDLIST) TITLE ('BH883EJD');                        
+         OPEN FILE (BH883PRM) TITLE ('BH881NYP');                       
+                                                                        
+         EOF_FEJL = NEJ;                                                
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH88300L');             
+            END;                                                        
+                                                                        
+         ON ENDFILE (TOTFEJL)                                           
+         BEGIN;                                                         
+            EOF_FEJL = JA;                                              
+         END;                                                           
+                                                                        
+         ON ENDFILE (BH883PRM)                                          
+         BEGIN;                                                         
+            EOF_BH883PRM = JA;                                          
+         END;                                                           
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         CALL ZZ20390('*OPEN','BH88301Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.ÅR   = GLSLUTÅR - 1;                                  
+         OVERLIN1.DATO = UDDATO;                                        
+         SIDELIN.CCA   = ZZIK1;                                         
+         OVERLIN1.CCA  = ZZWS2;                                         
+         OVERLIN2.CCA  = ZZWS3;                                         
+                                                                        
+         READ FILE (BH883PRM) INTO (BH883_PARM);                        
+                                                                        
+         IF EOF_BH883PRM = NEJ                                          
+         THEN DO;                                                       
+            SELECT (BH883_PARM.FS_MRK);                                 
+               WHEN ('F')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH883_PARM.FORSKUD_TXT;      
+                     WS_TIL_EVS_AAR = BH883_PARM.AAR;                   
+                     OVERLIN1.TEKST2 = 'BEREGNINGSBÅND FORSKUD';        
+                  END;                                                  
+               WHEN ('S')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH883_PARM.SLUT_TXT;         
+                     WS_TIL_EVS_AAR = BH883_PARM.AAR;                   
+                     OVERLIN1.TEKST2 = 'BEREGNINGSBÅND SLUT';           
+                  END;                                                  
+               WHEN ('U')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH883_PARM.SUPPL_TXT;        
+                     WS_TIL_EVS_AAR = BH883_PARM.AAR;                   
+                     OVERLIN1.TEKST2 = 'BEREGNINGSBÅND SUPPLEMENT';     
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CPR_TAB = '';  /* personliste */                               
+         EJD_TAB = '';  /* ejendomsliste */                             
+         cprtab_ix = 0;                                                 
+         ejdtab_ix = 0;                                                 
+         start_cpr_ix = 0;                                              
+         start_ejd_ix = 0;                                              
+         EJDTABEL_STOR_NOK = JA;                                        
+         CPRTABEL_STOR_NOK = JA;                                        
+                                                                        
+         GEM_CPR = 0;                                                   
+                                                                        
+         FOERSTE_GENNEMLOEB = JA;                                       
+                                                                        
+         /* læg ind her, hvis der er specielle cprnumre der skal */     
+         /* udtrækkes, ifm manglende rækker som ikke vil være på */     
+         /* totfejl-listen                                       */     
+         WS_DCPRN = 2404762640; /* for lidt db2 bz forsk18 */           
+         CALL GENNEMLØB_ET_CPRNR;  /* find evt. ægtefæller */           
+         WS_DCPRN = 104473210; /* for meget db2 prod slut17 */          
+         CALL GENNEMLØB_ET_CPRNR;  /* find evt. ægtefæller */           
+         WS_DCPRN = 107650628; /* for lidt db2 prod slut17 */           
+         CALL GENNEMLØB_ET_CPRNR;  /* find evt. ægtefæller */           
+         WS_DCPRN = 10068622; /* alm fra TN */                          
+         CALL GENNEMLØB_ET_CPRNR;  /* find evt. ægtefæller */           
+                                                                        
+                                                                        
+         READ FILE (TOTFEJL) INTO (TOTFEJL_DET); /* headeren */         
+                                                                        
+         if ^EOF_FEJL                                                   
+         then do;                                                       
+            CALL LÆS_TOTFEJL; /* læs igen for at springe header over */ 
+         end;                                                           
+                                                                        
+         do while (^EOF_FEJL & CPRTABEL_STOR_NOK);                      
+            /* totfejl_det.noegle indeholder foranstillede 0er */       
+            if HLP_NOEGLE.DCPRN = GEM_CPR                               
+            then do;                                                    
+               /* behandles ikke */                                     
+               GEM_CPR = HLP_NOEGLE.DCPRN;                              
+            end;                                                        
+            else do; /* kun MT og ESR gennemløbes */                    
+               if                                                       
+                  (substr(TOTFEJL_DET.OMRAADE,1,3) ^= 'ESR' &           
+                   substr(TOTFEJL_DET.OMRAADE,1,7) ^= 'MANDTAL') !      
+                  TOTFEJL_DET.FELTNAVN = 'CDUBLET KENDT OK' !           
+                  TOTFEJL_DET.FELTNAVN = 'CÆGTF_OK KENDT OK' !          
+                  TOTFEJL_DET.FELTNAVN =                                
+                              'HIST_OPD_DETTE_CSKPLOM KENDT OK' !       
+                  TOTFEJL_DET.FELTNAVN = 'CSBSK OK FEJL i GAMMELT' !    
+                  TOTFEJL_DET.FELTNAVN =                                
+                              'ESR_CSBSK OK FEJL i GAMMELT' !           
+                  TOTFEJL_DET.FELTNAVN =                                
+                              'OPL_CEANV OK FEJL i GAMMELT' !           
+                  TOTFEJL_DET.FELTNAVN =                                
+                              'OPL_BBRF379 OK MEN KUN I TEST' !         
+                  TOTFEJL_DET.FELTNAVN =                                
+                              'OPL_BBRF380 OK MEN KUN I TEST'           
+               then do;                                                 
+               end;                                                     
+               else do;                                                 
+                  WS_DCPRN = HLP_NOEGLE.dcprn;                          
+                  CALL GENNEMLØB_ET_CPRNR;  /* find evt. ægtefæller */  
+                  GEM_CPR = HLP_NOEGLE.DCPRN;                           
+               end;                                                     
+            end;                                                        
+                                                                        
+            CALL LÆS_TOTFEJL;                                           
+         END;                                                           
+                                                                        
+         gem_pa = 0;                                                    
+                                                                        
+         put skip list ('Der er fundet ' !! cprtab_ix !!                
+                        ' cprnumre på TOTAL Fejl dataset');             
+                                                                        
+         /* så er 1.gennemløb klaret */                                 
+         /* fejlperson, ægtefælle fra personens række */                
+         /* samt øvrige der har personen som ægtefælle */               
+                                                                        
+         /* check om der er flere cprnumre UDEN X */                    
+         cpr_uden_x_i_CPR = JA;                                         
+         nye_der_skal_behandles = JA;                                   
+                                                                        
+         FOERSTE_GENNEMLOEB = NEJ;                                      
+                                                                        
+ BEHANDL_NYE_CPR_EJD:                                                   
+                                                                        
+         start_cpr_ix = cprtab_ix;                                      
+         start_ejd_ix = ejdtab_ix;                                      
+                                                                        
+         Antal_gennemloeb = Antal_gennemloeb + 1;                       
+         put skip list ('BEHANDL_NYE_CPR_EJD startet for ' !!           
+                         Antal_gennemloeb !! '. gang');                 
+         put skip list ('   gem_pa: ' !! gem_pa);                       
+         put skip list ('   start_cpr_ix : ' !! start_cpr_ix);          
+         put skip list ('   start_ejd_ix : ' !! start_ejd_ix);          
+                                                                        
+         /* GENNEMLØB  CPR LISTEN */                                    
+         do while (gem_pa < cprtab_ix & CPRTABEL_STOR_NOK);             
+            gem_pa = cprtab_ix;  /* ja det er rigtigt nok */            
+            put skip list ('nyt gennemløb af ubehandlede i cprlisten' !!
+                           ' med ' !! gem_pa !! ' elementer');          
+            Call check_om_cpr_uden_x_i_CPR;                             
+            cpr_ix = 0;                                                 
+            if cpr_uden_x_i_CPR                                         
+            then do;                                                    
+               /* nu skal næste gennemløb køres */                      
+               /* hvor hele cpr_tab tages som input istedet */          
+               /* og dem UDEN X i cprbeh løbes igennem */               
+               do while (cpr_ix < gem_pa);                              
+                  cpr_ix = cpr_ix + 1;                                  
+                  if CPR_TAB.cprbeh(cpr_ix) = ' '                       
+                  then do;                                              
+                     WS_DCPRN = CPR_TAB.dcprn(cpr_ix);                  
+                     CALL GENNEMLØB_ET_CPRNR;  /* find  ægtefæller */   
+                  end;                                                  
+               end;                                                     
+            end;                                                        
+            put skip list ('Der er fundet ' !! cprtab_ix !!             
+                        ' cprnumre ialt efter gennemløb');              
+            if gem_pa < cprtab_ix                                       
+            then                                                        
+               put skip list ('der er tilføjet nye som bør behandles'); 
+         end;                                                           
+                                                                        
+         /* nu er samtlige personer der hænger på fejlperson fundet */  
+         /* incl. ægtefællers ægtefæller, deres ægtefæller osv */       
+                                                                        
+         ANT_LIST_CPR = cprtab_ix;                                      
+                                                                        
+         put skip list ('NU starter fremfinding af ejendomme');         
+                                                                        
+         /* EJDTABEL_STOR_NOK = JA; */                                  
+                                                                        
+         /* så skal ejendomme findes, for alle de personer der er */    
+         /* fundet i ovenstående og personer lægges i cprtabel    */    
+                                                                        
+         /* check om der er flere cprnumre UDEN X i EJDBEH */           
+         cpr_uden_x_i_EJD = JA;                                         
+         chk_ix = 0;                                                    
+                                                                        
+         Call check_om_cpr_uden_x_i_EJD;                                
+         ejd_ix = 0;                                                    
+         if cpr_uden_x_i_EJD                                            
+         then do;                                                       
+            /* nu skal næste gennemløb køres */                         
+            /* hvor hele cpr_tab tages som input  */                    
+            /* og dem UDEN X i ejdbeh løbes igennem */                  
+            /* for at finde deres ejendomme */                          
+            do while (ejd_ix < ANT_LIST_CPR);                           
+               ejd_ix = ejd_ix + 1;                                     
+               if CPR_TAB.ejdbeh(ejd_ix) = ' '                          
+               then do;                                                 
+                  WS_DCPRN = CPR_TAB.dcprn(ejd_ix);                     
+                  if EJDTABEL_STOR_NOK                                  
+                  then do;                                              
+                     CALL FIND_PERSONERS_EJENDOMME;                     
+                  end;                                                  
+                  CPR_TAB.ejdbeh(ejd_ix) = 'X';                         
+               end;                                                     
+            end;                                                        
+         end;                                                           
+                                                                        
+         put skip list ('Der er fundet ' !! ejdtab_ix !!                
+                     ' ejendomme efter gennemløb');                     
+                                                                        
+                                                                        
+         ANT_LIST_EJD = ejdtab_ix;                                      
+                                                                        
+         /* her skrives de personer og deres ejendomme der indtil */    
+         /* videre er fundet                                      */    
+         CALL skriv_cpr_dataset(ANT_SKREVET_CPR,ANT_LIST_CPR);          
+         CALL skriv_ejd_dataset(ANT_SKREVET_EJD,ANT_LIST_EJD);          
+         ANT_SKREVET_CPR = ANT_LIST_CPR;                                
+         ANT_SKREVET_EJD = ANT_LIST_EJD;                                
+                                                                        
+         /* vælg hvor mange niveuer der skal fremfindes          */     
+         /* 1. gennemløb - personer der fejler                   */     
+         /*                deres ægtefæller                      */     
+         /*                og deres ejendomme                    */     
+         /* 2. gennemløb - flere personer tilknyttet ejendommene */     
+         /*                deres ægtefæller                      */     
+         /*                og deres ejendomme                    */     
+         if Antal_gennemloeb > 1  /* ved > 1, er 2.gennløb afsluttet */ 
+         then do;                                                       
+            /* ABENDTXT = '101 Bevidst STOP';                           
+            CALL PROGRAM_FEJL; */                                       
+            put skip list ('der stoppes bevidst efter ' !!              
+            antal_gennemloeb !! ' gennemløb');                          
+            goto afslut_gennemloeb;                                     
+         end;                                                           
+                                                                        
+         put skip list ('Nu skal personer tilknyttet ' !!               
+                        'ejendomme findes');                            
+                                                                        
+         ejd_ix = 0;                                                    
+         do while (ejd_ix < ANT_LIST_EJD);                              
+            ejd_ix = ejd_ix + 1;                                        
+            if EJD_TAB.ejdbeh(ejd_ix) = ' '                             
+            then do;                                                    
+               WS_EKOMNR = EJD_TAB.ekomnr(ejd_ix);                      
+               WS_EEJDNR = EJD_TAB.eejdnr(ejd_ix);                      
+               if CPRTABEL_STOR_NOK                                     
+               then do;                                                 
+                  CALL TILFØJ_PERS_FOR_EJENDOM;                         
+               end;                                                     
+               EJD_TAB.ejdbeh(ejd_ix) = 'X';                            
+            end;                                                        
+         end;                                                           
+                                                                        
+         put skip list ('personer fundet ialt ' !! cprtab_ix);          
+                                                                        
+         ANT_LIST_CPR = cprtab_ix;                                      
+                                                                        
+         /* CALL skriv_cpr_dataset; */                                  
+                                                                        
+         /* check om der er i dette gennemløb er fundet flere           
+            personer eller ejendomme */                                 
+         if start_cpr_ix < cprtab_ix !                                  
+            start_ejd_ix < ejdtab_ix                                    
+         then do;                                                       
+            put skip list ('der er flere personer/ejendomme');          
+            put skip list ('så nu bør der køres en tur til');           
+            put skip list ('jeg hopper til BEHANDL_NYE_CPR_EJD');       
+            put skip list ('som gerne skal starte fra ' !!              
+                           'element ' !! start_cpr_ix);                 
+                                                                        
+            goto BEHANDL_NYE_CPR_EJD;                                   
+         end;                                                           
+                                                                        
+         CALL skriv_cpr_dataset(ANT_SKREVET_CPR,ANT_LIST_CPR);          
+         CALL skriv_ejd_dataset(ANT_SKREVET_EJD,ANT_LIST_EJD);          
+         ANT_SKREVET_CPR = ANT_LIST_CPR;                                
+         ANT_SKREVET_EJD = ANT_LIST_EJD;                                
+                                                                        
+ AFSLUT_GENNEMLOEB:                                                     
+                                                                        
+         CALL AFSLUT;                                                   
+ /*********************************************************************/
+ /* Læs record på fejldataset  og udskift blanke med 0er i noeglen    */
+ /*********************************************************************/
+ LÆS_TOTFEJL: PROC;                                                     
+                                                                        
+         READ FILE (TOTFEJL) INTO (TOTFEJL_DET);                        
+                                                                        
+         if ^EOF_FEJL                                                   
+         then do;                                                       
+            ANT_LÆS_TOT = ant_læs_tot + 1;                              
+            /* udskift blanke i noeglen med 0er */                      
+            uds_ix = 0;                                                 
+                                                                        
+            do while (uds_ix < 81);                                     
+               uds_ix = uds_ix + 1;                                     
+               if substr(totfejl_det.noegle,uds_Ix,1) = ' '             
+               then                                                     
+                  substr(totfejl_det.noegle,uds_Ix,1) = '0';            
+            end;                                                        
+         end;                                                           
+                                                                        
+         if ant_læs_tot < 3                                             
+         then do;                                                       
+            put skip data (totfejl_det);                                
+         end;                                                           
+                                                                        
+         /* første gennemløb må ikke samle mere end x antal personer,   
+            da der så ikke er plads til deres ægtefæller m.v.      */   
+         if FOERSTE_GENNEMLOEB & cprtab_ix > HENT_I_FOERSTE_GENNEMLOEB  
+         then do;                                                       
+            put skip list ('der er fundet nok personer i fejlliste');   
+            put skip list ('så nu findes disse ' !!                     
+            HENT_I_FOERSTE_GENNEMLOEB !! ' personers afhængigheder');   
+            EOF_FEJL = JA;                                              
+         end;                                                           
+                                                                        
+ END LÆS_TOTFEJL;                                                       
+                                                                        
+ /*********************************************************************/
+ /* Check om cpr findes i liste inden det tilføjes                    */
+ /*********************************************************************/
+ check_om_cpr_i_liste: proc;                                            
+                                                                        
+    CHK_IX = 0;                                                         
+    cpr_i_liste = NEJ;                                                  
+                                                                        
+    do while (chk_ix < cprtab_ix & cpr_i_liste = NEJ);                  
+       chk_ix = chk_ix + 1;                                             
+       if cpr_tab.dcprn(chk_ix) = WS_CHK_CPR                            
+       then do;                                                         
+          cpr_i_liste = JA;                                             
+       end;                                                             
+    end;                                                                
+                                                                        
+ end check_om_cpr_i_liste;                                              
+ /*********************************************************************/
+ /* Check om ejendom findes i liste inden den tilføjes                */
+ /*********************************************************************/
+ check_om_ejd_i_liste: proc;                                            
+                                                                        
+    CHK_IX = 0;                                                         
+    ejd_i_liste = NEJ;                                                  
+                                                                        
+    do while (chk_ix < ejdtab_ix & ejd_i_liste = NEJ);                  
+       chk_ix = chk_ix + 1;                                             
+       if ejd_tab.ekomnr(chk_ix) = WS_CHK_EKOMNR &                      
+          ejd_tab.eejdnr(chk_ix) = WS_CHK_EEJDNR                        
+       then do;                                                         
+          ejd_i_liste = JA;                                             
+       end;                                                             
+    end;                                                                
+                                                                        
+ end check_om_ejd_i_liste;                                              
+ /*********************************************************************/
+ /* Check om der er ubehandlede cprnumre i listen                     */
+ /*********************************************************************/
+ check_om_cpr_uden_x_i_CPR: proc;                                       
+                                                                        
+    CHK_IX = 0;                                                         
+    cpr_uden_x_i_CPR = NEJ;                                             
+                                                                        
+    do while (chk_ix < cprtab_ix & cpr_uden_x_i_CPR = NEJ);             
+       chk_ix = chk_ix + 1;                                             
+       if cpr_tab.cprbeh(chk_ix) = ' '                                  
+       then do;                                                         
+          cpr_uden_x_i_CPR = JA;                                        
+       end;                                                             
+    end;                                                                
+                                                                        
+ end check_om_cpr_uden_x_i_CPR;                                         
+                                                                        
+ /*********************************************************************/
+ /* Check om der er fundet ejd for alle cpr i listen                  */
+ /*********************************************************************/
+ check_om_cpr_uden_x_i_EJD: proc;                                       
+                                                                        
+    ejd_IX = 0;                                                         
+    cpr_uden_x_i_EJD = NEJ;                                             
+                                                                        
+    do while (chk_ix < ANT_LIST_CPR & cpr_uden_x_i_EJD = NEJ);          
+       chk_ix = chk_ix + 1;                                             
+       if cpr_tab.ejdbeh(chk_ix) = ' '                                  
+       then do;                                                         
+          cpr_uden_x_i_EJD = JA;                                        
+       end;                                                             
+    end;                                                                
+                                                                        
+ end check_om_cpr_uden_x_i_EJD;                                         
+ /*********************************************************************/
+ /* Skriv række på dataset med de cprnumre der ønskes udtrukket       */
+ /*********************************************************************/
+ SKRIV_CPR_DATASET: PROC (SC_ANT_SKR_CPR,SC_ANT_CPR_IALT);              
+                                                                        
+ DCL  SC_ANT_SKR_CPR       pic '999999';                                
+ DCL  SC_ANT_CPR_IALT      pic '999999';                                
+                                                                        
+      skriv_ix = SC_ANT_SKR_CPR; /* start position */                   
+      put skip list ('skriv_cpr_dataset fra element ' !!                
+                      skriv_ix !! ' til ' !! SC_ANT_CPR_IALT);          
+                                                                        
+      do while(skriv_ix < SC_ANT_CPR_IALT);                             
+         skriv_ix = skriv_ix + 1;                                       
+         cprlist_det.dcprn = cpr_tab.dcprn(skriv_ix);                   
+         write file (CPRLIST) from (CPRLIST_DET);                       
+      end;                                                              
+                                                                        
+ END SKRIV_CPR_DATASET;                                                 
+ /*********************************************************************/
+ /* Skriv række på dataset med de cprnumre der ønskes udtrukket       */
+ /*********************************************************************/
+ SKRIV_EJD_DATASET: PROC (SE_ANT_SKR_EJD,SE_ANT_EJD_IALT);              
+                                                                        
+ DCL  SE_ANT_SKR_EJD       pic '999999';                                
+ DCL  SE_ANT_EJD_IALT      pic '999999';                                
+                                                                        
+      skriv_ix = SE_ANT_SKR_EJD;                                        
+      put skip list ('skriv_ejd_dataset fra element ' !!                
+                      skriv_ix !! ' til ' !! SE_ANT_EJD_IALT);          
+                                                                        
+      do while(skriv_ix < SE_ANT_EJD_IALT);                             
+         skriv_ix = skriv_ix + 1;                                       
+         ejdlist_det.ekomnr = ejd_tab.ekomnr(skriv_ix);                 
+         ejdlist_det.eejdnr = ejd_tab.eejdnr(skriv_ix);                 
+         write file (EJDLIST) from (EJDLIST_DET);                       
+      end;                                                              
+                                                                        
+ END SKRIV_EJD_DATASET;                                                 
+ /*********************************************************************/
+ /* Gennemløb MT-fil for bestemt cprnr på totalfejl-dataset           */
+ /*********************************************************************/
+ GENNEMLØB_ET_CPRNR: PROC;                                              
+                                                                        
+            NYE_DER_SKAL_BEHANDLES = NEJ;                               
+                                                                        
+            CALL CLOSE_MT_CURS; /* BQ76 */                              
+            CALL OPEN_MT_CURS;                                          
+            CALL FETCH_MT_CURS;                                         
+            DO WHILE (MT_FUNDET);                                       
+               if dclbq76000T.dcprn = ws_dcprn                          
+               then do;                                                 
+                                                                        
+                  /* personen selv */                                   
+                  WS_CHK_CPR = dclbq76000t.dcprn;                       
+                  call check_om_cpr_i_liste;                            
+                  if ^cpr_i_liste                                       
+                  then do;                                              
+                    if cprtab_ix < max_cpr_ix                           
+                    then do;                                            
+                       cprtab_ix = cprtab_ix + 1;                       
+                       cpr_tab.dcprn(cprtab_ix) = dclbq76000T.dcprn;    
+                       cpr_tab.cprbeh(cprtab_ix) = 'X'; /* beh færdig */
+                    end;                                                
+                    else do;                                            
+                       CPRTABEL_STOR_NOK = NEJ;                         
+                       PUT SKIP LIST ('Forsøg på at opdatere ' !!       
+                                      'cprtab med person ' !!           
+                                      dclbq76000T.dcprn !!              
+                                      ' afsluttes - ' !!                
+                                      'CPR TAB skal udvides');          
+                       CALL CLOSE_MT_CURS; /* BQ76 */                   
+                       return;                                          
+                    end;                                                
+                                                                        
+                  end;                                                  
+                                                                        
+                  /* personens ægtefælle */                             
+                  if dclbq76000T.hist_opd_sidste_dhenvn > 0             
+                  then do;                                              
+                     WS_CHK_CPR = dclbq76000t.hist_opd_sidste_dhenvn;   
+                     call check_om_cpr_i_liste;                         
+                     if ^cpr_i_liste                                    
+                     then do;                                           
+                        if cprtab_ix < max_cpr_ix                       
+                        then do;                                        
+                          cprtab_ix = cprtab_ix + 1;                    
+                          cpr_tab.dcprn(cprtab_ix) =                    
+                                 dclbq76000T.hist_opd_sidste_dhenvn;    
+                          NYE_DER_SKAL_BEHANDLES = JA;                  
+                        end;                                            
+                        else do;                                        
+                           CPRTABEL_STOR_NOK = NEJ;                     
+                           PUT SKIP LIST ('Forsøg på at opdatere ' !!   
+                              'cprtab med ægtefælle(sidste) ' !!        
+                              dclbq76000T.hist_opd_sidste_dhenvn !!     
+                              ' for person ' !!                         
+                              dclbq76000T.dcprn !! ' afsluttes - ' !!   
+                              'CPR TAB skal udvides');                  
+                           CALL CLOSE_MT_CURS; /* BQ76 */               
+                           return;                                      
+                        end;                                            
+                     end;                                               
+                  end;                                                  
+                                                                        
+                  /* personens ægtefælle */                             
+                  if dclbq76000T.hist_opd_dette_dhenvn > 0              
+                  then do;                                              
+                     WS_CHK_CPR = dclbq76000t.hist_opd_dette_dhenvn;    
+                     call check_om_cpr_i_liste;                         
+                     if ^cpr_i_liste                                    
+                     then do;                                           
+                        if cprtab_ix < max_cpr_ix                       
+                        then do;                                        
+                           cprtab_ix = cprtab_ix + 1;                   
+                           cpr_tab.dcprn(cprtab_ix) =                   
+                                 dclbq76000T.hist_opd_dette_dhenvn;     
+                           NYE_DER_SKAL_BEHANDLES = JA;                 
+                        end;                                            
+                        else do;                                        
+                           CPRTABEL_STOR_NOK = NEJ;                     
+                           PUT SKIP LIST ('Forsøg på at opdatere ' !!   
+                              'cprtab med ægtefælle(dette) ' !!         
+                              dclbq76000T.hist_opd_dette_dhenvn !!      
+                              ' for person ' !!                         
+                              dclbq76000T.dcprn !! ' afsluttes - ' !!   
+                              'CPR TAB skal udvides');                  
+                           CALL CLOSE_MT_CURS; /* BQ76 */               
+                           return;                                      
+                        end;                                            
+                     end;                                               
+                  end;                                                  
+               end;                                                     
+               else do;                                                 
+                  /* en anden har personen som ægtefælle */             
+                  WS_CHK_CPR = dclbq76000t.dcprn;                       
+                  call check_om_cpr_i_liste;                            
+                  if ^cpr_i_liste                                       
+                  then do;                                              
+                     if cprtab_ix < max_cpr_ix                          
+                     then do;                                           
+                        cprtab_ix = cprtab_ix + 1;                      
+                        cpr_tab.dcprn(cprtab_ix) =                      
+                                 dclbq76000T.dcprn;                     
+                        NYE_DER_SKAL_BEHANDLES = JA;                    
+                     end;                                               
+                     else do;                                           
+                        CPRTABEL_STOR_NOK = NEJ;                        
+                        PUT SKIP LIST ('Forsøg på at opdatere ' !!      
+                              'cprtab med anden person ' !!             
+                              dclbq76000T.dcprn !!                      
+                              ' som har person som ægtefælle ' !!       
+                              dclbq76000T.hist_opd_dette_dhenvn !!      
+                              ' afsluttes - ' !!                        
+                              'CPR TAB skal udvides');                  
+                        CALL CLOSE_MT_CURS; /* BQ76 */                  
+                        return;                                         
+                     end;                                               
+                  end;                                                  
+               end;                                                     
+               CALL FETCH_MT_CURS;                                      
+            END;                                                        
+            CALL CLOSE_MT_CURS; /* BQ76 */                              
+                                                                        
+ END GENNEMLØB_ET_CPRNR;                                                
+ /*********************************************************************/
+ /* Gennemløb listen med cprnumre, og find tilknyttede ejendomme      */
+ /*********************************************************************/
+ FIND_PERSONERS_EJENDOMME: PROC;                                        
+                                                                        
+            /* opslag med dcprn */                                      
+                                                                        
+            CALL CLOSE_ESR_CURS; /* BQ75 */                             
+            CALL OPEN_ESR_CURS;                                         
+            CALL FETCH_ESR_CURS;                                        
+            DO WHILE (ESR_FUNDET);                                      
+               WS_CHK_EKOMNR = dclbq75000t.ekomnr;                      
+               WS_CHK_EEJDNR = dclbq75000t.eejdnr;                      
+               call check_om_ejd_i_liste;                               
+               if ^ejd_i_liste                                          
+               then do;                                                 
+                  if ejdtab_ix < max_ejd_ix                             
+                  then do;                                              
+                     ejdtab_ix = ejdtab_ix + 1;                         
+                     ejd_tab.ekomnr(ejdtab_ix) =                        
+                              dclbq75000T.ekomnr;                       
+                     ejd_tab.eejdnr(ejdtab_ix) =                        
+                              dclbq75000T.eejdnr;                       
+                  end;                                                  
+                  else do;                                              
+                     EJDTABEL_STOR_NOK = NEJ;                           
+                     PUT SKIP LIST ('Forsøg på at opdatere ' !!         
+                              'ejdtab med ' !!                          
+                              dclbq75000T.ekomnr !! ' ' !!              
+                              dclbq75000T.eejdnr !!                     
+                              ' for person ' !!                         
+                              dclbq75000T.dcprn !!                      
+                              ' afsluttes - ' !!                        
+                              'EJD TAB skal udvides');                  
+                     CALL CLOSE_ESR_CURS; /* BQ75 */                    
+                     return;                                            
+                  end;                                                  
+               end;                                                     
+               CALL FETCH_ESR_CURS;                                     
+            END;                                                        
+            CALL CLOSE_ESR_CURS; /* BQ75 */                             
+                                                                        
+ END FIND_PERSONERS_EJENDOMME;                                          
+ /*********************************************************************/
+ /* Gennemløb listen med ejendomme, og find tilknyttede personer      */
+ /*********************************************************************/
+ TILFØJ_PERS_FOR_EJENDOM: PROC;                                         
+                                                                        
+            CALL CLOSE_ESRPERS; /* BQ75 */                              
+            CALL OPEN_ESRPERS;                                          
+            CALL FETCH_ESRPERS;                                         
+            DO WHILE (ESRPERS_FUNDET);                                  
+               WS_CHK_CPR = dclbq75000t.dcprn;                          
+               call check_om_cpr_i_liste;                               
+               if ^cpr_i_liste                                          
+               then do;                                                 
+                  if cprtab_ix < max_cpr_ix                             
+                  then do;                                              
+                     cprtab_ix = cprtab_ix + 1;                         
+                     cpr_tab.dcprn(cprtab_ix) =                         
+                              dclbq75000T.DCPRN;                        
+                  end;                                                  
+                  else do;                                              
+                     CPRTABEL_STOR_NOK = NEJ;                           
+                     PUT SKIP LIST ('Forsøg på at opdatere ' !!         
+                              'cprtab med person ' !!                   
+                              dclbq75000T.DCPRN !!                      
+                              ' som er tilknyttet ' !!                  
+                              dclbq75000T.ekomnr !! ' ' !!              
+                              dclbq75000T.eejdnr !!                     
+                              ' afsluttes - ' !!                        
+                              'CPR TAB skal udvides');                  
+                      CALL CLOSE_ESRPERS; /* BQ75 */                    
+                      return;                                           
+                  end;                                                  
+               end;                                                     
+               CALL FETCH_ESRPERS;                                      
+            END;                                                        
+            CALL CLOSE_ESRPERS; /* BQ75 */                              
+                                                                        
+ END TILFØJ_PERS_FOR_EJENDOM;                                           
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF MT-OPLYSNINGER                      RUTINE */
+ /*********************************************************************/
+ OPEN_MT_CURS: PROC;                                                    
+                                                                        
+         EXEC SQL OPEN MT_CURS;                                         
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN MT_CURS';                            
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_MT_CURS;                                                      
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF MT                                 RUTINE */
+ /*********************************************************************/
+ CLOSE_MT_CURS: PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE MT_CURS;                                        
+                                                                        
+ END CLOSE_MT_CURS;                                                     
+                                                                        
+ /********************************************************************* 
+ *       LÆS MANDTAL   BQ76000T                                       * 
+ *********************************************************************/ 
+ FETCH_MT_CURS: PROC;                                                   
+         MT_FUNDET = '0'B;                                              
+                                                                        
+         DCLBQ76000T = '';                                              
+                                                                        
+         EXEC SQL FETCH MT_CURS                                         
+                                                                        
+         INTO                                                           
+            :DCLBQ76000T.DCPRN,                                         
+            :DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN,                        
+            :DCLBQ76000T.HIST_OPD_DETTE_DHENVN                          
+                                                                        
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               MT_FUNDET = '1'B;                                        
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH MT_CURS';                          
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_MT_CURS;                                                     
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF ESR-OPLYSNINGER                     RUTINE */
+ /*********************************************************************/
+ OPEN_ESR_CURS: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN ESR_CURS;                                        
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN ESR_CURS';                           
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_ESR_CURS;                                                     
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF ESR                                RUTINE */
+ /*********************************************************************/
+ CLOSE_ESR_CURS: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE ESR_CURS;                                       
+                                                                        
+ END CLOSE_ESR_CURS;                                                    
+                                                                        
+ /********************************************************************* 
+ *       LÆS ESR   BQ75000T                                           * 
+ *********************************************************************/ 
+ FETCH_ESR_CURS: PROC;                                                  
+         ESR_FUNDET = '0'B;                                             
+                                                                        
+         DCLBQ75000T = '';                                              
+                                                                        
+         EXEC SQL FETCH ESR_CURS                                        
+                                                                        
+         INTO                                                           
+            :DCLBQ75000T.DCPRN,                                         
+            :DCLBQ75000T.EKOMNR,                                        
+            :DCLBQ75000T.EEJDNR                                         
+                                                                        
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               ESR_FUNDET = '1'B;                                       
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH ESR_CURS';                         
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_ESR_CURS;                                                    
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF ESR-OPLYSNINGER                     RUTINE */
+ /*********************************************************************/
+ OPEN_ESRPERS: PROC;                                                    
+                                                                        
+         EXEC SQL OPEN ESRPERS;                                         
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN ESRPERS';                            
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_ESRPERS;                                                      
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF ESR                                RUTINE */
+ /*********************************************************************/
+ CLOSE_ESRPERS: PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE ESRPERS;                                        
+                                                                        
+ END CLOSE_ESRPERS;                                                     
+                                                                        
+ /********************************************************************* 
+ *       LÆS ESR   BQ75000T                                           * 
+ *********************************************************************/ 
+ FETCH_ESRPERS: PROC;                                                   
+         ESRPERS_FUNDET = '0'B;                                         
+                                                                        
+         DCLBQ75000T = '';                                              
+                                                                        
+         EXEC SQL FETCH ESRPERS                                         
+                                                                        
+         INTO                                                           
+            :DCLBQ75000T.DCPRN                                          
+                                                                        
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               ESRPERS_FUNDET = '1'B;                                   
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH ESRPERS';                          
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_ESRPERS;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+                                                                        
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+                                                                        
+         DETLIN1.TEKST =                                                
+         'LÆSTE RECORDS PÅ FEJLLISTE TOTAL ';                           
+         DETLIN1.ANTAL = ANT_LÆS_TOT;                                   
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DETLIN1.TEKST =                                                
+         'ANTAL FUNDNE CPRNUMRE DER SKAL UDTRÆKKES';                    
+         DETLIN1.ANTAL = ANT_LIST_CPR;                                  
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DETLIN1.TEKST =                                                
+         'ANTAL FUNDNE EJENDOMME DER SKAL UDTRÆKKES';                   
+         DETLIN1.ANTAL = ANT_LIST_EJD;                                  
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL KONTROLLISTE;                                             
+         CLOSE FILE (CPRLIST);                                          
+         CLOSE FILE (EJDLIST);                                          
+         CLOSE FILE (TOTFEJL);                                          
+         CLOSE FILE (BH883PRM);                                         
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+         PUT SKIP LIST ('Programmet afsluttet');                        
+                                                                        
+ END AFSLUT;                                                            
+ END BH88300;                                                           

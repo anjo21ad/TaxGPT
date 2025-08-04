@@ -1,0 +1,422 @@
+ BH30900: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2003/EVS SLUT 2002                         *
+ * PROGRAMNAVN: BH30900.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    RETTELSE AF FORKERTE DATOER FRA EVS SLUT 2001.         *
+ *                                                                     *
+ * PGMFORLØB:                                                          *
+ *                                                                     *
+ * INDDATA: BH3900I - EVS UDTRÆK 2000 MED RIGTIGE DATOER(EKOMNR^=999)  *
+ *          BH3910I - EVS UDTRÆK 2000 MED RIGTIGE DATOER(EKOMNR =999)  *
+ *          BH3901I - EVS UDTRÆK 2001 MED FORKERTE DATOER(EKOMNR^=999) *
+ *          BH3911I - EVS UDTRÆK 2001 MED FORKERTE DATOER(EKOMNR =999) *
+ * UDDATA:  BH3900O - RETTET EVS UDTRÆK2001 (EKOMNR =999)              *
+ *          BH3910O - RETTET EVS UDTRÆK2001 (EKOMNR^=999)              *
+ *          BH30901Y - KONTROLLISTE.                                   *
+ *                                                                     *
+ * KONSTRUKTØR: ESBEN BRODERSEN       ESB,     T&S BRØNDBY 12.09.2002. *
+ * ÆNDRINGSLOG:                                                        *
+ *                                                                     *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2002');            
+                                                                        
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     EOF_BH30900I   BIT(1)           INIT('0'B);                    
+ DCL     EOF_BH30901I   BIT(1)           INIT('0'B);                    
+ DCL     EOF_BH30910I   BIT(1)           INIT('0'B);                    
+ DCL     EOF_BH30911I   BIT(1)           INIT('0'B);                    
+ DCL     STATUS         CHAR (1)         INIT('0');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+         2 ÅR           PIC   '99',                                     
+         2 MD           PIC   '99',                                     
+         2 DAG          PIC   '99';                                     
+ DCL     NØGLE_2001     CHAR (19);                                      
+ DCL     1 UD_2001      BASED(ADDR(NØGLE_2001)),                        
+         2 PERSONNR     PIC  '(10)9',                                   
+         2 KOMUNENR     PIC  '(03)9',                                   
+         2 EJENDONR     PIC  '(06)9';                                   
+ DCL     NØGLE_2000     CHAR (19);                                      
+ DCL     1 UD_2000      BASED(ADDR(NØGLE_2000)),                        
+         2 PERSONNR     PIC  '(10)9',                                   
+         2 KOMUNENR     PIC  '(03)9',                                   
+         2 EJENDONR     PIC  '(06)9';                                   
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH3900I FILE INPUT  RECORD;/* EVS UDTRÆK 2000 IKKE 999      */ 
+ DCL     BH3910I FILE INPUT  RECORD;/* EVS UDTRÆK 2000 KUN  999      */ 
+ DCL     BH3901I FILE INPUT  RECORD;/* EVS UDTRÆK 2001 IKKE 999      */ 
+ DCL     BH3911I FILE INPUT  RECORD;/* EVS UDTRÆK 2001 KUN  999      */ 
+ DCL     BH3900O FILE OUTPUT RECORD;/* EVS UDTRÆK 2001 IKKE 999      */ 
+ DCL     BH3910O FILE OUTPUT RECORD;/* EVS UDTRÆK 2001 KUN  999      */ 
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_SLUT_2001,                                            
+         %INCLUDE BH30000N;;                                            
+                                                                        
+ DCL     1 UDTRÆK_SLUT_2000,                                            
+         %INCLUDE BH30001N;;                                            
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+ DCL  ANTLÆS_IALT        BIN FIXED (31) INIT(0);/* LÆSTE IALT 2001    */
+ DCL  ANTSKRIV_IALT      BIN FIXED (31) INIT(0);/* LÆSTE IALT 2001    */
+ DCL  ANTLÆS_DANSKE_2001 BIN FIXED (31) INIT(0);/* LÆSTE DANSKE 2001  */
+ DCL  ANTLÆS_UDLAND_2001 BIN FIXED (31) INIT(0);/* LÆSTE UDLAND 2001  */
+ DCL  ANTSKR_DANSKE_2001 BIN FIXED (31) INIT(0);/* SKREVET KUN DANSKE */
+ DCL  ANTSKR_UDLAND_2001 BIN FIXED (31) INIT(0);/* SKREVET KUN UDLAND */
+ DCL  FEJL_DANSKE        BIN FIXED (31) INIT(0);/* FEJL FRA UD2000    */
+ DCL  FEJL_UDLAND        BIN FIXED (31) INIT(0);/* FEJL FRA UD2000    */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL   LINIE           CHAR (133);                                      
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (45);                                     
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+       ON ERROR                                                         
+         BEGIN;                                                         
+           ON ERROR SYSTEM;                                             
+           PUT SKIP LIST ('PROGRAMFEJL');                               
+           CALL PLIDUMP  ('SBHO','MODUL BH30900');                      
+         END;                                                           
+       ON ENDFILE(BH3900I) EOF_BH30900I = '1'B;                         
+       ON ENDFILE(BH3901I) EOF_BH30901I = '1'B;                         
+       ON ENDFILE(BH3910I) EOF_BH30910I = '1'B;                         
+       ON ENDFILE(BH3911I) EOF_BH30911I = '1'B;                         
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+       UDTRÆK_SLUT_2001  = '';                                          
+       UDTRÆK_SLUT_2000  = '';                                          
+       DT = DATE;                                                       
+                                                                        
+       CALL ZZ20390('*OPEN','BH30901Y');       /* ÅBEN KONTROLLISTE */  
+                                                                        
+       LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'              
+                     !! ' UDTRÆK FRA EVS SLUT 2001    ' !! 'DATO: '     
+                     !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+       CALL ZZ20300(LINIE,'01');                                        
+                                                                        
+       LINIE = ZZWS3 !! ' PROGRAMID: BH30900 ';                         
+       CALL ZZ20300(LINIE,'01');                                        
+                                                                        
+       LINIE = ZZWS2;                                                   
+       CALL ZZ20300(LINIE,'01');                                        
+                                                                        
+       CALL ZS61900;                              /* KST/SSI INFO   */  
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+       CALL INIT_DANSKE;                                                
+       CALL LÆS_UDTRÆK_2001_DAN;                                        
+       DO WHILE (EOF_BH30901I ^= '1'B);                                 
+         CALL SKAF_DATOER_DAN;                                          
+         CALL RET_SKRIV_DAN;                                            
+         CALL LÆS_UDTRÆK_2001_DAN;                                      
+       END;                                                             
+       CALL AFSLUT_DANSKE;                                              
+                                                                        
+       CALL INIT_UDLAND;                                                
+       CALL LÆS_UDTRÆK_2001_UDL;                                        
+       DO WHILE (EOF_BH30911I ^= '1'B);                                 
+         CALL SKAF_DATOER_UDL;                                          
+         CALL RET_SKRIV_UDL;                                            
+         CALL LÆS_UDTRÆK_2001_UDL;                                      
+       END;                                                             
+       CALL AFSLUT_UDLAND;                                              
+                                                                        
+       CALL AFSLUT;                                                     
+ /*********************************************************************/
+ INIT_DANSKE: PROC;                                                     
+   UDTRÆK_SLUT_2001  = '';                                              
+   UDTRÆK_SLUT_2000  = '';                                              
+   OPEN FILE (BH3900I) TITLE ('BH30900I');                              
+   OPEN FILE (BH3901I) TITLE ('BH30901I');                              
+   OPEN FILE (BH3900O) TITLE ('BH30900O');                              
+ END INIT_DANSKE;                                                       
+ /*********************************************************************/
+ LÆS_UDTRÆK_2001_DAN: PROC;                                             
+   READ FILE (BH3901I) INTO (UDTRÆK_SLUT_2001);                         
+   ANTLÆS_DANSKE_2001 = ANTLÆS_DANSKE_2001 + 1;                         
+ END LÆS_UDTRÆK_2001_DAN;                                               
+ /*********************************************************************/
+ SKAF_DATOER_DAN: PROC;                                                 
+   /* PUT SKIP LIST('SKAF_DATOER_DAN STATUS',STATUS); */                
+   /* STATUS SKAL EVENTUELT SÆTTES = 0 */                               
+   STATUS = '0';                                                        
+   UD_2001.PERSONNR = UDTRÆK_SLUT_2001.DCPRN;                           
+   UD_2001.KOMUNENR = UDTRÆK_SLUT_2001.EKOMNR;                          
+   UD_2001.EJENDONR = UDTRÆK_SLUT_2001.EEJDNR;                          
+   /* PUT SKIP LIST('NØGLE_2001 :',NØGLE_2001); */                      
+   /* PUT SKIP LIST('NØGLE_2000 :',NØGLE_2000); */                      
+   DO WHILE (EOF_BH30900I ^= '1'B & STATUS = '0' &                      
+             NØGLE_2001 >= NØGLE_2000);                                 
+     IF UDTRÆK_SLUT_2001.DCPRN  = UDTRÆK_SLUT_2000.DCPRN  &             
+        UDTRÆK_SLUT_2001.EKOMNR = UDTRÆK_SLUT_2000.EKOMNR &             
+        UDTRÆK_SLUT_2001.EEJDNR = UDTRÆK_SLUT_2000.EEJDNR               
+     THEN                                                               
+       DO;                                                              
+         STATUS = '1';                                                  
+   /*    PUT SKIP LIST ('PERSON FUNDET PÅ FIL BH3900I'); */             
+       END;                                                             
+     ELSE                                                               
+       DO;                                                              
+         READ FILE (BH3900I) INTO (UDTRÆK_SLUT_2000);                   
+         UD_2000.PERSONNR = UDTRÆK_SLUT_2000.DCPRN;                     
+         UD_2000.KOMUNENR = UDTRÆK_SLUT_2000.EKOMNR;                    
+         UD_2000.EJENDONR = UDTRÆK_SLUT_2000.EEJDNR;                    
+         /* PUT SKIP LIST('NØGLE_2000',NØGLE_2000); */                  
+       END;                                                             
+    END;                                                                
+    IF STATUS ^= '1' THEN ;                                             
+   /*  PUT SKIP LIST ('PERSON IKKE FUNDET PÅ FIL BH3900I'); */          
+ END SKAF_DATOER_DAN;                                                   
+ /*********************************************************************/
+ RET_SKRIV_DAN: PROC;                                                   
+   IF STATUS = '1' THEN                                                 
+     DO;                                                                
+       IF UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA > 0 &                         
+          UDTRÆK_SLUT_2001.SIDSTE.DOVTG < 20010101 &                    
+          UDTRÆK_SLUT_2001.SIDSTE.ELBNR = 1                             
+       THEN                                                             
+         DO;                                                            
+    /*     PUT SKIP LIST('FEJL DANSKE  ',UDTRÆK_SLUT_2001.DCPRN); */    
+           FEJL_DANSKE = FEJL_DANSKE + 1;                               
+           RETURN; /*FEJL SOM IKKE SKAL MED I UDTRÆKKET FRA 2001*/      
+         END;                                                           
+                                                                        
+       UDTRÆK_SLUT_2001.FØRSTE.DATO0107 =                               
+                     UDTRÆK_SLUT_2000.SIDSTE.DATO0107;                  
+       UDTRÆK_SLUT_2001.SIDSTE.DATO0107 =                               
+                     UDTRÆK_SLUT_2000.SIDSTE.DATO0107;                  
+    /* PUT SKIP LIST('DATO0107 INDSAT F/S ',UDTRÆK_SLUT_2001.DCPRN,     
+                   UDTRÆK_SLUT_2001.EKOMNR,UDTRÆK_SLUT_2001.EEJDNR); */ 
+       IF UDTRÆK_SLUT_2001.FØRSTE.DOVTG < 20010101    &                 
+          (UDTRÆK_SLUT_2000.SIDSTE.CEJBEVS = '5'      !                 
+           UDTRÆK_SLUT_2000.EKOMNR = 999)             &                 
+           UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA = 0                          
+       THEN                                                             
+         DO;                                                            
+           UDTRÆK_SLUT_2001.FØRSTE.DOVTG =                              
+                                       UDTRÆK_SLUT_2000.SIDSTE.DOVTG;   
+    /*     PUT SKIP LIST('DOVTG INDSAT F ',UDTRÆK_SLUT_2001.DCPRN); */  
+         END;                                                           
+                                                                        
+                                                                        
+       IF UDTRÆK_SLUT_2001.SIDSTE.DOVTG < 20010101    &                 
+          (UDTRÆK_SLUT_2000.SIDSTE.CEJBEVS = '5'      !                 
+           UDTRÆK_SLUT_2000.EKOMNR = 999)             &                 
+           UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA = 0        &                 
+           UDTRÆK_SLUT_2001.FØRSTE.DOVTG =                              
+                            UDTRÆK_SLUT_2001.SIDSTE.DOVTG               
+       THEN                                                             
+         DO;                                                            
+           UDTRÆK_SLUT_2001.SIDSTE.DOVTG =                              
+                              UDTRÆK_SLUT_2000.SIDSTE.DOVTG;            
+    /*     PUT SKIP LIST('DOVTG INDSAT S ',UDTRÆK_SLUT_2001.DCPRN); */  
+         END;                                                           
+                                                                        
+              /* SKAL DAFSTAA OVERFØRES ? */                            
+     END; /* IF STATUS = '1' */                                         
+   STATUS = '0';                                                        
+   WRITE FILE (BH3900O) FROM (UDTRÆK_SLUT_2001);                        
+   ANTSKR_DANSKE_2001 = ANTSKR_DANSKE_2001 + 1;                         
+   ANTSKRIV_IALT = ANTSKRIV_IALT + 1;                                   
+                                                                        
+ END RET_SKRIV_DAN;                                                     
+ /*********************************************************************/
+ AFSLUT_DANSKE: PROC;                                                   
+   CLOSE FILE (BH3900I);                                                
+   CLOSE FILE (BH3901I);                                                
+   CLOSE FILE (BH3900O);                                                
+ END AFSLUT_DANSKE;                                                     
+ /*********************************************************************/
+ INIT_UDLAND: PROC;                                                     
+   UDTRÆK_SLUT_2001  = '';                                              
+   UDTRÆK_SLUT_2000  = '';                                              
+   UD_2001           = '';                                              
+   UD_2000           = '';                                              
+   OPEN FILE (BH3910I) TITLE ('BH30910I');                              
+   OPEN FILE (BH3911I) TITLE ('BH30911I');                              
+   OPEN FILE (BH3910O) TITLE ('BH30910O');                              
+ END INIT_UDLAND;                                                       
+ /*********************************************************************/
+ LÆS_UDTRÆK_2001_UDL: PROC;                                             
+   READ FILE (BH3911I) INTO (UDTRÆK_SLUT_2001);                         
+   ANTLÆS_UDLAND_2001 = ANTLÆS_UDLAND_2001 + 1;                         
+ END LÆS_UDTRÆK_2001_UDL;                                               
+ /*********************************************************************/
+ SKAF_DATOER_UDL: PROC;                                                 
+   UD_2001.PERSONNR = UDTRÆK_SLUT_2001.DCPRN;                           
+   UD_2001.KOMUNENR = UDTRÆK_SLUT_2001.EKOMNR;                          
+   UD_2001.EJENDONR = UDTRÆK_SLUT_2001.EEJDNR;                          
+   /* PUT SKIP LIST('NØGLE_2001 :',NØGLE_2001);         */              
+   /* PUT SKIP LIST('NØGLE_2000 :',NØGLE_2000);         */              
+   /* PUT SKIP LIST('SKAF_DATOER_UDL STATUS', STATUS);  */              
+   STATUS = '0';                                                        
+   DO WHILE (EOF_BH30910I ^= '1'B & STATUS = '0' &                      
+             NØGLE_2001 >= NØGLE_2000);                                 
+     IF UDTRÆK_SLUT_2001.DCPRN  = UDTRÆK_SLUT_2000.DCPRN  &             
+        UDTRÆK_SLUT_2001.EKOMNR = UDTRÆK_SLUT_2000.EKOMNR &             
+        UDTRÆK_SLUT_2001.EEJDNR = UDTRÆK_SLUT_2000.EEJDNR               
+     THEN                                                               
+       DO;                                                              
+         STATUS = '1';                                                  
+   /*    PUT SKIP LIST ('PERSON FUNDET PÅ FIL BH3900I'); */             
+       END;                                                             
+     ELSE                                                               
+       DO;                                                              
+         READ FILE (BH3910I) INTO (UDTRÆK_SLUT_2000);                   
+         UD_2000.PERSONNR = UDTRÆK_SLUT_2000.DCPRN;                     
+         UD_2000.KOMUNENR = UDTRÆK_SLUT_2000.EKOMNR;                    
+         UD_2000.EJENDONR = UDTRÆK_SLUT_2000.EEJDNR;                    
+   /*    PUT SKIP LIST('NØGLE_2000',NØGLE_2000);         */             
+       END;                                                             
+    END;                                                                
+    IF STATUS ^= '1' THEN ;                                             
+   /*  PUT SKIP LIST ('PERSON IKKE FUNDET PÅ FIL BH3900I'); */          
+ END SKAF_DATOER_UDL;                                                   
+ /*********************************************************************/
+ RET_SKRIV_UDL: PROC;                                                   
+   IF STATUS = '1' THEN                                                 
+     DO;                                                                
+      IF UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA > 0 &                          
+         UDTRÆK_SLUT_2001.SIDSTE.DOVTG < 20010101 &                     
+         UDTRÆK_SLUT_2001.SIDSTE.ELBNR = 1                              
+      THEN                                                              
+         DO;                                                            
+     /*    PUT SKIP LIST('FEJL UDLAND ',UDTRÆK_SLUT_2001.DCPRN); */     
+           FEJL_UDLAND = FEJL_UDLAND + 1;                               
+           RETURN; /*FEJL SOM IKKE SKAL MED I UDTRÆKKET FRA 2001*/      
+         END;                                                           
+                                                                        
+       UDTRÆK_SLUT_2001.FØRSTE.DATO0107 =                               
+                     UDTRÆK_SLUT_2000.SIDSTE.DATO0107;                  
+       UDTRÆK_SLUT_2001.SIDSTE.DATO0107 =                               
+                     UDTRÆK_SLUT_2000.SIDSTE.DATO0107;                  
+    /*   PUT SKIP LIST('DATO0107 INDSAT F/S ',UDTRÆK_SLUT_2001.DCPRN,   
+                     UDTRÆK_SLUT_2001.EKOMNR,UDTRÆK_SLUT_2001.EEJDNR);*/
+                                                                        
+       IF UDTRÆK_SLUT_2001.FØRSTE.DOVTG < 20010101    &                 
+          (UDTRÆK_SLUT_2000.SIDSTE.CEJBEVS = '5'      !                 
+           UDTRÆK_SLUT_2000.EKOMNR = 999)             &                 
+           UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA = 0                          
+       THEN                                                             
+         DO;                                                            
+           UDTRÆK_SLUT_2001.FØRSTE.DOVTG =                              
+                                       UDTRÆK_SLUT_2000.SIDSTE.DOVTG;   
+      /*   PUT SKIP LIST('DOVTG INDSAT F ',UDTRÆK_SLUT_2001.DCPRN); */  
+         END;                                                           
+                                                                        
+                                                                        
+       IF UDTRÆK_SLUT_2001.SIDSTE.DOVTG < 20010101    &                 
+          (UDTRÆK_SLUT_2000.SIDSTE.CEJBEVS = '5'      !                 
+           UDTRÆK_SLUT_2000.EKOMNR = 999)             &                 
+           UDTRÆK_SLUT_2000.SIDSTE.DAFSTAA = 0        &                 
+           UDTRÆK_SLUT_2001.FØRSTE.DOVTG =                              
+                            UDTRÆK_SLUT_2001.SIDSTE.DOVTG               
+       THEN                                                             
+         DO;                                                            
+           UDTRÆK_SLUT_2001.SIDSTE.DOVTG =                              
+                              UDTRÆK_SLUT_2000.SIDSTE.DOVTG;            
+      /*   PUT SKIP LIST('DOVTG INDSAT S ',UDTRÆK_SLUT_2001.DCPRN); */  
+         END;                                                           
+                                                                        
+        /* SKAL DAFSTAA OVERFØRES ? ELLER HVAD ? */                     
+      END; /* IF STATUS = '1' */                                        
+   STATUS = '0';                                                        
+                                                                        
+   WRITE FILE (BH3910O) FROM (UDTRÆK_SLUT_2001);                        
+   ANTSKR_UDLAND_2001 = ANTSKR_UDLAND_2001 + 1;                         
+   ANTSKRIV_IALT = ANTSKRIV_IALT + 1;                                   
+                                                                        
+ END RET_SKRIV_UDL;                                                     
+ /*********************************************************************/
+ AFSLUT_UDLAND: PROC;                                                   
+   CLOSE FILE (BH3910I);                                                
+   CLOSE FILE (BH3911I);                                                
+   CLOSE FILE (BH3910O);                                                
+ END AFSLUT_UDLAND;                                                     
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+         PUT SKIP LIST('PROGRAMMET BH30900 SLUTTER');                   
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE RECORDS DANSKE ...................';  
+         LIN.ANT   = ANTLÆS_DANSKE_2001;                                
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE RECORDS UDLAND ...................';  
+         LIN.ANT   = ANTLÆS_UDLAND_2001;                                
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FEJL FJERNET FRA UDTRÆK 2001 UDLAND......'; 
+         LIN.ANT   = FEJL_UDLAND;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FEJL FJERNET FRA UDTRÆK 2001 DANSKE......'; 
+         LIN.ANT   = FEJL_DANSKE;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE DANSKE...........................'; 
+         LIN.ANT   = ANTSKR_DANSKE_2001;                                
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE UDLANDSKE........................'; 
+         LIN.ANT   = ANTSKR_UDLAND_2001;                                
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT ............................'; 
+         LIN.ANT   = ANTSKRIV_IALT;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END BH30900;                                                           

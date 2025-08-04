@@ -1,0 +1,330 @@
+ BH12000: PROC(COMPTR)  OPTIONS(MAIN,REENTRANT) REORDER;                
+ /**********************************************************************
+ *                                                                     *
+ *     SKELETPROGRAM GENERERET AF ZSRØR                                *
+ *                                                                     *
+ *       EXTERN MODUL-BESKRIVELSE                                      *
+ *                                                                     *
+ *       NAVN          - BH12000                                       *
+ *                                                                     *
+ *       FUNKTION      - UDSØGNING AF DATA TIL EVS-AJOURFØRING         *
+ *                                                                     *
+ *       TRANSKODE     - B990                                          *
+ *                                                                     *
+ *       INDDATA       - COMMAREA FRA ZSRØR                            *
+ *                                                                     *
+ *       UDDATA        - COMMAREA TIL ZSRØR                            *
+ *                                                                     *
+ *       EXTERNE REF.  -                                               *
+ *                                                                     *
+ *       GENERERET AF  - BO PROVSTGAARD SØREN 14.08.01                 *
+ *                                                                     *
+ *       RETTET        -                                               *
+ *                                                                     *
+ **********************************************************************/
+ /**********************************************************************
+ *    COMMAREA.                                                        *
+ **********************************************************************/
+ %INCLUDE ZX23000M;                                                     
+                                                                        
+ /**********************************************************************
+ *    ZSRØR INCLUDES.                                                  *
+ **********************************************************************/
+ %INCLUDE BH12000M;                                                     
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ %INCLUDE ZS37800M;                                                     
+                                                                        
+ /**********************************************************************
+ *    RUTINE TIL UNIQ NAVNGIVNING AF TSKØER                            *
+ **********************************************************************/
+ DCL 1 ZS62002,                                                         
+ %INCLUDE ZS62002N;                                                     
+                                                                        
+ /* Z6BPS INCLUDES BEGYNDER HER */                                      
+ /*********************************************************************/
+ /*      DECLARE AF DB2 - TABEL                                       */
+ /*********************************************************************/
+ EXEC SQL INCLUDE BQ00700T; /* EVS KOPI PERSONTABEL */                  
+ EXEC SQL INCLUDE BQ00600T; /* EVS KOPI EJD TABEL */                    
+ EXEC SQL INCLUDE SQLCA;                                                
+ /* DECLARE AF ØVRIGE */                                                
+ DCL 1 EVSPERSON,                                                       
+  %INCLUDE BQ00200N;;                                                   
+ DCL ANTAL_RK_RETUR   BIN FIXED(15) INIT(0);                            
+ DCL SQL_RETURKODE    BIN FIXED(31);                                    
+ DCL SQL_RETURKODEPIC PIC '9999';                                       
+ DCL CPRNUMERISK      PIC '(10)9';                                      
+ DCL CPRTILDB2        DEC FIXED (11,0);                                 
+ /* SLUT Z6BPS INCLUDES */                                              
+                                                                        
+ /**********************************************************************
+ *    ØVRIGE DECLARES                                                  *
+ **********************************************************************/
+ DCL  TSKØNAVN             CHAR(8);                                     
+ DCL  FLERE_ELEMENTER      BIT(1) INIT('0'B);                           
+ DCL  ANTALELEMENTER       BIN FIXED(15,0)  INIT(0);                    
+ DCL  I                    BIN FIXED(15,0);                             
+ DCL  CICSRC               BIN FIXED(31,0);                             
+ DCL (ADDR,CSTG,NULL,STG,SUBSTR)   BUILTIN;                             
+                                                                        
+ /**********************************************************************
+ *    HOUSE-KEEPING                                                    *
+ **********************************************************************/
+ EXEC CICS HANDLE CONDITION ERROR(ABEND);                               
+                                                                        
+ /**********************************************************************
+ *    HOVEDSTYRING                                                     *
+ **********************************************************************/
+   TSKØNAVN = TILDEL_TSKØNAVN;                                          
+   CALL SLET_TSKØ;                                                      
+   CALL GETMAIN(HJPTR_OUTPUT,STG(OUTPUTELEM));                          
+   IF INPUT.DCPRN='' ! INPUT.EKOMNR=0 ! INPUT.DINDKAAR=0 THEN           
+    DO;                                                                 
+     ZS378TEKST = 'MANGLER INPUTFELTER DCPRN,EKOMNR ELLER DINDKAAR';    
+     CALL ABEND_PROCEDURE;                                              
+     EXEC CICS RETURN;                                                  
+    END;                                                                
+   /* SÅ KØRER VI DERUD AD */                                           
+   CPRNUMERISK = INPUT.DCPRN;                                           
+   CPRTILDB2 = CPRNUMERISK;                                             
+   CALL SKAF_DATA_OG_OPBYG_TSKØ; /* HER LIGGER SQL KALD */              
+   CALL OVERFØR_TIL_ELEMENT;                                            
+   EXEC CICS RETURN;                                                    
+ ABEND:                                                                 
+   CALL ABEND_PROCEDURE;                                                
+   EXEC CICS RETURN;                                                    
+                                                                        
+ /**********************************************************************
+ *    FREMSKAF DATA OG OPBYG TSKØ.                                   *  
+ **********************************************************************/
+ /* PRE: INDKOMSTÅR,KOMMUNENR,CPRNR ER UDFYLDT */                       
+ SKAF_DATA_OG_OPBYG_TSKØ:  PROC;                                        
+  IF INPUT.EEJDNR=0 & INPUT.EGENNR=0 THEN                               
+   DO; /* CURSOR 1 */                                                   
+    CALL DECLARE_CUR1;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR1 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR1;                                                     
+    CALL FETCH_CUR1;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR1;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR1 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR1;                                                    
+   END; /* CURSOR 1 */                                                  
+  ELSE IF INPUT.EGENNR=0 THEN                                           
+   DO; /* CURSOR 2 */                                                   
+    CALL DECLARE_CUR2;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR2 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR2;                                                     
+    CALL FETCH_CUR2;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR2;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR2 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR2;                                                    
+   END; /* CURSOR 2 */                                                  
+  ELSE /* CURSOR 3 */                                                   
+   DO; /* CURSOR 3 */                                                   
+    CALL DECLARE_CUR3;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR3 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR3;                                                     
+    CALL FETCH_CUR3;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR3;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR3 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR3;                                                    
+   END; /* CURSOR 3 */                                                  
+ END SKAF_DATA_OG_OPBYG_TSKØ;                                           
+                                                                        
+ /**********************************************************************
+ *    OVERFØR FREMFUNDNE DATA TIL ELEMENTSTRUKTUREN.                 *  
+ **********************************************************************/
+ OVERFØR_TIL_ELEMENT:  PROC;                                            
+   CALL FREEMAIN(HJPTR_OUTPUT);                                         
+   CAREA.ANTALELEM_UD = 0;                                              
+   CAREA.LÆNGDE_UD = STG(OUTPUT) +                                      
+          (ANTALELEMENTER * STG(OUTPUTELEM));                           
+   CALL GETMAIN(CAREA.OUTPUTPTR,CAREA.LÆNGDE_UD);                       
+   OUTPUT = '';                                                         
+   OUTPUT.SQLKODE=SQL_RETURKODE;                                        
+   OUTPUT.ANTAL=ANTAL_RK_RETUR;                                         
+   OUTPUT.FEJLBESKRIVELSE='';                                           
+     /*****************************************                         
+     * UDFYLD OUTPUT MED DE FREMFUNDNE DATA   *                         
+     * OG F.EKS. RETURKODER ELLER LIGN.       *                         
+     *****************************************/                         
+   HJPTR_OUTPUT = ADDR(OUTPUT.ELEMENTDATA);                             
+   DO I = 1 TO ANTALELEMENTER;                                          
+      CALL LÆS_TSKØ(I);                                                 
+      SELECT(CICSRC);                                                   
+       WHEN(DFHRESP(NORMAL)) DO;                                        
+         CAREA.ANTALELEM_UD = ANTALELEM_UD + 1;                         
+         HJOUT_ADDR = HJOUT_ADDR + STG(OUTPUTELEM);                     
+       END;                                                             
+       OTHER;  /* INDSÆT FEJLKODE HER */                                
+      END;                                                              
+   END;                                                                 
+   CALL SLET_TSKØ;                                                      
+ END OVERFØR_TIL_ELEMENT;                                               
+                                                                        
+ /**********************************************************************
+ *    SKRIV FUNDNE OPLYSNINGER PÅ TSKØ.                              *  
+ **********************************************************************/
+ SKRIV_TSKØ:  PROC;                                                     
+   EXEC CICS WRITEQ TS QUEUE(TSKØNAVN)                                  
+                       FROM(OUTPUTELEM)                                 
+                       RESP(CICSRC);                                    
+   ANTALELEMENTER = ANTALELEMENTER + 1;                                 
+ END SKRIV_TSKØ;                                                        
+                                                                        
+ /**********************************************************************
+ *    LÆS FUNDNE OPLYSNINGER FRA TSKØ.                               *  
+ **********************************************************************/
+ LÆS_TSKØ:  PROC(ITEMNO);                                               
+ DCL  ITEMNO               BIN FIXED(15,0);                             
+                                                                        
+   EXEC CICS READQ TS QUEUE(TSKØNAVN)                                   
+                      ITEM(ITEMNO)                                      
+                      INTO(OUTPUTELEM)                                  
+                      RESP(CICSRC);                                     
+ END LÆS_TSKØ;                                                          
+                                                                        
+ /**********************************************************************
+ *    SLET TSKØ MED DE FUNDNE OPLYSNINGER.                           *  
+ **********************************************************************/
+ SLET_TSKØ:  PROC;                                                      
+   EXEC CICS DELETEQ TS QUEUE(TSKØNAVN)                                 
+                        NOHANDLE;                                       
+ END SLET_TSKØ;                                                         
+                                                                        
+ /**********************************************************************
+ *    TILDEL TSKØNAVN - RETURNERE KØNAVN.                              *
+ **********************************************************************/
+ TILDEL_TSKØNAVN:   PROC          RETURNS(CHAR(8));                     
+   ZS62002                = '';                                         
+   ZS62002.FUNKTION       = '0';                                        
+   ZS62002.IDENTIFIKATION = 'BH12000' !! '1' !! EIBTRNID;               
+   EXEC CICS LINK PROGRAM('ZS62002')                                    
+                  COMMAREA(ZS62002)                                     
+                  RESP(CICSRC);                                         
+                                                                        
+   RETURN(ZS62002.TSQNAVN);                                             
+ END TILDEL_TSKØNAVN;                                                   
+                                                                        
+ /**********************************************************************
+ *    ABEND PÅ EN PÆN MÅDE                                             *
+ **********************************************************************/
+ ABEND_PROCEDURE:  PROC;                                                
+   ZS378FUNK  = '04';         /* AFSLUT, COMMAREA SLETTES     */        
+   ZS378TYPE  = 'CICS';                                                 
+   ZS378MODUL = 'BH12000';                                              
+   %INCLUDE ZS37802M;                                                   
+ END ABEND_PROCEDURE;                                                   
+ /**********************************************************************
+ *    SQL INCLUDES                                                     *
+ **********************************************************************/
+ %INCLUDE BH12010M; /* CURSOR 1 */                                      
+ %INCLUDE BH12011M; /* CURSOR 2 */                                      
+ %INCLUDE BH12012M; /* CURSOR 3 */                                      
+ /*********************************************************************/
+ /*       FLYT FREMFUNDEN RÆKKE TIL OUTPUT STRUKTUR                   */
+ /*********************************************************************/
+ FLYT_DATA: PROC;                                                       
+  /* FLYT RÆKKEDATA OVER I OUTPUTELEMENT */                             
+  /* ANVENDES AF ALLE TRE CURSORER */                                   
+  OUTPUTELEM.DCPRN         =INPUT.DCPRN;                                
+  OUTPUTELEM.DINDKAAR      =EVSPERSON.DINDKAAR;                         
+  OUTPUTELEM.EKOMNR        =EVSPERSON.EKOMNR;                           
+  OUTPUTELEM.EEJDNR        =EVSPERSON.EEJDNR;                           
+  OUTPUTELEM.ELBNR         =EVSPERSON.ELBNR;                            
+  OUTPUTELEM.EGENNR        =EVSPERSON.EGENNR;                           
+ END FLYT_DATA;                                                         
+                                                                        
+ %INCLUDE ZX23000G         /* GETMAIN RUTINE     */;                    
+ %INCLUDE ZX23000F         /* FREEMAIN RUTINE     */;                   
+ END BH12000;                                                           

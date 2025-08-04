@@ -1,0 +1,527 @@
+ PROCESS OPT(TIME);                                                     
+ BH94800:/* Dannelse af dataset med samtlige ejendomme for personer   */
+         /* med CENKE 5 tidligere udtrukket i BH94700                 */
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA A/S 2004');       
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : Indlæs behandlet ESR udtræk (fra BH94300)                 * 
+ *          Indlæs udtrukne personer med CENKE 5 (fra BH94700)        * 
+ *          Overfør record fra BH94300, hvis personen findes på       * 
+ *          dataset dannet i BH94700, opdateret med 5. Dog opdateres  * 
+ *          kun hvis ejerskabet IKKE er slettet (COPR_CENKE)          * 
+ *          Samtidig sættes oprindelseskode til 'S'                   * 
+ *          Alle øvrige records overføres uden ændring.               * 
+ *          Oprettet som en del af KS30-01 til Forskud 2017           * 
+ *          Programmet skal anvendes både til Slut og Forskuds        * 
+ *          oprettelsen af EVS.                                       * 
+ ********************************************************************** 
+ *                                                                    * 
+ * INPUT  : B.H94300D  Beregningsbånd opdateret med diverse koder.    * 
+ *          B.H94700D  Personer med cenke 5                           * 
+ *                                                                    * 
+ * OUTPUT : B.H94810D  Behandlet beregningsbånd opdateret med 5       * 
+ *                     i CENKE for samtlige af personens ejendomme    * 
+ *                     som er sommerhuse                              * 
+ * OUTPUT : B.H94820D  Behandlet beregningsbånd opdateret med 5       * 
+ *                     i CENKE for samtlige af personens ejendomme    * 
+ *                     som ikke er sommerhuse                         * 
+ ********************************************************************** 
+ *                                                                    * 
+ * NYT PROGRAM : Lene Maj Jensen QLE                      29.06.2016  * 
+ *                                                                    * 
+ ********************************************************************** 
+ *                                                                    * 
+ * RETTELSESLOG:                                                      * 
+ * Esben Brodersen      QEB                               06.07.2016  * 
+ * CPTYPSLUT og CPTYPFOR skal rettes når CENKE ændres, så de er       * 
+ * hænger sammen. Der opdeles i sommerhuse og øvrige ejendomme ved    * 
+ * ved skrivning. Ændret BH944 -> BH943 da programmet er flyttet      * 
+ * indsat optællings individ da det er forventet i BH94200L           * 
+ * indsat print liste                                                 * 
+ *                                                                    * 
+ * Lene Maj Jensen      QLE                               21.09.2016  * 
+ * Struktur BN90100N ændret til BN90000N til SLUT16                   * 
+ * Søg efter 'RUL' da rettelsen ligger flere steder                   * 
+ * Esben Brodersen      QEB                               05.06.2017  * 
+ * Struktur BN90000N ændret til BN90100N til Forskud 2018             * 
+ * Søg efter 'RUL' da rettelsen ligger flere steder                   * 
+ * Esben Brodersen     QEB                                04.10.2017  * 
+ * Struktur BN90100N ændret til BN90000N til SLUT17                   * 
+ * Søg efter 'RUL' da rettelsen ligger flere steder                   * 
+ *                                                                    * 
+ * Navn:                Init:                             Dato:       * 
+ * xxxxxxxxxxxxxx       xxx                               99.99.9999  * 
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH943I FILE RECORD INPUT;        /*BEREGNINGSBÅND           */ 
+ DCL     BH947I FILE RECORD INPUT;        /*PERSONER MED CENKE LIG 5 */ 
+ DCL     BH9481O FILE RECORD OUTPUT;      /*SOMMERHUSE/FRITIDSBOLIG  */ 
+ DCL     BH9482O FILE RECORD OUTPUT;      /*ØVRIGE EJERSKABER        */ 
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+ DCL     BH943_AR        CHAR      (6000) VAR;                          
+ DCL     1 BH943         BASED     (ADDR(BH943_AR)),                    
+           2 LÆNGDE      BIN FIXED (15),                                
+   /*        %INCLUDE BH90100N;;  /* Til EVS Forskud */                 
+             %INCLUDE BH90000N;;   /*  Til EVS slut */   /* 'RUL */     
+                                                                        
+                                                                        
+                                                                        
+ DCL     BH947_AR        CHAR      (6000) VAR;                          
+ DCL     1 BH947         BASED     (ADDR(BH947_AR)),                    
+           2 LÆNGDE      BIN FIXED (15),                                
+  /*        %INCLUDE BH90100N;; /*    Til EVS Forskud */                
+            %INCLUDE BH90000N;;  /* Til EVS slut */       /* 'RUL' */   
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF OPTÆLNINGS INDIVID PÅ BEREGNINGSBÅND              * 
+ *********************************************************************/ 
+ DCL     1 BH94399,                       /* BEREGNINGSBÅND         */  
+           %INCLUDE BH90099N;             /* OPTÆLLINGSINDIVID      */  
+ /********************************************************************* 
+ *               DECLARE AF DIV. FÆLLESMACROER (ESKEMA/BOY/FORSKUD)   * 
+ *********************************************************************/ 
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE TIL LISTE PRINT                                      */
+ /*********************************************************************/
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ DCL    1 LINIE,                                                        
+          2 CCA          CHAR      (01),                                
+          2 INDHOLD      CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL    HJ_PIC9          PIC       '(8)Z9';                             
+ DCL    UDDATO          CHAR       (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (4),                                 
+           2 F1          CHAR      (1),                                 
+           2 MD          CHAR      (2),                                 
+           2 F2          CHAR      (1),                                 
+           2 DG          CHAR      (2);                                 
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     SPEC_PUTSKIP        BIT       (1)     INIT('0'B);              
+ DCL     EOF_BH943           BIT       (1);                             
+ DCL     EOF_BH947           BIT       (1);                             
+ DCL     ANTAL_LÆST_BH943    BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_LÆST_BH947    BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_SKREVET       BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_OPDATERET     BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_EJ_OPDATERET  BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_SOMMERHUSE    BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_ØVRIGE        BIN FIXED (31)    INIT(0);                 
+ DCL     GEMCPRNR            FIXED     (11);   /* Personnr            */
+ DCL     JA                  BIT       (1)     INIT ('1'B);             
+ DCL     NEJ                 BIT       (1)     INIT ('0'B);             
+ DCL     HJBEGRÆNSET_TP      CHAR      (1);                             
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /*TIMESTAMP    */ 
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS30101         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BH943 = '0'B;                                              
+         EOF_BH947 = '0'B;                                              
+         ON ERROR                                                       
+            CALL PLIDUMP ('SNHOB');                                     
+                                                                        
+         OPEN FILE (BH943I) TITLE ('BH94301I');                         
+         OPEN FILE (BH947I) TITLE ('BH94700I');                         
+         OPEN FILE (BH9481O) TITLE ('BH94810O');                        
+         OPEN FILE (BH9482O) TITLE ('BH94820O');                        
+         CALL ZZ20390 ('*OPEN','BH94801Y');                             
+                                                                        
+         ON ENDFILE (BH943I)                                            
+            EOF_BH943 = '1'B;                                           
+         ON ENDFILE (BH947I)                                            
+            EOF_BH947 = '1'B;                                           
+                                                                        
+         CALL ZS38100(DATO1);                 /* Skaf timestamp */      
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_BH947;                                                
+         CALL LÆS_BH943;                                                
+                                                                        
+         DO WHILE ( ^EOF_BH943 );                                       
+            IF ^EOF_BH947                                               
+            THEN                                                        
+              DO;                                                       
+                IF BH943.SORT_CPR = BH947.SORT_CPR                      
+                THEN                                                    
+                  DO;                                                   
+                    IF SPEC_PUTSKIP                                     
+                    THEN DO;                                            
+                       PUT SKIP LIST ('cpr skal checkes: ' !!           
+                                       BH943.SORT_CPR);                 
+                       PUT SKIP LIST ('EVS_SLUT_EJER.SIDSTE.CSLET: ' !! 
+                                   BH943.EVS_SLUT_EJER.SIDSTE.CSLET);   
+                       PUT SKIP LIST ('BH943.TIL_EVS.CENKE: ' !!        
+                                   BH943.TIL_EVS.CENKE);                
+                       PUT SKIP LIST ('BH943.SORT_KOMNR: ' !!           
+                                   BH943.SORT_KOMNR);                   
+                       PUT SKIP LIST ('EVS_SLUT_EJER.SIDSTE.CSLET: ' !! 
+                                   BH943.EVS_SLUT_EJER.SIDSTE.CSLET);   
+                       PUT SKIP LIST ('EVS_SLUT_EJER.SIDSTE.CSLET: ' !! 
+                                   BH943.EVS_SLUT_EJER.SIDSTE.CSLET);   
+                    END;                                                
+                    IF BH943.EVS_SLUT_EJER.SIDSTE.CSLET < '1' &         
+                       BH943.TIL_EVS.CENKE ^= '5'                       
+                    /* ejendom/ejerskab er IKKE slettet      */         
+                    /* og CENKE er ikke allerede opsat til 5 */         
+                    THEN                                                
+                      DO;                                               
+                        /* opdater og skriv, læs næste 944 */           
+                        BH943.TIL_EVS.CENKE = '5';                      
+                        IF FIND_KØRSELSTYPE(0) = 'EVSSLUT'              
+                        THEN                                            
+                          DO;                                           
+                            BH943.TIL_FORSKUD.COPR_CENKE = 'S';         
+                          END;                                          
+                        ELSE                                            
+                          DO;                                           
+                            BH943.TIL_FORSKUD.COPR_CENKE = 'F';         
+                          END;                                          
+                        ANTAL_OPDATERET = ANTAL_OPDATERET + 1;          
+                        /* Justering af persontype felt 756/758  */     
+                        /* Svarer til ALDERSRET_SLUT=JA i BH94300L*/    
+                        IF ER_BEGRÆNSET_SKATTEPLIGTIG                   
+                        THEN                                            
+                          DO;                                           
+                            IF BH943.SORT_KOMNR = 999                   
+                            THEN                                        
+                              DO;                                       
+                                IF HJBEGRÆNSET_TP = '1' !               
+                                   HJBEGRÆNSET_TP = '3'                 
+                                THEN                                    
+                                  DO;                                   
+                                    BH943.TIL_EVS.CPTYPSLUT = '1';      
+                                    BH943.TIL_EVS.CPTYPFOR = '1';       
+                                  END;                                  
+                                ELSE  /* type 8 - domicileret */        
+                                  DO;                                   
+                                    BH943.TIL_EVS.CPTYPSLUT = '4';      
+                                    BH943.TIL_EVS.CPTYPFOR = '4';       
+                                  END;                                  
+                              END;                                      
+                            ELSE                                        
+                              DO;                                       
+                                BH943.TIL_EVS.CPTYPSLUT = '4';          
+                                BH943.TIL_EVS.CPTYPFOR  = '4';          
+                              END;                                      
+                          END;                                          
+                        ELSE                                            
+                          DO;                                           
+                            BH943.TIL_EVS.CPTYPSLUT = '3';              
+                            BH943.TIL_EVS.CPTYPFOR  = '3';              
+                          END;                                          
+                        IF SPEC_PUTSKIP                                 
+                        THEN DO;                                        
+                           PUT SKIP LIST ('948 skrives udfra 944');     
+                        END;                                            
+                        CALL SKRIV; /* 948 udfra 944 */                 
+                        CALL LÆS_BH943;                                 
+                      END;                                              
+                    ELSE                                                
+                      DO;  /* ejendommen er slettet, så der overføres */
+                           /* uden opdatering eller CENKE er allerede */
+                           /* sat til 5 */                              
+                        ANTAL_EJ_OPDATERET = ANTAL_EJ_OPDATERET + 1;    
+                        IF SPEC_PUTSKIP                                 
+                        THEN DO;                                        
+                           PUT SKIP LIST ('948 skrives udfra 943' !!    
+                                          ' uden opdat');               
+                        END;                                            
+                        CALL SKRIV; /* 948 udfra 943 */                 
+                        CALL LÆS_BH943;                                 
+                      END;                                              
+                  END;                                                  
+                ELSE                                                    
+                  DO;                                                   
+                    IF BH943.SORT_CPR < BH947.SORT_CPR                  
+                    THEN                                                
+                      DO; /* skriv udfra 943 uden opdat, og læs næste */
+                        IF SPEC_PUTSKIP                                 
+                        THEN DO;                                        
+                           PUT SKIP LIST ('943 skrives uden opdat');    
+                        END;                                            
+                        CALL SKRIV;                                     
+                        CALL LÆS_BH943;                                 
+                      END;                                              
+                    ELSE                                                
+                      DO; /* næste 947 læses */                         
+                        CALL LÆS_BH947;                                 
+                      END;                                              
+                  END;                                                  
+              END;                                                      
+            ELSE                                                        
+              DO; /* der er ikke flere 947, skriv resten af 943 */      
+                IF SPEC_PUTSKIP                                         
+                THEN DO;                                                
+                   PUT SKIP LIST ('rest 943 skrives uden opdat');       
+                END;                                                    
+                CALL SKRIV;                                             
+                CALL LÆS_BH943;                                         
+              END;                                                      
+                                                                        
+                                                                        
+         END; /* end-do while */                                        
+                                                                        
+         /* sørg for et slut cpr på filen check med BH94300 fil*/       
+         CALL SKRIV_OPTÆLLING;                                          
+                                                                        
+     /*  BH943.SORT_CPR = 99999999999;                                  
+         CALL SKRIV; */                                                 
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       Læs beregningsbånd fra BH94300L                              * 
+ *********************************************************************/ 
+ LÆS_BH943:PROC;                                                        
+                                                                        
+         READ FILE (BH943I) INTO (BH943_AR);                            
+                                                                        
+         IF SPEC_PUTSKIP                                                
+         THEN DO;                                                       
+            PUT SKIP LIST ('Indlæst fra 943: ' !! BH943.SORT_CPR);      
+         END;                                                           
+                                                                        
+         IF BH943.SORT_CPR = 99999999999     /* OPTÆLLINGSINDIVID */    
+         THEN                                                           
+            DO;                                                         
+               EOF_BH943 = '1'B;                                        
+            END;                                                        
+                                                                        
+         ANTAL_LÆST_BH943 = ANTAL_LÆST_BH943 + 1;                       
+                                                                        
+         /* Check om det er forskud eller slut efter 1.læs */           
+         IF ANTAL_LÆST_BH943 = 1                                        
+         THEN                                                           
+           DO;                                                          
+             CALL FIND_KØRSELSTYPE(LENGTH(BH943_AR));                   
+           END;                                                         
+                                                                        
+ END LÆS_BH943;                                                         
+                                                                        
+ /********************************************************************* 
+ *       Læs personer udtrukket i BH94700                             * 
+ *       indeholdende kun personer med cenke=5                        * 
+ *********************************************************************/ 
+ LÆS_BH947:PROC;                                                        
+                                                                        
+         READ FILE (BH947I) INTO (BH947_AR);                            
+                                                                        
+         IF SPEC_PUTSKIP                                                
+         THEN DO;                                                       
+            PUT SKIP LIST ('Indlæst fra 947: ' !! BH947.SORT_CPR);      
+         END;                                                           
+                                                                        
+         ANTAL_LÆST_BH947 = ANTAL_LÆST_BH947 + 1;                       
+                                                                        
+ END LÆS_BH947;                                                         
+ /********************************************************************* 
+ * HER SKRIVES PERSONEN PÅ DATASÆT MED SOMMERHUSE HVIS BENYT-         * 
+ * TELSESKODEN ER 08,28,48 ELLERS  PÅ DATASÆT MED ØVRIGE EJENDOMME.   * 
+ *********************************************************************/ 
+ SKRIV:PROC;                                                            
+                                                                        
+                                                                        
+                                                                        
+         ANTAL_SKREVET = ANTAL_SKREVET + 1;                             
+                                                                        
+      /*  put skip list ('record ' !! k !! ': cprnr: ' !!               
+                           BH943.SORT_CPR !!                            
+                           ' CENKE = ' !!                               
+                           BH943.TIL_EVS.CENKE !!                       
+                           ' COPR_CENKE = ' !!                          
+                           BH943.TIL_FORSKUD.COPR_CENKE);*/             
+                                                                        
+                                                                        
+         IF BH943.AKT_VURD.CBENYT = '08' !                              
+            BH943.AKT_VURD.CBENYT = '28' !                              
+            BH943.AKT_VURD.CBENYT = '48' !                              
+           (BH943.AKT_VURD.CBENYT = '25' &                              
+            BH943.VURD_AKT.CEJDTYPE_AKT = '8' & /* ÆNDRET PGA CEANV*/   
+           (BH943.ESR.CEANV = '510' !                                   
+            BH943.ESR.CEANV = '520' !                                   
+            BH943.ESR.CEANV = '521' !                                   
+            BH943.ESR.CEANV = '522'))                                   
+         THEN                                                           
+            DO;                                                         
+               WRITE FILE (BH9481O) FROM (BH943_AR);                    
+               ANTAL_SOMMERHUSE = ANTAL_SOMMERHUSE + 1;                 
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               ANTAL_ØVRIGE = ANTAL_ØVRIGE + 1;                         
+               WRITE FILE (BH9482O) FROM (BH943_AR);                    
+            END;                                                        
+                                                                        
+ END SKRIV;                                                             
+ /********************************************************************* 
+ *       SKRIVNING AF OPTÆLLINGSINDIVID                               * 
+ *********************************************************************/ 
+ SKRIV_OPTÆLLING: PROC;                                                 
+                                                                        
+         BH94399            = '';                                       
+         BH94399.SORT_CPR   = 99999999999;                              
+         BH94399.SORT_KOMNR = 999;                                      
+         BH94399.SORT_EJDNR = 9999999;                                  
+                                                                        
+         BH94399.ANT_INDV   = ANTAL_SOMMERHUSE;                         
+         WRITE FILE (BH9481O) FROM (BH94399);                           
+                                                                        
+         BH94399.ANT_INDV   = ANTAL_ØVRIGE;                             
+         WRITE FILE (BH9482O) FROM (BH94399);                           
+                                                                        
+ END SKRIV_OPTÆLLING;                                                   
+ /********************************************************************/ 
+ /* UNDERSØG OM EN BORGER ER BEGRÆNSET SKATTEPLIGTIG. FINDES MT DATA */ 
+ /* ANVENDES DE ELLERS UNDERSØGES SIDSTE EVS SLUT ÅR                 */ 
+ /********************************************************************/ 
+ ER_BEGRÆNSET_SKATTEPLIGTIG:PROC RETURNS(BIT(1));                       
+                                                                        
+   DCL HJBEGRÆNSET_BIT BIT(1);                                          
+                                                                        
+   HJBEGRÆNSET_BIT = NEJ;                                               
+   HJBEGRÆNSET_TP = '0';                                                
+                                                                        
+   IF BH943.MT.DCPRN > 0 &                                              
+      BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM >= '0'                          
+   THEN                                                                 
+     DO;                                                                
+       IF BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM = '1' !                     
+          BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM = '3' !                     
+          BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM = '8'                       
+       THEN                                                             
+         DO;                                                            
+           HJBEGRÆNSET_BIT = JA;                                        
+           HJBEGRÆNSET_TP = BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM;          
+         END;                                                           
+     END;                                                               
+   ELSE                                                                 
+     DO;                                                                
+       IF BH943.EVS_UDTRÆK.EVS_SLUT_EJER.SIDSTE.CSKPLOMF = '1' !        
+          BH943.EVS_UDTRÆK.EVS_SLUT_EJER.SIDSTE.CSKPLOMF = '3' !        
+          BH943.EVS_UDTRÆK.EVS_SLUT_EJER.SIDSTE.CSKPLOMF = '8'          
+       THEN                                                             
+         DO;                                                            
+           HJBEGRÆNSET_BIT = JA;                                        
+           HJBEGRÆNSET_TP = BH943.MT.HIST_OPL(SLUTÅR).CSKPLOM;          
+         END;                                                           
+     END;                                                               
+                                                                        
+   RETURN(HJBEGRÆNSET_BIT);                                             
+                                                                        
+                                                                        
+ END ER_BEGRÆNSET_SKATTEPLIGTIG;                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:PROC;                                                           
+                                                                        
+      /*sideskift*/                                                     
+      LINIE.CCA     = ZZIK1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*overskrift*/                                                    
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'KØRSELS TOTALER FOR BH94800 AFVIKLET DEN ' !!    
+                      UDDATO;                                           
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*mellemrum*/                                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*alm linie*/                                                     
+      HJ_PIC9       = ANTAL_LÆST_BH943;                                 
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL LÆSTE RECORDS FRA BH94300:     ' !!        
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_LÆST_BH947;                                 
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL LÆSTE RECORDS FRA BH94700:     ' !!        
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_OPDATERET;                                  
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL OPDATERET RECORDS FRA BH94300: ' !!        
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_EJ_OPDATERET;                               
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL EJ OPDATERET RECORDS FRA ' !!              
+                      'BH94300: ' !! HJ_PIC9;                           
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*mellemrum*/                                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_SKREVET;                                    
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL SKREVET IALT(UDEN OPTÆLLINGS INDIVID): ' !!
+                      '             '  !!                               
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_SOMMERHUSE;                                 
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL EJERFORHOLD PÅ SOMMERHUS SKREVET TIL ' !!  
+                      'BH94810D:      ' !! HJ_PIC9;                     
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_ØVRIGE;                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL EJERFORHOLD IKKE PÅ SOMMERHUS SKREVET ' !! 
+                      'TIL BH94820D: ' !! HJ_PIC9;                      
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      CALL ZZ20300(' ','99'); /*luk print datasæt*/                     
+                                                                        
+      CLOSE FILE (BH943I),                                              
+            FILE (BH947I),                                              
+            FILE (BH9481O),                                             
+            FILE (BH9482O);                                             
+                                                                        
+ END AFSLUT;                                                            
+ %INCLUDE BH94201M;     /* FIND OM DET ER FORSKUD ELLER EVSSLUT   */    
+ END  BH94800;                                                          

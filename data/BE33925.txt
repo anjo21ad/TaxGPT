@@ -1,0 +1,2493 @@
+ BE33925: PROCEDURE OPTIONS (MAIN);                                     
+ /********************************************************************/ 
+ /* Projekt:     EVS Forskud / EVS Slut                              */ 
+ /* Programnavn: BE33925                                             */ 
+ /* Programtype: Batch                                               */ 
+ /* Funktion:    Forbrænder program, som dubler ejerforhold          */ 
+ /*              for 2-familiehuse (kun ejendomstype 4)              */ 
+ /*              så der altid er findes ejerforhold med              */ 
+ /*              enhedsløbnr 1 og 2 for hver ejer når der tale       */ 
+ /*              ejerskab af ejendom med ejendomstype lig  4.        */ 
+ /*                                                                  */ 
+ /*                                                                  */ 
+ /*                                                                  */ 
+ /*              Feltet TEKFEJLNR udfyldes med følgende fejlnumre:   */ 
+ /*                                                                  */ 
+ /*                 Hvad med nedtaget fejlnummer                     */ 
+ /*                                                                  */ 
+ /*                                                                  */ 
+ /*                 3902 - Ejer procenter kan ikke bestemmes udfra   */ 
+ /*                        data fra VURD kan eventuelt bestemmes     */ 
+ /*                        udfra EVS udtræk.                         */ 
+ /*                                                                  */ 
+ /*                 3999 - ENHEDSLBNR ER SAT TIL 1                   */ 
+ /*                                                                  */ 
+ /*                 9999 - Oprettet dublet af ejerforhold med        */ 
+ /*                        oplysning fra anden boligfordeling        */ 
+ /*                                                                  */ 
+ /*              BE339I   - Parameter fil - Find EVS Kørsel type     */ 
+ /*                                                                  */ 
+ /* Output:      BE339O   - Indhold lig BE338I                       */ 
+ /*                         med ekstra records og justeret           */ 
+ /*                         ejerprocent(GANE) som bestemt            */ 
+ /* Ændering til KS02-23:                                            */ 
+ /* Ejerprocent GANE skal nulstilles når den ikke kan bestemmes      */ 
+ /*                                                                  */ 
+ /*------------------------------------------------------------------*/ 
+ /* OPRETTET TIL EVS SLUT 2018                                       */ 
+ /* Esben Brodersen  2018.10.25                                      */ 
+ /* Rettelse #02: Edward Laryea, EDL                     22-03-2019  */ 
+ /*               Nyt felt STRAKS_EVS i BE33700N                     */ 
+ /* Rettelse #03: Edward Laryea, EDL                     27-03-2019  */ 
+ /*               Behandling af feltet STRAKS_EVS                    */ 
+ /* Rettelse #04: Esben Brodersen, EBD                   16-12-2019  */ 
+ /*               MATCH_ENHED opsættes for hver periode              */ 
+ /*               defect 108 gav forkert ejerprocent GANE            */ 
+ /*               fordi der blev antaget match henover perioder      */ 
+ /*               match opsættes nu for hver periode                 */ 
+ /* Forskud2021   Per Brunk                              mar 2020    */ 
+ /*               Nye felter i BE33700N VURMARK og VUR2001           */ 
+ /* D245          Opsætning af vejnavn ved insert på BE80200T        */ 
+ /* Slut 2020   : Per Brunk PBR Ny struktur BE33700N   Okt 2020      */ 
+ /* SLut 2020   : Per Brunk KS2-45                     Nov 2020      */ 
+ /* Forskud2024 : Per Brunk                                22-02-2021*/ 
+ /*               CBENYT '1 ' behandles som '01'                     */ 
+ /* Slut 2020   : Elena Flygenring EFL                 marts 2021    */ 
+ /*             - ny kopi af BE33900                                 */ 
+ /*             - struktur BE55300M erstattes med BE55300M           */ 
+ /*             - Brug af FILE BE339I og BE339_PARM fjernes          */ 
+ /*             - BE339_PARM.FS_MARK fjernes                         */ 
+ /*             - BE339_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes*/ 
+ /*               Erstattes med brug af BE55300M.AFVIKLINGS_ID       */ 
+ /* Ole Nielsen ONE:   D1177                               Juni 2023 */ 
+ /*                  Adresser mangler på enheder i tofamilieshus     */ 
+ /*                  Vejnavn findes nu i vejregisteret               */ 
+ /*                  Fil fra vejregisteret læses ind på BQ80500T     */ 
+ /* Ole Nielsen ONE:   D1177                               Sept 2023 */ 
+ /*                  Tilføjet tællere til find vejnavn               */ 
+ /* EBD                                                   Januar 2024*/ 
+ /* Kopieret      Forskud 2024 version til 2025 og årsrullet         */ 
+ /* Forskud2025 BE55600M erstatter BE55300M            JJJ Juni 2024 */ 
+ /* Forskud 2025  KS15 (defect 1014)                  PBR 01.07.2024 */ 
+ /********************************************************************/ 
+                                                                        
+ DCL   COPYRIGHT       CHAR(30)       INIT ('(C) KMD A/S 2018');        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT KALD AF EKSTERNE MODULER */ 
+                                                                        
+ /********************************************************************/ 
+ /* Builtin functions                                                */ 
+ /********************************************************************/ 
+ DCL   ADDR            BUILTIN;                                         
+ DCL   NULL            BUILTIN;                                         
+ DCL   PLIDUMP         BUILTIN;                                         
+                                                                        
+ DCL   SYSPRINT        FILE;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ABEND-RUTINE                                      */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED     (2) INIT(5);                           
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE33925'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ EXEC SQL INCLUDE SQLCA;              /* SQL kommunikationsareal      */
+ EXEC SQL INCLUDE BE80200T;           /* EVS-enhedsløbenummertabel    */
+ EXEC SQL INCLUDE BQ80500T;           /* VEJNAVN vejregister          */
+ EXEC SQL INCLUDE BE70000T;           /* AKTUEL CSRP DATA             */
+ EXEC SQL INCLUDE BE71000T;           /* HISTORIK CSRP DATA           */
+                                                                        
+ DCL   BE338I          FILE RECORD INPUT;                               
+ DCL   BE339O          FILE RECORD OUTPUT;                              
+ DCL   BE3391O         FILE RECORD OUTPUT;                              
+                                                                        
+ DCL   BE338_AREA      CHAR(2000) VAR;                                  
+                                                                        
+ DCL 1 BE338           BASED(ADDR(BE338_AREA)),                         
+       4 BE338_LENGTH  BIN FIXED(15),                                   
+       %INCLUDE BE33700N;                                               
+                                                                        
+ DCL 1 BE339,                                                           
+       %INCLUDE BE33700N;                                               
+                                                                        
+ DCL     TEST_PUT               BIT(1)   INIT ('0'B);                   
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     AFVIKL_ID_CSRP         CHAR(16) INIT('');                      
+                                                                        
+ DCL     WS_TIL_EVS_AAR         BIN FIXED (15);                         
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL      BIN FIXED (15);                         
+ DCL     WS_SLUT_AFVIKLINGS_ID  CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE33925');              
+                                                                        
+ DCL     1 TABEL_2FAMIL(001:200),                                       
+             4 AKT_CSRP_MATCH         BIT(1),                           
+             4 HIST_CSRP_MATCH        BIT(1),                           
+             4 BESTEMT_GANE           DEC FIXED(5,0),                   
+             4 DUBLET                 BIT(1),                           
+             4 PERIODE(1:3),                                            
+               6 ER_EJER              BIT(1),                           
+               6 MATCH_ENHED          BIT(1),     /*#04*/               
+                                                                        
+             %INCLUDE BE33700N;                                         
+                                                                        
+ DCL  SUM_GANE_ENHED1 DEC FIXED(9) INIT(0);/*sum ejerprocent på enhed1*/
+ DCL  SUM_GANE_ENHED2 DEC FIXED(9) INIT(0);/*sum ejerprocent på enhed2*/
+                                                                        
+ DCL  GEM_DCPRN    DEC FIXED(11,0) INIT(0);                             
+ DCL  GEM_EKOMNR   BIN FIXED(15)   INIT(0);                             
+ DCL  GEM_EEJDNR   BIN FIXED(31)   INIT(0);                             
+                                                                        
+ /* Hvis der har været køb/salg vi lder være flere perioder*/           
+ DCL  PERIODE1_START DEC FIXED(9)  INIT(0);                             
+ DCL  PERIODE1_SLUT  DEC FIXED(9)  INIT(0);                             
+ DCL  PERIODE2_START DEC FIXED(9)  INIT(0);                             
+ DCL  PERIODE2_SLUT  DEC FIXED(9)  INIT(0);                             
+ DCL  PERIODE3_START DEC FIXED(9)  INIT(0);                             
+ DCL  PERIODE3_SLUT  DEC FIXED(9)  INIT(0);                             
+                                                                        
+ /* Der behandles op til 3 perioder ved flere opsættes fejlnummer */    
+ DCL  ANTAL_PERIODER BIN FIXED(15);                                     
+                                                                        
+ /* optælling på teknisk fejlnummer  */                                 
+ DCL ANTAL_TEKFEJLNR_3700 BIN FIXED(31)  INIT(0);                       
+ DCL ANTAL_TEKFEJLNR_3701 BIN FIXED(31)  INIT(0);                       
+ DCL ANTAL_TEKFEJLNR_3800 BIN FIXED(31)  INIT(0);                       
+ DCL ANTAL_TEKFEJLNR_3902 BIN FIXED(31)  INIT(0);                       
+ DCL ANTAL_TEKFEJLNR_9998 BIN FIXED(31)  INIT(0);                       
+ DCL ANTAL_TEKFEJLNR_9999 BIN FIXED(31)  INIT(0);                       
+                                                                        
+                                                                        
+ DCL  LOG_BEHANDLING      CHAR(4000) VAR;                               
+                                                                        
+                                                                        
+                                                                        
+ DCL  GEM_DOVTG1     DEC FIXED(9)  INIT(0);                             
+ DCL  GEM_DOVTG2     DEC FIXED(9)  INIT(0);                             
+ DCL  GEM_DOVTG3     DEC FIXED(9)  INIT(0);                             
+                                                                        
+ DCL  GEM_DAFSTÅ1    DEC FIXED(9)  INIT(0);                             
+ DCL  GEM_DAFSTÅ2    DEC FIXED(9)  INIT(0);                             
+ DCL  GEM_DAFSTÅ3    DEC FIXED(9)  INIT(0);                             
+                                                                        
+ DCL  HJDOVTG        DEC FIXED(9)  INIT(0);                             
+ DCL  HJDAFSTÅ       DEC FIXED(9)  INIT(0);                             
+                                                                        
+ DCL  IX           BIN FIXED(15)  INIT(0);                              
+ DCL  ANT_IX       BIN FIXED(15)  INIT(0);                              
+ DCL  EN_EJER      BIT(1)         INIT ('0'B);                          
+                                                                        
+ DCL  MIN_ET_MATCH_ENHED1         BIT(1)  INIT ('0'B);                  
+ DCL  MIN_ET_MATCH_ENHED2         BIT(1)  INIT ('0'B);                  
+ DCL  MIN_EN_EJER_IKKE_HENFØRT    BIT(1)  INIT ('0'B);                  
+ DCL  EJER_ER_HENFØRT             BIT(1)  INIT ('0'B);                  
+                                                                        
+ DCL  JA             BIT(01)        INIT('1'B);                         
+ DCL  NEJ            BIT(01)        INIT('0'B);                         
+ DCL  EOF_BE338I     BIT(01)        INIT('0'B);                         
+                                                                        
+ DCL  AKT_MATCH_ENHED    BIT(01)    INIT('0'B);                         
+ DCL  HIST_MATCH_ENHED   BIT(01)    INIT('0'B);                         
+                                                                        
+ DCL  ANTAL_LÆST          BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_SKREVET       BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_CEJDTYPE4     BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_CEJDTYPE5     BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_SAT_ENHEDLBNR1 BIN FIXED(31)  INIT(0);                      
+ DCL  ANTAL_HENFØRT       BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_ANTAGET       BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_IKKE_HENFØRT  BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_DUB_OPRET     BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_MED_TEKFEJL   BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_EJER_ADR_CSRP BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_BQ805_OK      BIN FIXED(31)  INIT(0);                       
+ DCL  ANTAL_BQ805_EJ_OK   BIN FIXED(31)  INIT(0);                       
+                                                                        
+ DCL  SØG_DCPR         DEC FIXED (11);                                  
+ DCL  SØG_EKOMNR       BIN FIXED (15);                                  
+ DCL  SØG_VEJK_ENHED   CHAR      (04);                                  
+ DCL  SØG_HUSNR_ENHED1 CHAR      (03);                                  
+ DCL  SØG_HUSNR_ENHED2 CHAR      (03);                                  
+ DCL  SØG_ETAGE1       CHAR      (02);                                  
+ DCL  SØG_ETAGE2       CHAR      (02);                                  
+ DCL  SØG_ETAGE3       CHAR      (02);                                  
+ DCL  SØG_SIDE_DØRNR1  CHAR      (04);                                  
+ DCL  SØG_SIDE_DØRNR2  CHAR      (04);                                  
+ DCL  SØG_SIDE_DØRNR3  CHAR      (04);                                  
+ DCL  SØG_HUSBOGSTAV1  CHAR      (01);                                  
+ DCL  SØG_HUSBOGSTAV2  CHAR      (01);                                  
+ DCL  SØG_HUSBOGSTAV3  CHAR      (01);                                  
+                                                                        
+ DCL  HJ_CUOP          CHAR      (01);                                  
+                                                                        
+ DCL  ANDEN_ENHED_FUNDET BIT     (01)        INIT('0'B);                
+ DCL  VURDERING_AKT_INDKOMSTÅR BIT(01)       INIT('0'B);                
+                                                                        
+                                                                        
+ /********************************************************************/ 
+ /* Standard rutiner                                                 */ 
+ /********************************************************************/ 
+ DCL   ZS61900         ENTRY;          /* Udskrivning af SSI         */ 
+ DCL   ZS30101         ENTRY;          /* Abendrutine                */ 
+ DCL   ZS67000         ENTRY;          /* Hent sql tekster           */ 
+                                                                        
+ DCL   1 BE55600M,                     /* ÅRSTALS MACRO              */ 
+         %INCLUDE BE55600M;                                             
+                                                                        
+        CALL ZS61900;                                                   
+                                                                        
+ /********************************************************************/ 
+ /* On Conditions                                                    */ 
+ /********************************************************************/ 
+                                                                        
+         ON ERROR BEGIN;                                                
+            ON ERROR SYSTEM;                                            
+            PUT SKIP LIST('PROGRAMFEJL');                               
+            CALL PLIDUMP('SNHOB','PROGRAM BE33925L');                   
+         END;                                                           
+                                                                        
+         ON ENDFILE(BE338I)                                             
+         BEGIN;                                                         
+           EOF_BE338I = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (BE338I)  TITLE('BE33800I');                         
+         OPEN FILE (BE339O)  TITLE('BE33900O');                         
+         OPEN FILE (BE3391O) TITLE('BE33910O');                         
+                                                                        
+         /* CALL ZS38100(DATO1);   HUSK */                              
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SLUT kørsel');         
+              END;                                                      
+            WHEN ('OPRET_EVS_FORSK')                                    
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS FORSKUD kørsel');      
+              END;                                                      
+            WHEN ('SUPPL_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SUPPLEMENT kørsel');   
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                 ABENDTXT = '101 Afviklings_id skal være '       !!     
+                            'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!       
+                            'eller SUPPL_EVS_SLUT';                     
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+         END;                                                           
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.FORSKÅR;                    
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+                  AFVIKL_ID_CSRP = BE55600M.AFVIKLINGS_ID;              
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+                  AFVIKL_ID_CSRP = BE55600M.AFVIKLINGS_ID;              
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+                  AFVIKL_ID_CSRP = 'OPRET_EVS_SLUT';                    
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOVEDSTYRING                                                      */
+ /* Ejerforhold med CEJDTYPE 4 opsamles i tabel og skrives samme      */
+ /* med de oprettede dubletter. Øvrige ejerforhold skrives uden       */
+ /* ændringer                                                         */
+ /*********************************************************************/
+                                                                        
+         CALL LÆS_BE338I;                                               
+         IX = 0;                                                        
+         TABEL_2FAMIL(*) = '';                                          
+         GEM_EKOMNR = BE338.EKOMNR;                                     
+         GEM_EEJDNR = BE338.EEJDNR;                                     
+         GEM_DCPRN  = BE338.DCPRCIR;                                    
+                                                                        
+         DO WHILE (^EOF_BE338I);                                        
+                                                                        
+           IF BE338.EENHEDLBNR > 0  &                                   
+              ER_CEJDTYPE_4                                             
+           THEN                                                         
+             DO;                                                        
+               /*samme ejendom husk periode opdeling ?*/                
+               IF BE338.EKOMNR = GEM_EKOMNR &                           
+                  BE338.EEJDNR = GEM_EEJDNR                             
+               THEN                                                     
+                 DO;                                                    
+                   CALL INDLÆS_EJED_TABEL;                              
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                   CALL AFSLUT_EJENDOM;                                 
+                   CALL INDLÆS_EJED_TABEL;                              
+                 END;                                                   
+               CALL LÆS_BE338I;                                         
+             END;                                                       
+           ELSE                                                         
+             DO;                                                        
+               /* defect 7 Forskud 2020 */                              
+               IF ER_CEJDTYPE_5 &                                       
+                  BE338.EENHEDLBNR ^= 1                                 
+               THEN                                                     
+                 DO;                                                    
+                   PUT SKIP LIST(' ENHEDSLBNR SAT 1 FOR ',              
+                                 ' DCPRCIR ', BE338.DCPRCIR,            
+                                 ' EKOMNR ',  BE338.EKOMNR,             
+                                 ' EEJDNR ',  BE338.EEJDNR);            
+                   BE338.EENHEDLBNR = 1;                                
+                   BE338.TEKFEJLNR  = 3999;                             
+                   ANTAL_SAT_ENHEDLBNR1 = ANTAL_SAT_ENHEDLBNR1 + 1;     
+                 END;                                                   
+               CALL SKRIV_INPUT_BE339O;                                 
+               CALL LÆS_BE338I;                                         
+             END;                                                       
+         END;                                                           
+                                                                        
+         /* skriv sidste fra tabel flyt op før 9999999 indidvid */      
+         CALL AFSLUT_EJENDOM;                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ LÆS_BE338I: PROC;                                                      
+                                                                        
+        READ FILE(BE338I) INTO(BE338_AREA);                             
+                                                                        
+        ANTAL_LÆST = ANTAL_LÆST + 1;                                    
+                                                                        
+        CALL OPSÆT_EJER_ADRESSE_FRA_CSRP;                               
+                                                                        
+ END LÆS_BE338I;                                                        
+ /*********************************************************************/
+ /* Undersøg om ejendomstype er 4                                     */
+ /* Betingelse for ejendomstype 4 er taget fra BE84300L               */
+ /*********************************************************************/
+ ER_CEJDTYPE_4: PROC RETURNS (BIT(1));                                  
+                                                                        
+ DCL ER_CEJDTYPE_4       BIT(01);                                       
+                                                                        
+     ER_CEJDTYPE_4 = NEJ;                                               
+                                                                        
+     HJ_CUOP = '';                                                      
+                                                                        
+     SELECT;                                                            
+       WHEN(BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_FORSK')                 
+         DO;                                                            
+           IF (BE338.VURDOPLGL.CBENYT    = '01'  !                      
+               BE338.VURDOPLGL.CBENYT    = '1 '  !   /* PBR */          
+               BE338.VURDOPLGL.CBENYT    = '41') &                      
+               BE338.VURDOPLGL.FLEJL     = 2     &                      
+               BE338.VURDOPLGL.ANT_FOR_4 = 0     &                      
+              (BE338.VURDOPLGL.ANT_FOR_5 +                              
+               BE338.VURDOPLGL.ANT_FOR_6 +                              
+               BE338.VURDOPLGL.ANT_FOR_8 +                              
+               BE338.VURDOPLGL.ANT_FOR_9 = 2)                           
+           THEN                                                         
+             DO;                                                        
+               ER_CEJDTYPE_4 = JA;                                      
+               ANTAL_CEJDTYPE4 = ANTAL_CEJDTYPE4 + 1;                   
+               VURDERING_AKT_INDKOMSTÅR = NEJ;                          
+             END;                                                       
+           IF ((BE338.VURDOPLGL.CBENYT = '02' !    // KS15 - D1014      
+                BE338.VURDOPLGL.CBENYT = '05' !                         
+                BE338.VURDOPLGL.CBENYT = '49') &                        
+               (BE338.VURDOPLGL.ANT_FOR_4 +                             
+                BE338.VURDOPLGL.ANT_FOR_5 +                             
+                BE338.VURDOPLGL.ANT_FOR_6 = 2))                         
+           THEN                                                         
+             DO;                                                        
+               ER_CEJDTYPE_4 = JA;                                      
+               ANTAL_CEJDTYPE4 = ANTAL_CEJDTYPE4 + 1;                   
+               VURDERING_AKT_INDKOMSTÅR = NEJ;                          
+             END;                                                       
+         END;                                                           
+       WHEN(BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_SLUT' !                 
+            BE55600M.AFVIKLINGS_ID = 'SUPPL_EVS_SLUT')                  
+         DO;                                                            
+           /* IF (BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'J' !         
+               BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'N' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'J' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'N' ) &          
+               BE338.VURDOPLNY.CUOP ^= '6' &                            
+               BE338.VURDOPLGL.DVURDÅR = '' &                           
+               BE338.VURDOPLGL.CBENYT  = ''                             
+           THEN                                                         
+              DO;                                                       
+                 HJ_CUOP = '6';                                         
+              END; KS2-45 */                                            
+                                                                        
+           /* IF (BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'J' !         
+               BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'N' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'J' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'N' ) &          
+               HJ_CUOP ^= '6'                                &          
+               BE338.STRAKS_EVS ^= 'J' #03 edl                          
+           THEN                                                         
+             DO;  *//* Vurdering skal tages fra gl år */                
+               /*IF (BE338.VURDOPLGL.CBENYT    = '01'  !                
+                   BE338.VURDOPLGL.CBENYT    = '41') &                  
+                   BE338.VURDOPLGL.FLEJL     = 2     &                  
+                   BE338.VURDOPLGL.ANT_FOR_4 = 0     &                  
+                  (BE338.VURDOPLGL.ANT_FOR_5 +                          
+                   BE338.VURDOPLGL.ANT_FOR_6 +                          
+                   BE338.VURDOPLGL.ANT_FOR_8 +                          
+                   BE338.VURDOPLGL.ANT_FOR_9 = 2)                       
+               THEN                                                     
+                 DO;                                                    
+                   ER_CEJDTYPE_4 = JA;                                  
+                   ANTAL_CEJDTYPE4 = ANTAL_CEJDTYPE4 + 1;               
+                   VURDERING_AKT_INDKOMSTÅR = NEJ;                      
+                 END;                                                   
+             END;                                                       
+           ELSE                                                         
+             DO; KS2-45 */  /* Vurdering skal tages fra aktuelt år */   
+               IF (BE338.VURDOPLNY.CBENYT    = '01'  !                  
+                   BE338.VURDOPLNY.CBENYT    = '1 '  !   /* PBR */      
+                   BE338.VURDOPLNY.CBENYT    = '41') &                  
+                   BE338.VURDOPLNY.FLEJL     = 2     &                  
+                   BE338.VURDOPLNY.ANT_FOR_4 = 0     &                  
+                  (BE338.VURDOPLNY.ANT_FOR_5 +                          
+                   BE338.VURDOPLNY.ANT_FOR_6 +                          
+                   BE338.VURDOPLNY.ANT_FOR_8 +                          
+                   BE338.VURDOPLNY.ANT_FOR_9 = 2)                       
+               THEN                                                     
+                 DO;                                                    
+                   ER_CEJDTYPE_4 = JA;                                  
+                   ANTAL_CEJDTYPE4 = ANTAL_CEJDTYPE4 + 1;               
+                   VURDERING_AKT_INDKOMSTÅR = JA;                       
+                 END;                                                   
+               IF ((BE338.VURDOPLNY.CBENYT = '02' !   // KS15 - D1014   
+                    BE338.VURDOPLNY.CBENYT = '05' !                     
+                    BE338.VURDOPLNY.CBENYT = '49') &                    
+                   (BE338.VURDOPLNY.ANT_FOR_4 +                         
+                    BE338.VURDOPLNY.ANT_FOR_5 +                         
+                    BE338.VURDOPLNY.ANT_FOR_6 = 2))                     
+               THEN                                                     
+                 DO;                                                    
+                   ER_CEJDTYPE_4 = JA;                                  
+                   ANTAL_CEJDTYPE4 = ANTAL_CEJDTYPE4 + 1;               
+                   VURDERING_AKT_INDKOMSTÅR = NEJ;                      
+                 END;                                                   
+            /*  END; KS2-45 */                                          
+         END;                                                           
+        OTHER;                                                          
+     END; /*SELECT*/                                                    
+                                                                        
+     RETURN (ER_CEJDTYPE_4);                                            
+                                                                        
+ END ER_CEJDTYPE_4;                                                     
+ /*********************************************************************/
+ /* Undersøg om ejendomstype er 5 til defect 7 Forskud 2020           */
+ /* Betingelse for ejendomstype 5 er taget fra BE84300L               */
+ /*********************************************************************/
+ ER_CEJDTYPE_5: PROC RETURNS (BIT(1));                                  
+                                                                        
+ DCL ER_CEJDTYPE_5       BIT(01);                                       
+                                                                        
+     ER_CEJDTYPE_5 = NEJ;                                               
+                                                                        
+     HJ_CUOP = '';                                                      
+                                                                        
+     SELECT;                                                            
+       WHEN(BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_FORSK')                 
+         DO;                                                            
+           IF (BE338.VURDOPLGL.CBENYT    = '01'  !                      
+               BE338.VURDOPLGL.CBENYT    = '1 '  !   /* PBR */          
+               BE338.VURDOPLGL.CBENYT    = '41') &                      
+               BE338.VURDOPLGL.FLEJL     = 2     &                      
+               BE338.VURDOPLGL.ANT_FOR_4 = 0     &                      
+              (BE338.VURDOPLGL.ANT_FOR_5 +                              
+               BE338.VURDOPLGL.ANT_FOR_6 +                              
+               BE338.VURDOPLGL.ANT_FOR_8 +                              
+               BE338.VURDOPLGL.ANT_FOR_9 = 1)                           
+           THEN                                                         
+             DO;                                                        
+               ER_CEJDTYPE_5 = JA;                                      
+               ANTAL_CEJDTYPE5 = ANTAL_CEJDTYPE5 + 1;                   
+             END;                                                       
+         END;                                                           
+       WHEN(BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_SLUT' !                 
+            BE55600M.AFVIKLINGS_ID = 'SUPPL_EVS_SLUT')                  
+         DO;                                                            
+           /* IF (BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'J' !         
+               BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'N' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'J' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'N' ) &          
+               BE338.VURDOPLNY.CUOP ^= '6' &                            
+               BE338.VURDOPLGL.DVURDÅR = '' &                           
+               BE338.VURDOPLGL.CBENYT  = ''                             
+           THEN                                                         
+              DO;                                                       
+                 HJ_CUOP = '6';                                         
+              END; KS2-45 */                                            
+                                                                        
+           /* IF (BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'J' !         
+               BE338.VURDOPLNY.OMBER01(1).KONSEKVENS = 'N' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'J' !            
+               BE338.VURDOPLNY.OMBER01(2).KONSEKVENS = 'N' ) &          
+               HJ_CUOP ^= '6'                                &          
+               BE338.STRAKS_EVS ^= 'J' #03 edl                          
+           THEN                                                         
+             DO; KS2-45 */ /* Vurdering skal tages fra gl år */         
+               /* IF (BE338.VURDOPLGL.CBENYT    = '01'  !               
+                   BE338.VURDOPLGL.CBENYT    = '41') &                  
+                   BE338.VURDOPLGL.FLEJL     = 2     &                  
+                   BE338.VURDOPLGL.ANT_FOR_4 = 0     &                  
+                  (BE338.VURDOPLGL.ANT_FOR_5 +                          
+                   BE338.VURDOPLGL.ANT_FOR_6 +                          
+                   BE338.VURDOPLGL.ANT_FOR_8 +                          
+                   BE338.VURDOPLGL.ANT_FOR_9 = 1)                       
+               THEN                                                     
+                 DO;                                                    
+                   ER_CEJDTYPE_5 = JA;                                  
+                   ANTAL_CEJDTYPE5 = ANTAL_CEJDTYPE5 + 1;               
+                 END;                                                   
+             END;                                                       
+           ELSE                                                         
+             DO; KS2-45 */  /* Vurdering skal tages fra aktuelt år */   
+               IF (BE338.VURDOPLNY.CBENYT    = '01'  !                  
+                   BE338.VURDOPLNY.CBENYT    = '1 '  !   /* PBR */      
+                   BE338.VURDOPLNY.CBENYT    = '41') &                  
+                   BE338.VURDOPLNY.FLEJL     = 2     &                  
+                   BE338.VURDOPLNY.ANT_FOR_4 = 0     &                  
+                  (BE338.VURDOPLNY.ANT_FOR_5 +                          
+                   BE338.VURDOPLNY.ANT_FOR_6 +                          
+                   BE338.VURDOPLNY.ANT_FOR_8 +                          
+                   BE338.VURDOPLNY.ANT_FOR_9 = 1)                       
+               THEN                                                     
+                 DO;                                                    
+                   ER_CEJDTYPE_5 = JA;                                  
+                   ANTAL_CEJDTYPE5 = ANTAL_CEJDTYPE5 + 1;               
+                 END;                                                   
+             /*END; KS2-45 */                                           
+         END;                                                           
+        OTHER;                                                          
+     END; /*SELECT*/                                                    
+                                                                        
+     RETURN (ER_CEJDTYPE_5);                                            
+                                                                        
+ END ER_CEJDTYPE_5;                                                     
+ /*********************************************************************/
+ /* 2 FAMILIE EJERFORHOLD SOM SKAL BEHANDLES                          */
+ /* EJERFORHOLD MED CEJDTYPE LIG 4 OPSAMLES I INTERN TABEL            */
+ /* DER UNDERSØGES HVILKE EJERBOLIGER FORDELING DER MATCH PÅ          */
+ /* UDFRA CSRP                                                        */
+ /*********************************************************************/
+ INDLÆS_EJED_TABEL: PROC;                                               
+                                                                        
+        IX = IX + 1;                                                    
+                                                                        
+        TABEL_2FAMIL(IX) = BE338, BY NAME;                              
+        TABEL_2FAMIL(IX).DUBLET = NEJ;                                  
+                                                                        
+        CALL UNDERSØG_KAN_EJER_HENFØRES;                                
+                                                                        
+        /*OPRET DUBLET*/                                                
+        IX = IX + 1;                                                    
+        ANTAL_DUB_OPRET = ANTAL_DUB_OPRET + 1;                          
+        TABEL_2FAMIL(IX) = BE338, BY NAME;                              
+        ANDEN_ENHED_FUNDET = NEJ;                                       
+                                                                        
+                                                                        
+        CALL HENT_DATA_TIL_DUBLET;                                      
+                                                                        
+        IF ANDEN_ENHED_FUNDET                                           
+        THEN                                                            
+          DO; /* Anden enhed oprettes adresse fra BE80200T */           
+            TABEL_2FAMIL(IX).EENHEDLBNR  = DCLBE80200T.EENHEDLBNR;      
+            TABEL_2FAMIL(IX).VEJK_ENHED  = DCLBE80200T.VEJK_ENH;        
+            TABEL_2FAMIL(IX).HUSNR_ENHED = DCLBE80200T.HUSNR_ENH;       
+            TABEL_2FAMIL(IX).ETAGE_ENHED = DCLBE80200T.ETAGE_ENH;       
+            TABEL_2FAMIL(IX).SDØR_ENHED  = DCLBE80200T.DØRNR_ENH;       
+            TABEL_2FAMIL(IX).ENHEDBELIG  = OPSÆT_ENHEDS_ADRESSE();      
+            TABEL_2FAMIL(IX).DUBLET      = JA;                          
+            TABEL_2FAMIL(IX).TEKFEJLNR   = 9999;                        
+          END;                                                          
+        ELSE                                                            
+          DO; /* Anden enhed oprettes med samme adresse */              
+            IF BE338.EENHEDLBNR = 1                                     
+            THEN                                                        
+              TABEL_2FAMIL(IX).EENHEDLBNR  = 2;                         
+            IF BE338.EENHEDLBNR = 2                                     
+            THEN                                                        
+              TABEL_2FAMIL(IX).EENHEDLBNR  = 1;                         
+            TABEL_2FAMIL(IX).DUBLET      = JA;                          
+            TABEL_2FAMIL(IX).TEKFEJLNR   = 9998;                        
+            CALL INSERT_BE80200T;                                       
+          END;                                                          
+                                                                        
+        CALL UNDERSØG_KAN_EJER_HENFØRES;                                
+                                                                        
+                                                                        
+ END INDLÆS_EJED_TABEL;                                                 
+ /*********************************************************************/
+ /* Undersøg kan ejer henførers til en ejerbolig fordeling            */
+ /*********************************************************************/
+ UNDERSØG_KAN_EJER_HENFØRES: PROC;                                      
+                                                                        
+   CALL UDFYLD_SØG;                                                     
+                                                                        
+   CALL OPSLAG_I_CSRP;                                                  
+                                                                        
+   /* Nyt til AKT/HIST behandling */                                    
+   IF AKT_MATCH_ENHED                                                   
+   THEN                                                                 
+     DO;                                                                
+       TABEL_2FAMIL(IX).AKT_CSRP_MATCH = JA;                            
+     END;                                                               
+                                                                        
+   IF HIST_MATCH_ENHED                                                  
+   THEN                                                                 
+     DO;                                                                
+       TABEL_2FAMIL(IX).HIST_CSRP_MATCH = JA;                           
+     END;                                                               
+                                                                        
+                                                                        
+ END UNDERSØG_KAN_EJER_HENFØRES;                                        
+ /*********************************************************************/
+ /* OPSLAG I CSRP MED SØGE KRITERIE                                   */
+ /*********************************************************************/
+ OPSLAG_I_CSRP: PROC;                                                   
+                                                                        
+      DCLBE70000T = '';                                                 
+      DCLBE71000T = '';                                                 
+      AKT_MATCH_ENHED = NEJ;                                            
+      HIST_MATCH_ENHED = NEJ;                                           
+                                                                        
+      EXEC SQL                                                          
+        SELECT                                                          
+          T1.PNR,                                                       
+          T1.ADRFRADTO,                                                 
+          T1.VEJKOD,                                                    
+          T1.HUSNR,                                                     
+          T1.HUSBOGSTAADR,                                              
+          T1.ETAGENR,                                                   
+          T1.SIDEDOERNR                                                 
+        INTO                                                            
+          :DCLBE70000T.PNR,                                             
+          :DCLBE70000T.ADRFRADTO,                                       
+          :DCLBE70000T.VEJKOD,                                          
+          :DCLBE70000T.HUSNR,                                           
+          :DCLBE70000T.HUSBOGSTAADR,                                    
+          :DCLBE70000T.ETAGENR,                                         
+          :DCLBE70000T.SIDEDOERNR                                       
+                                                                        
+        FROM   BE70000T T1                                              
+        WHERE  T1.PNR         = :SØG_DCPR                               
+          AND  T1.BOPAEKMNR   = :SØG_EKOMNR                             
+          AND  T1.VEJKOD      = :SØG_VEJK_ENHED                         
+          AND (T1.HUSNR       = :SØG_HUSNR_ENHED1                       
+           OR  T1.HUSNR       = :SØG_HUSNR_ENHED2)                      
+          AND (T1.HUSBOGSTAADR =:SØG_HUSBOGSTAV1                        
+           OR  T1.HUSBOGSTAADR =:SØG_HUSBOGSTAV2)                       
+          AND (T1.ETAGENR     = :SØG_ETAGE1                             
+           OR  T1.ETAGENR     = :SØG_ETAGE2                             
+           OR  T1.ETAGENR     = :SØG_ETAGE3)                            
+          AND (T1.SIDEDOERNR  = :SØG_SIDE_DØRNR1                        
+           OR  T1.SIDEDOERNR  = :SØG_SIDE_DØRNR2                        
+           OR  T1.SIDEDOERNR  = :SØG_SIDE_DØRNR3)                       
+          AND  T1.TIL_EVS_AAR = :WS_TIL_EVS_AAR                         
+          AND  T1.AFVIKLINGS_ID = :AFVIKL_ID_CSRP                       
+        FETCH FIRST 1 ROW ONLY;                                         
+                                                                        
+      SELECT (SQLCA.SQLCODE);                                           
+         WHEN (0)                                                       
+           DO;                                                          
+ /*          PUT SKIP LIST('AKT MATCH');                                
+     PUT SKIP LIST('DCLBE70000T.PNR ', DCLBE70000T.PNR);                
+     PUT SKIP LIST('DCLBE70000T.ADRFRADTO ',DCLBE70000T.ADRFRADTO);     
+     PUT SKIP LIST('DCLBE70000T.VEJKOD ',DCLBE70000T.VEJKOD);           
+     PUT SKIP LIST('DCLBE70000T.HUSNR ',DCLBE70000T.HUSNR);             
+     PUT SKIP LIST('DCLBE70000T.HUSBOGSTAADR ',                         
+                                        DCLBE70000T.HUSBOGSTAADR);      
+     PUT SKIP LIST('DCLBE70000T.ETAGENR ',DCLBE70000T.ETAGENR);         
+     PUT SKIP LIST('DCLBE70000T.SIDEDOERNR ',                           
+                      DCLBE70000T.SIDEDOERNR); */                       
+             AKT_MATCH_ENHED = JA;                                      
+           END;                                                         
+         WHEN (100)                                                     
+           DO;                                                          
+             AKT_MATCH_ENHED = NEJ;                                     
+           END;                                                         
+         OTHER                                                          
+         PUT SKIP LIST                                                  
+          ('BE70000T OPSLAG_I_CSRP = ',SQLCA.SQLCODE);                  
+      END;                                                              
+                                                                        
+                                                                        
+      IF AKT_MATCH_ENHED = NEJ                                          
+      THEN                                                              
+        DO;  /*undersøg historik*/                                      
+                                                                        
+          EXEC SQL                                                      
+            SELECT                                                      
+              T1.PNR,                                                   
+              T1.ADRFRADTO,            /*INDFLYT*/                      
+              T1.VEJKOD,                                                
+              T1.HUSNR,                                                 
+              T1.HUSBOGSTAADR,                                          
+              T1.ETAGENR,                                               
+              T1.SIDEDOERNR                                             
+            INTO                                                        
+              :DCLBE71000T.PNR,                                         
+              :DCLBE71000T.ADRFRADTO,                                   
+              :DCLBE71000T.VEJKOD,                                      
+              :DCLBE71000T.HUSNR,                                       
+              :DCLBE71000T.HUSBOGSTAADR,                                
+              :DCLBE71000T.ETAGENR,                                     
+              :DCLBE71000T.SIDEDOERNR                                   
+                                                                        
+            FROM   BE71000T T1                                          
+            WHERE  T1.PNR        = :SØG_DCPR                            
+              AND   T1.BOPAEKMNR  = :SØG_EKOMNR                         
+              AND   T1.VEJKOD     = :SØG_VEJK_ENHED                     
+              AND (T1.HUSNR       = :SØG_HUSNR_ENHED1                   
+               OR  T1.HUSNR       = :SØG_HUSNR_ENHED2)                  
+              AND (T1.HUSBOGSTAADR =:SØG_HUSBOGSTAV1                    
+               OR  T1.HUSBOGSTAADR =:SØG_HUSBOGSTAV2)                   
+              AND  (T1.ETAGENR    = :SØG_ETAGE1                         
+               OR  T1.ETAGENR    = :SØG_ETAGE2                          
+               OR  T1.ETAGENR    = :SØG_ETAGE3)                         
+              AND  (T1.SIDEDOERNR    = :SØG_SIDE_DØRNR1                 
+               OR  T1.SIDEDOERNR    = :SØG_SIDE_DØRNR2                  
+               OR  T1.SIDEDOERNR    = :SØG_SIDE_DØRNR3)                 
+              AND  T1.TIL_EVS_AAR = :WS_TIL_EVS_AAR                     
+              AND  T1.AFVIKLINGS_ID = :AFVIKL_ID_CSRP                   
+            FETCH FIRST 1 ROW ONLY;                                     
+                                                                        
+          SELECT (SQLCA.SQLCODE);                                       
+             WHEN (0)                                                   
+               DO;                                                      
+                 HIST_MATCH_ENHED = JA;                                 
+               END;                                                     
+             WHEN (100)                                                 
+               DO;                                                      
+                 HIST_MATCH_ENHED = NEJ;                                
+               END;                                                     
+             OTHER                                                      
+             PUT SKIP LIST                                              
+              ('BE71000T OPSLAG_I_CSRP = ',SQLCA.SQLCODE);              
+          END; /*SELECT*/                                               
+        END;                                                            
+                                                                        
+ END OPSLAG_I_CSRP;                                                     
+ /*********************************************************************/
+ HENT_DATA_TIL_DUBLET: PROC;                                            
+                                                                        
+      DCLBE80200T = '';                                                 
+                                                                        
+      DCLBE80200T.EKOMNR      = BE338.EKOMNR;                           
+      DCLBE80200T.EEJDNR      = BE338.EEJDNR;                           
+      DCLBE80200T.EENHEDLBNR  = BE338.EENHEDLBNR;                       
+                                                                        
+      EXEC SQL                                                          
+        SELECT                                                          
+          EENHEDLBNR,                                                   
+          VEJK_ENH,                                                     
+          HUSNR_ENH,                                                    
+          ETAGE_ENH,                                                    
+          DØRNR_ENH,                                                    
+          ADRSNAVN_ENH                                                  
+        INTO                                                            
+         :DCLBE80200T.EENHEDLBNR,                                       
+         :DCLBE80200T.VEJK_ENH,                                         
+         :DCLBE80200T.HUSNR_ENH,                                        
+         :DCLBE80200T.ETAGE_ENH,                                        
+         :DCLBE80200T.DØRNR_ENH,                                        
+         :DCLBE80200T.ADRSNAVN_ENH                                      
+                                                                        
+       FROM BE80200T                                                    
+       WHERE EKOMNR      = :DCLBE80200T.EKOMNR                          
+         AND EEJDNR      = :DCLBE80200T.EEJDNR                          
+         AND EENHEDLBNR  <> :DCLBE80200T.EENHEDLBNR                     
+         AND EENHEDLBNR IN (1,2)                                        
+       FETCH FIRST 1 ROW ONLY; /* DER BØR IKKE VÆRE MERE END EN  */     
+                                                                        
+       SELECT(SQLCA.SQLCODE);                                           
+         WHEN(0)                                                        
+           DO;                                                          
+             ANDEN_ENHED_FUNDET = JA;                                   
+           END;                                                         
+         WHEN(100)                                                      
+           DO;                                                          
+             ANDEN_ENHED_FUNDET = NEJ;                                  
+             PUT SKIP LIST('EJ FUNDET MAKKER TIL ');                    
+             PUT SKIP LIST('DCLBE80200T.EKOMNR ',                       
+                            DCLBE80200T.EKOMNR);                        
+             PUT SKIP LIST('DCLBE80200T.EEJDNR ',                       
+                            DCLBE80200T.EEJDNR);                        
+             PUT SKIP LIST('DCLBE80200T.EENHEDLBNR ',                   
+                            DCLBE80200T.EENHEDLBNR);                    
+           END;                                                         
+         OTHERWISE                                                      
+           DO;                                                          
+             PUT SKIP LIST('BE80200T SELECT SQLCODE ',SQLCA.SQLCODE);   
+             ABENDTXT = '101 SELECT BE80200T';                          
+             CALL SQL_FEJL;                                             
+           END;                                                         
+       END; /*SELECT*/                                                  
+                                                                        
+                                                                        
+ END HENT_DATA_TIL_DUBLET;                                              
+ /*********************************************************************/
+ /*********************************************************************/
+ /* 2 FAMILIE EJERFORHOLD SOM SKAL BEHANDLES                          */
+ /* FORTAGER BEHANDLING NÅR DER LÆSES EN NY EJENDOM                   */
+ /* EJERFORHOLD ER SORTERET PÅ KOMMUNENUMMER, EJENDOMSNUMMER, ENHEDNR */
+ /* PERSONNR, OVERTAGELSE DATO(DOVTG) OG EJERTYPE(CITYP) MEN          */
+ /* DER BLIVER OPRETTET NYE RÆKKER I PROGRAMMET MED EENHEDLBNR 1 og 2 */
+ /*********************************************************************/
+ AFSLUT_EJENDOM: PROC;                                                  
+                                                                        
+        LOG_BEHANDLING = '';                                            
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !! '** AFSLUT EJENDOM ** ';     
+        LOG_BEHANDLING = LOG_BEHANDLING !! GEM_EKOMNR  !! ' - ' !!      
+                         GEM_EEJDNR;                                    
+                                                                        
+        PERIODE1_START = BE55600M.ÅR0101;                               
+        PERIODE1_SLUT  = BE55600M.ÅR1231;                               
+        PERIODE2_START = 0;                                             
+        PERIODE2_SLUT  = 0;                                             
+        PERIODE3_START = 0;                                             
+        PERIODE3_SLUT  = 0;                                             
+                                                                        
+        GEM_DOVTG1     = 0;                                             
+        GEM_DOVTG2     = 0;                                             
+        GEM_DOVTG3     = 0;                                             
+                                                                        
+        GEM_DAFSTÅ1    = 0;                                             
+        GEM_DAFSTÅ2    = 0;                                             
+        GEM_DAFSTÅ3    = 0;                                             
+                                                                        
+        ANTAL_PERIODER = 1;                                             
+                                                                        
+        /* Bestem perioder */                                           
+        /* Find laveste DAFSTAA som er størrer end 0 til periode1 */    
+        /* Find laveste DOVTG   som er i året til periode1        */    
+        DO ANT_IX = 1 TO IX;                                            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).DOVTG >= 0            &               
+             TABEL_2FAMIL(ANT_IX).DOVTG < BE55600M.ÅR1231               
+          THEN                                                          
+            DO;                                                         
+              IF TABEL_2FAMIL(ANT_IX).DOVTG < BE55600M.ÅR0101           
+              THEN                                                      
+                HJDOVTG = BE55600M.ÅR0101;                              
+              ELSE                                                      
+                HJDOVTG = TABEL_2FAMIL(ANT_IX).DOVTG;                   
+                                                                        
+              IF GEM_DOVTG1 = 0                                         
+              THEN                                                      
+                GEM_DOVTG1 = HJDOVTG;                                   
+              ELSE                                                      
+                IF GEM_DOVTG2 = 0 &                                     
+                   GEM_DOVTG1 ^= HJDOVTG                                
+                THEN                                                    
+                  GEM_DOVTG2 = HJDOVTG;                                 
+                ELSE                                                    
+                  IF GEM_DOVTG3 = 0 &                                   
+                     GEM_DOVTG1 ^= HJDOVTG &                            
+                     GEM_DOVTG2 ^= HJDOVTG                              
+                  THEN                                                  
+                    GEM_DOVTG3 = HJDOVTG;                               
+            END;                                                        
+                                                                        
+          /* fejlrettelse for gl afståelses datoer     */               
+          /* skal være i indkomståret for tælle med    */               
+          IF TABEL_2FAMIL(ANT_IX).DAFSTÅ >= BE55600M.ÅR0101 &           
+             TABEL_2FAMIL(ANT_IX).DAFSTÅ < BE55600M.ÅR1231              
+          THEN                                                          
+            DO;                                                         
+              HJDAFSTÅ = TABEL_2FAMIL(ANT_IX).DAFSTÅ;                   
+                                                                        
+              IF GEM_DAFSTÅ1 = 0                                        
+              THEN                                                      
+                GEM_DAFSTÅ1 = HJDAFSTÅ;                                 
+              ELSE                                                      
+                IF GEM_DAFSTÅ2 = 0 &                                    
+                   GEM_DAFSTÅ1 ^= HJDAFSTÅ                              
+                THEN                                                    
+                  GEM_DAFSTÅ2 = HJDAFSTÅ;                               
+                ELSE                                                    
+                  IF GEM_DAFSTÅ3 = 0 &                                  
+                     GEM_DAFSTÅ1 ^= HJDAFSTÅ &                          
+                     GEM_DAFSTÅ2 ^= HJDAFSTÅ                            
+                  THEN                                                  
+                    GEM_DAFSTÅ3 = HJDAFSTÅ;                             
+              /* mere end 3 perioder ?*/                                
+            END;                                                        
+        END;                                                            
+                                                                        
+        IF GEM_DAFSTÅ1 = GEM_DOVTG1  !                                  
+           GEM_DAFSTÅ1 = GEM_DOVTG2  !                                  
+           GEM_DAFSTÅ1 = GEM_DOVTG3                                     
+        THEN                                                            
+          DO;                                                           
+            GEM_DAFSTÅ1 = 0;  /* Perioden er bestemt af en DOVTG */     
+          END;                                                          
+                                                                        
+        IF GEM_DAFSTÅ2 = GEM_DOVTG1  !                                  
+           GEM_DAFSTÅ2 = GEM_DOVTG2  !                                  
+           GEM_DAFSTÅ2 = GEM_DOVTG3                                     
+        THEN                                                            
+          DO;                                                           
+            GEM_DAFSTÅ2 = 0;  /* Perioden er bestemt af en DOVTG */     
+          END;                                                          
+                                                                        
+        IF GEM_DAFSTÅ3 = GEM_DOVTG1  !                                  
+           GEM_DAFSTÅ3 = GEM_DOVTG2  !                                  
+           GEM_DAFSTÅ3 = GEM_DOVTG3                                     
+        THEN                                                            
+          DO;                                                           
+            GEM_DAFSTÅ3 = 0;  /* Perioden er bestemt af en DOVTG */     
+          END;                                                          
+                                                                        
+        /* fejl ret 20190103 */                                         
+        IF GEM_DAFSTÅ1 = 0  &                                           
+           GEM_DAFSTÅ2 > 0  &                                           
+           GEM_DAFSTÅ3 = 0                                              
+        THEN                                                            
+          DO;                                                           
+            GEM_DAFSTÅ1 = GEM_DAFSTÅ2;                                  
+            GEM_DAFSTÅ2 = 0;                                            
+          END;                                                          
+                                                                        
+        /* fejl ret 20190103 */                                         
+        IF GEM_DAFSTÅ1 = 0  &                                           
+           GEM_DAFSTÅ2 = 0  &                                           
+           GEM_DAFSTÅ3 > 0                                              
+        THEN                                                            
+          DO;                                                           
+            GEM_DAFSTÅ1 = GEM_DAFSTÅ3;                                  
+            GEM_DAFSTÅ3 = 0;                                            
+          END;                                                          
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DOVTG1 = ' !!          
+                         GEM_DOVTG1;                                    
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DOVTG2 = ' !!          
+                         GEM_DOVTG2;                                    
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DOVTG3 = ' !!          
+                         GEM_DOVTG3;                                    
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DAFSTÅ1 =  ' !!        
+                         GEM_DAFSTÅ1;                                   
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DAFSTÅ2 = ' !!         
+                         GEM_DAFSTÅ2;                                   
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' GEM_DAFSTÅ3 =  ' !!        
+                         GEM_DAFSTÅ3;                                   
+                                                                        
+        SELECT; /*opsæt perioder*/                                      
+                                                                        
+          WHEN(GEM_DOVTG2  = 0 & GEM_DOVTG3  = 0 &                      
+               GEM_DAFSTÅ1 = 0 & GEM_DAFSTÅ2 = 0 &                      
+               GEM_DAFSTÅ3 = 0)                                         
+            DO;     /* Kun en periode some vare hele året */            
+              PERIODE1_START = GEM_DOVTG1;                              
+              PERIODE1_SLUT  = BE55600M.ÅR1231;                         
+              PERIODE2_START = 0;                                       
+              PERIODE2_SLUT  = 0;                                       
+              PERIODE3_START = 0;                                       
+              PERIODE3_SLUT  = 0;                                       
+              ANTAL_PERIODER = 1;                                       
+            END;                                                        
+                                                                        
+          WHEN(GEM_DOVTG1 ^= GEM_DOVTG2 & GEM_DOVTG3  = 0 &             
+               GEM_DAFSTÅ1 = 0 & GEM_DAFSTÅ2 = 0 &                      
+               GEM_DAFSTÅ3 = 0)                                         
+            DO;     /* Der sker en handle så der to perioder */         
+              IF GEM_DOVTG1 > GEM_DOVTG2                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG1;                                 
+                  GEM_DOVTG1 = GEM_DOVTG2;                              
+                  GEM_DOVTG2 = HJDOVTG;                                 
+                END;                                                    
+              PERIODE1_START = GEM_DOVTG1;                              
+              PERIODE1_SLUT  = GEM_DOVTG2;                              
+              PERIODE2_START = GEM_DOVTG2;                              
+              PERIODE2_SLUT  = BE55600M.ÅR1231;                         
+              PERIODE3_START = 0;                                       
+              PERIODE3_SLUT  = 0;                                       
+              ANTAL_PERIODER = 2;                                       
+            END;                                                        
+                                                                        
+          /* fejl ret til defect 205 afståelse dato */                  
+          /* uden en overtagelses dato              */                  
+          /* der mangler rækker fra ESR             */                  
+          WHEN(GEM_DOVTG2  = 0 & GEM_DOVTG3  = 0 &                      
+               GEM_DAFSTÅ1 > 0 & GEM_DAFSTÅ2 = 0 &                      
+               GEM_DAFSTÅ3 = 0)                                         
+            DO;     /* Der sker en handle så der to perioder */         
+              PERIODE1_START = GEM_DOVTG1;                              
+              PERIODE1_SLUT  = GEM_DAFSTÅ1;                             
+              PERIODE2_START = GEM_DAFSTÅ1;                             
+              PERIODE2_SLUT  = BE55600M.ÅR1231;                         
+              PERIODE3_START = 0;                                       
+              PERIODE3_SLUT  = 0;                                       
+              ANTAL_PERIODER = 2;                                       
+            END;                                                        
+                                                                        
+          WHEN(GEM_DOVTG1 ^= GEM_DOVTG2 & GEM_DOVTG1 ^= GEM_DOVTG3 &    
+               GEM_DAFSTÅ1 = 0 & GEM_DAFSTÅ2 = 0 & GEM_DAFSTÅ3 = 0)     
+            DO;                                                         
+              /* flyt midste dato til DOVTG1 */                         
+              IF GEM_DOVTG1 > GEM_DOVTG2                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG1;                                 
+                  GEM_DOVTG1 = GEM_DOVTG2;                              
+                  GEM_DOVTG2 = HJDOVTG;                                 
+                END;                                                    
+              IF GEM_DOVTG1 > GEM_DOVTG3                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG1;                                 
+                  GEM_DOVTG1 = GEM_DOVTG3;                              
+                  GEM_DOVTG3 = HJDOVTG;                                 
+                END;                                                    
+              /* næst midste dato til DOVTG2 */                         
+              IF GEM_DOVTG2 > GEM_DOVTG3                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG2;                                 
+                  GEM_DOVTG2 = GEM_DOVTG3;                              
+                  GEM_DOVTG3 = HJDOVTG;                                 
+                END;                                                    
+              PERIODE1_START = GEM_DOVTG1;                              
+              PERIODE1_SLUT  = GEM_DOVTG2;                              
+              PERIODE2_START = GEM_DOVTG2;                              
+              PERIODE2_SLUT  = GEM_DOVTG3;                              
+              PERIODE3_START = GEM_DOVTG3;                              
+              PERIODE3_SLUT  = BE55600M.ÅR1231;                         
+              ANTAL_PERIODER = 3;                                       
+            END;                                                        
+                                                                        
+          /* fejl ret 20190103 */                                       
+          WHEN(GEM_DOVTG1  > 0 & GEM_DOVTG2 = 0  & GEM_DOVTG3 = 0 &     
+               GEM_DAFSTÅ1 > 0 & GEM_DAFSTÅ2 > 0 & GEM_DAFSTÅ3 = 0)     
+            DO;                                                         
+              /* flyt midste dato til DOVTG1 */                         
+              IF GEM_DOVTG1 > GEM_DOVTG2                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG1;                                 
+                  GEM_DOVTG1 = GEM_DOVTG2;                              
+                  GEM_DOVTG2 = HJDOVTG;                                 
+                END;                                                    
+              IF GEM_DAFSTÅ2 > GEM_DAFSTÅ1                              
+              THEN                                                      
+                DO;                                                     
+                  PERIODE1_START = GEM_DOVTG1;                          
+                  PERIODE1_SLUT  = GEM_DAFSTÅ1;                         
+                  PERIODE2_START = GEM_DAFSTÅ1;                         
+                  PERIODE2_SLUT  = GEM_DAFSTÅ2;                         
+                  PERIODE3_START = GEM_DAFSTÅ2;                         
+                  PERIODE3_SLUT  = BE55600M.ÅR1231;                     
+                  ANTAL_PERIODER = 3;                                   
+                END;                                                    
+              ELSE                                                      
+                DO;                                                     
+                  PERIODE1_START = GEM_DOVTG1;                          
+                  PERIODE1_SLUT  = GEM_DAFSTÅ2;                         
+                  PERIODE2_START = GEM_DAFSTÅ2;                         
+                  PERIODE2_SLUT  = GEM_DAFSTÅ1;                         
+                  PERIODE3_START = GEM_DAFSTÅ1;                         
+                  PERIODE3_SLUT  = BE55600M.ÅR1231;                     
+                  ANTAL_PERIODER = 3;                                   
+                END;                                                    
+            END;                                                        
+                                                                        
+          /* fejl ret 20190103 */                                       
+          WHEN(GEM_DOVTG1 ^= GEM_DOVTG2 &  GEM_DOVTG3 = 0 &             
+               GEM_DAFSTÅ1 > 0 & GEM_DAFSTÅ2 = 0 & GEM_DAFSTÅ3 = 0)     
+            DO;                                                         
+              /* flyt midste dato til DOVTG1 */                         
+              IF GEM_DOVTG1 > GEM_DOVTG2                                
+              THEN                                                      
+                DO;                                                     
+                  HJDOVTG = GEM_DOVTG1;                                 
+                  GEM_DOVTG1 = GEM_DOVTG2;                              
+                  GEM_DOVTG2 = HJDOVTG;                                 
+                END;                                                    
+              IF GEM_DAFSTÅ1 > GEM_DOVTG2                               
+              THEN                                                      
+                DO;                                                     
+                  PERIODE1_START = GEM_DOVTG1;                          
+                  PERIODE1_SLUT  = GEM_DOVTG2;                          
+                  PERIODE2_START = GEM_DOVTG2;                          
+                  PERIODE2_SLUT  = GEM_DAFSTÅ1;                         
+                  PERIODE3_START = GEM_DAFSTÅ1;                         
+                  PERIODE3_SLUT  = BE55600M.ÅR1231;                     
+                  ANTAL_PERIODER = 3;                                   
+                END;                                                    
+              ELSE                                                      
+                DO;                                                     
+                  PERIODE1_START = GEM_DOVTG1;                          
+                  PERIODE1_SLUT  = GEM_DAFSTÅ1;                         
+                  PERIODE2_START = GEM_DAFSTÅ1;                         
+                  PERIODE2_SLUT  = GEM_DOVTG2;                          
+                  PERIODE3_START = GEM_DOVTG2;                          
+                  PERIODE3_SLUT  = BE55600M.ÅR1231;                     
+                  ANTAL_PERIODER = 3;                                   
+                END;                                                    
+            END;                                                        
+                                                                        
+        OTHER  /* flere perioder end der kan behandles*/                
+          DO;                                                           
+            PUT SKIP LIST('flere perioder end der kan behandles');      
+            LOG_BEHANDLING = LOG_BEHANDLING !!                          
+                             ' flere perioder end der kan behandles ';  
+            ANTAL_PERIODER = 0;                                         
+          END;                                                          
+        END; /*opsæt perioder*/                                         
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE1_START = ' !!      
+                         PERIODE1_START;                                
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE1_SLUT  =  ' !!     
+                         PERIODE1_SLUT;                                 
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE2_START = ' !!      
+                         PERIODE2_START;                                
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE2_SLUT  =  ' !!     
+                         PERIODE2_SLUT;                                 
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE3_START = ' !!      
+                         PERIODE3_START;                                
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE3_SLUT  =  ' !!     
+                         PERIODE3_SLUT;                                 
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' ANTAL_PERIODER =  ' !!     
+                         ANTAL_PERIODER;                                
+                                                                        
+                                                                        
+        DO ANT_IX = 1 TO IX;                                            
+                                                                        
+          SELECT;                                                       
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DAFSTÅ < BE55600M.ÅR0101 &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ > 0)                       
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = NEJ;          
+              END;                                                      
+                                                                        
+            /* En dag køb/salg tælles ikke med*/                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DAFSTÅ =                          
+                 TABEL_2FAMIL(ANT_IX).DOVTG &                           
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ > 0)                       
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = NEJ;          
+              END;                                                      
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE1_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ = 0)                       
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            /* fejlret defect 238 */                                    
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE1_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ > BE55600M.ÅR1231)         
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            /* fejlret defect 238 */                                    
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE2_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ > BE55600M.ÅR1231)         
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            /* fejlret defect 238 */                                    
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE3_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ > BE55600M.ÅR1231)         
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE2_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ = 0)                       
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG <= PERIODE3_START &         
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ = 0)                       
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG  <= PERIODE1_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ >= PERIODE1_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ <= PERIODE1_SLUT)          
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = NEJ;          
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = NEJ;          
+              END;                                                      
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG  <= PERIODE1_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ >= PERIODE2_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ <= PERIODE2_SLUT)          
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = NEJ;          
+              END;                                                      
+                                                                        
+            /* fejlrettelse til defect 242 30-04-2019 */                
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG  <= PERIODE2_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ >= PERIODE2_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ <= PERIODE2_SLUT)          
+               DO;                                                      
+                 TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = NEJ;         
+                 TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;          
+                 TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = NEJ;         
+               END;                                                     
+                                                                        
+            WHEN(TABEL_2FAMIL(ANT_IX).DOVTG  <= PERIODE1_START &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ <= PERIODE3_SLUT  &        
+                 TABEL_2FAMIL(ANT_IX).DAFSTÅ <= PERIODE2_SLUT)          
+              DO;                                                       
+                TABEL_2FAMIL(ANT_IX).PERIODE(1).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(2).ER_EJER = JA;           
+                TABEL_2FAMIL(ANT_IX).PERIODE(3).ER_EJER = JA;           
+              END;                                                      
+            OTHER                                                       
+              DO;                                                       
+                LOG_BEHANDLING = LOG_BEHANDLING !!                      
+                   ' PERIODER IKKE BESTEMT FOR  =  ' !!                 
+                     TABEL_2FAMIL(ANT_IX).DCPRCIR;                      
+              END;                                                      
+                                                                        
+          END; /* SELECT */                                             
+        END;                                                            
+                                                                        
+        SELECT(ANTAL_PERIODER);                                         
+          WHEN(0)                                                       
+            DO;                                                         
+              CALL OPSÆT_FEJLNUMMER_PÅ_ALLE_EJER;                       
+              PUT SKIP LIST('Opsæt fejlnummer for mange perioder');     
+              LOG_BEHANDLING = LOG_BEHANDLING !!                        
+                 ' Opsæt fejlnummer for mange perioder ';               
+            END;                                                        
+          WHEN(1)                                                       
+            DO;                                                         
+              CALL BEHANDL_PERIODE(1);                                  
+            END;                                                        
+          WHEN(2)                                                       
+            DO;                                                         
+              CALL BEHANDL_PERIODE(1);                                  
+              CALL BEHANDL_PERIODE(2);                                  
+            END;                                                        
+          WHEN(3)                                                       
+            DO;                                                         
+              CALL BEHANDL_PERIODE(1);                                  
+              CALL BEHANDL_PERIODE(2);                                  
+              CALL BEHANDL_PERIODE(3);                                  
+            END;                                                        
+          OTHER                                                         
+            DO;                                                         
+              CALL OPSÆT_FEJLNUMMER_PÅ_ALLE_EJER;                       
+              PUT SKIP LIST('FEJL I ANTAL PERIODER');                   
+              LOG_BEHANDLING = LOG_BEHANDLING !!                        
+                 ' FEJL I ANTAL PERIODER ';                             
+            END;                                                        
+        END; /*SELECT*/                                                 
+                                                                        
+       /* log behandling til fejlsøgning */                             
+       CALL SKRIV_LOG;                                                  
+                                                                        
+ /*********************************************************************/
+ BEHANDL_PERIODE: PROC(PERIODE_NR);                                     
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+        /* Gør klar til næste periode*/                                 
+        SUM_GANE_ENHED1 = 0;                                            
+        SUM_GANE_ENHED2 = 0;                                            
+        EN_EJER = JA;                                                   
+        MIN_EN_EJER_IKKE_HENFØRT = NEJ;                                 
+        MIN_ET_MATCH_ENHED1 = NEJ;                                      
+        MIN_ET_MATCH_ENHED2 = NEJ;                                      
+        GEM_DCPRN = 0;                                                  
+        EJER_ER_HENFØRT = NEJ;                                          
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !! ' PERIODE_NR = ' !!          
+                         PERIODE_NR;                                    
+                                                                        
+        /* Undersøg om alle ejer er matched til en enhed */             
+        /* da de kan kommer ind i forskellige rækkefølge */             
+        /* Først undersøges med aktuelle CSRP data       */             
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;                                                         
+              IF GEM_DCPRN = 0   /*første række */                      
+              THEN                                                      
+                DO;                                                     
+                  GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR;             
+                END;                                                    
+                                                                        
+              LOG_BEHANDLING = LOG_BEHANDLING !! ' MED I PERIODE ';     
+              LOG_BEHANDLING = LOG_BEHANDLING !! ' DCPRCIR ' !!         
+                               TABEL_2FAMIL(ANT_IX).DCPRCIR;            
+              LOG_BEHANDLING = LOG_BEHANDLING !! ' EENHEDLBNR ' !!      
+                               TABEL_2FAMIL(ANT_IX).EENHEDLBNR;         
+                                                                        
+              IF TABEL_2FAMIL(ANT_IX).FEJER > 1                         
+              THEN                                                      
+                DO;                                                     
+                  EN_EJER = NEJ;                                        
+                END;                                                    
+                                                                        
+              IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH = JA               
+              THEN                                                      
+                DO;                                                     
+                  LOG_BEHANDLING = LOG_BEHANDLING !! ' AKT MATCH ';     
+                  TABEL_2FAMIL(ANT_IX).                                 
+                              PERIODE(PERIODE_NR).MATCH_ENHED = JA;     
+                  IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1                
+                  THEN                                                  
+                    MIN_ET_MATCH_ENHED1 = JA;                           
+                  ELSE                                                  
+                    MIN_ET_MATCH_ENHED2 = JA;                           
+                END;                                                    
+                                                                        
+              IF GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR               
+              THEN                                                      
+                DO;                                                     
+                  IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH = JA           
+                  THEN                                                  
+                    EJER_ER_HENFØRT = JA;                               
+                END;                                                    
+              ELSE                                                      
+                DO;                                                     
+                  /*Afslut forgående ejer */                            
+                  IF EJER_ER_HENFØRT = NEJ                              
+                  THEN                                                  
+                    MIN_EN_EJER_IKKE_HENFØRT = JA;                      
+                                                                        
+                  /* Opsæt for næste ejer */                            
+                  GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR;             
+                  EJER_ER_HENFØRT = NEJ;                                
+                  IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH = JA           
+                  THEN                                                  
+                    EJER_ER_HENFØRT = JA;                               
+                END;                                                    
+                                                                        
+            END;                                                        
+        END;                                                            
+                                                                        
+        /* Afslut sidste ejer */                                        
+        IF EJER_ER_HENFØRT = NEJ                                        
+        THEN                                                            
+          MIN_EN_EJER_IKKE_HENFØRT = JA;                                
+                                                                        
+        IF MIN_EN_EJER_IKKE_HENFØRT = JA                                
+        THEN                                                            
+          LOG_BEHANDLING = LOG_BEHANDLING !!                            
+                          ' AKT MIN_EN_EJER_IKKE_HENFØRT ';             
+                                                                        
+        IF MIN_ET_MATCH_ENHED1                                          
+        THEN                                                            
+          LOG_BEHANDLING = LOG_BEHANDLING !!                            
+                          ' AKT MIN_ET_MATCH_ENHED1 ';                  
+                                                                        
+        IF MIN_ET_MATCH_ENHED2                                          
+        THEN                                                            
+          LOG_BEHANDLING = LOG_BEHANDLING !!                            
+                           ' AKT MIN_ET_MATCH_ENHED2 ';                 
+                                                                        
+                                                                        
+       /*Hvis der er ejer som ikke er henført og enheder     */         
+       /*uden heførte ejer skal det undersøges om der kan    */         
+       /*kan matches med historiske CSRP adrese oplysninger  */         
+                                                                        
+       IF (MIN_ET_MATCH_ENHED1 = NEJ  !                                 
+           MIN_ET_MATCH_ENHED2 = NEJ) &                                 
+           MIN_EN_EJER_IKKE_HENFØRT = JA                                
+       THEN                                                             
+         DO;                                                            
+           GEM_DCPRN = 0;                                               
+           DO ANT_IX = 1 TO IX;                                         
+             IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA   
+             THEN                                                       
+               DO;                                                      
+                 IF GEM_DCPRN = 0   /*første række */                   
+                 THEN                                                   
+                   DO;                                                  
+                     GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR;          
+                   END;                                                 
+                                                                        
+                 LOG_BEHANDLING = LOG_BEHANDLING !! ' HIST ';           
+                 LOG_BEHANDLING = LOG_BEHANDLING !! ' DCPRCIR ' !!      
+                                  TABEL_2FAMIL(ANT_IX).DCPRCIR;         
+                 LOG_BEHANDLING = LOG_BEHANDLING !! ' EENHEDLBNR ' !!   
+                                  TABEL_2FAMIL(ANT_IX).EENHEDLBNR;      
+                                                                        
+                 IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH  = JA  !        
+                    TABEL_2FAMIL(ANT_IX).HIST_CSRP_MATCH = JA           
+                 THEN                                                   
+                   DO;                                                  
+                     LOG_BEHANDLING = LOG_BEHANDLING !! 'A/H MATCH ';   
+                     TABEL_2FAMIL(ANT_IX).                              
+                              PERIODE(PERIODE_NR).MATCH_ENHED = JA;     
+                     IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1             
+                     THEN                                               
+                       MIN_ET_MATCH_ENHED1 = JA;                        
+                     ELSE                                               
+                       MIN_ET_MATCH_ENHED2 = JA;                        
+                   END;                                                 
+                                                                        
+                 IF GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR            
+                 THEN                                                   
+                   DO;                                                  
+                     IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH  = JA  !    
+                        TABEL_2FAMIL(ANT_IX).HIST_CSRP_MATCH = JA       
+                     THEN                                               
+                       EJER_ER_HENFØRT = JA;                            
+                   END;                                                 
+                 ELSE                                                   
+                   DO;                                                  
+                     /*Afslut forgående ejer */                         
+                     IF EJER_ER_HENFØRT = NEJ                           
+                     THEN                                               
+                       MIN_EN_EJER_IKKE_HENFØRT = JA;                   
+                                                                        
+                     /* Opsæt for næste ejer */                         
+                     GEM_DCPRN = TABEL_2FAMIL(ANT_IX).DCPRCIR;          
+                     EJER_ER_HENFØRT = NEJ;                             
+                     IF TABEL_2FAMIL(ANT_IX).AKT_CSRP_MATCH  = JA  !    
+                        TABEL_2FAMIL(ANT_IX).HIST_CSRP_MATCH = JA       
+                     THEN                                               
+                       EJER_ER_HENFØRT = JA;                            
+                   END;                                                 
+               END;                                                     
+           END;                                                         
+                                                                        
+                                                                        
+           IF MIN_EN_EJER_IKKE_HENFØRT = JA                             
+           THEN                                                         
+             LOG_BEHANDLING = LOG_BEHANDLING !!                         
+                             ' A/H MIN_EN_EJER_IKKE_HENFØRT ';          
+                                                                        
+           IF MIN_ET_MATCH_ENHED1                                       
+           THEN                                                         
+             LOG_BEHANDLING = LOG_BEHANDLING !!                         
+                             ' A/H MIN_ET_MATCH_ENHED1 ';               
+                                                                        
+           IF MIN_ET_MATCH_ENHED2                                       
+           THEN                                                         
+             LOG_BEHANDLING = LOG_BEHANDLING !!                         
+                              ' A/H MIN_ET_MATCH_ENHED2 ';              
+         END; /* Undersøg akt og historik */                            
+                                                                        
+        /* Find hvordan ejerforholdene skal behandles*/                 
+                                                                        
+        SELECT;                                                         
+          WHEN(EN_EJER = JA)                                            
+            DO;                                                         
+              CALL BEHANDL_EN_EJER(PERIODE_NR);                         
+            END;                                                        
+       /* Alle ejer er henført til en ejerbolig fordeling      */       
+       /* der er henført ejer til begge ejerbolig fordelinger  */       
+          WHEN(MIN_EN_EJER_IKKE_HENFØRT = NEJ &                         
+               MIN_ET_MATCH_ENHED1 = JA     &                           
+               MIN_ET_MATCH_ENHED2 = JA)                                
+            DO;                                                         
+              CALL BEHANDL_HENFØRTE_EJER(PERIODE_NR);                   
+            END;                                                        
+       /* Alle ejer er henført til en ejerbolig fordeling        */     
+       /* der er kun henført ejer til den ene enhed              */     
+       /* antag at de ejer som findes har råderet over den anden */     
+       /* enhed (denne regl er ikke afklaret med SKAT)           */     
+          WHEN(MIN_EN_EJER_IKKE_HENFØRT = NEJ &                         
+              ((MIN_ET_MATCH_ENHED1 = JA  &                             
+                MIN_ET_MATCH_ENHED2 = NEJ) !                            
+               (MIN_ET_MATCH_ENHED1 = NEJ  &                            
+                MIN_ET_MATCH_ENHED2 = JA)))                             
+            DO;                                                         
+              CALL BEHANDL_ANTAG_HENFØRTE_EJER_2(PERIODE_NR);           
+            END;                                                        
+                                                                        
+       /* Nogle ejer er henført men kun til den */                      
+       /* ene ejerbolig fordeling               */                      
+          WHEN(MIN_EN_EJER_IKKE_HENFØRT = JA &                          
+              ((MIN_ET_MATCH_ENHED1 = JA  &                             
+                MIN_ET_MATCH_ENHED2 = NEJ) !                            
+               (MIN_ET_MATCH_ENHED1 = NEJ  &                            
+                MIN_ET_MATCH_ENHED2 = JA)))                             
+            DO;                                                         
+              /* Antag at de ejer som ikke er henført  */               
+              /* til en ejerbolig fordeling har råderet over  */        
+              /* den fordeling uden henførte ejer  */                   
+              CALL BEHANDL_ANTAG_HENFØRTE_EJER(PERIODE_NR);             
+            END;                                                        
+       /* Der er henført ejer til beggee enheder, men der findes */     
+       /* ejer som ikke er henført                               */     
+          WHEN(MIN_EN_EJER_IKKE_HENFØRT = JA &                          
+               MIN_ET_MATCH_ENHED1 = JA    &                            
+               MIN_ET_MATCH_ENHED2 = JA)                                
+            DO;                                                         
+              CALL OPSÆT_FEJLNUMMER(PERIODE_NR);                        
+            END;                                                        
+       /* ejendomme uden henførte ejer bliver behandlet her      */     
+          OTHER                                                         
+            DO;                                                         
+              ANTAL_IKKE_HENFØRT = ANTAL_IKKE_HENFØRT + 1;              
+              CALL OPSÆT_FEJLNUMMER(PERIODE_NR);                        
+              LOG_BEHANDLING = LOG_BEHANDLING !! ' IKKE_HENFØRTE ';     
+            END;                                                        
+        END; /*SELECT*/                                                 
+                                                                        
+                                                                        
+ END BEHANDL_PERIODE;                                                   
+ /*********************************************************************/
+ /* Efter alle ejerforhold er i den intern arrray er behandlet        */
+ /* skrives de til output filen                                       */
+ /*********************************************************************/
+                                                                        
+        /* Skriv indhold af tabel til fil */                            
+        DO ANT_IX = 1 TO IX;                                            
+          BE339 = '';                                                   
+          BE339 = TABEL_2FAMIL(ANT_IX), BY NAME;                        
+          CALL SKRIV_TABEL_BE339O;                                      
+        END;                                                            
+                                                                        
+        /* Gør tabel klar til næste ejendom som er læst ind */          
+        /* fra filen i BE338                                */          
+                                                                        
+        IX = 0;                                                         
+        TABEL_2FAMIL(*) = '';                                           
+        GEM_DCPRN  = BE338.DCPRCIR;                                     
+        GEM_EKOMNR = BE338.EKOMNR;                                      
+        GEM_EEJDNR = BE338.EEJDNR;                                      
+                                                                        
+ /*********************************************************************/
+ /* Der er kun en ejer af ejendommen alle enheder skal være 100 pct   */
+ /* ejet                                                              */
+ /*********************************************************************/
+ BEHANDL_EN_EJER: PROC(PERIODE_NR);                                     
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+    LOG_BEHANDLING = LOG_BEHANDLING !! ' EN_EJER ';                     
+                                                                        
+    /* Opsæt ejer procent*/                                             
+         DO ANT_IX = 1 TO IX;                                           
+           IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA     
+           THEN                                                         
+             DO;                                                        
+               TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 10000;               
+             END;                                                       
+         END;                                                           
+                                                                        
+                                                                        
+ END BEHANDL_EN_EJER;                                                   
+ /*********************************************************************/
+ /* Der er flere ejer af ejendommen og de er alle henført til en      */
+ /* ejerbolig fordeling og der findes ejer til begge fordelinger      */
+ /* i perioden                                                        */
+ /*********************************************************************/
+ BEHANDL_HENFØRTE_EJER: PROC(PERIODE_NR);                               
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' HENFØRTE_EJER ';                             
+                                                                        
+    /* Bestem sum af ejer procent for hver enhed */                     
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;                                                         
+              IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED   
+              THEN                                                      
+                DO;                                                     
+                  IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1                
+                  THEN                                                  
+                    SUM_GANE_ENHED1 = SUM_GANE_ENHED1 +                 
+                                   TABEL_2FAMIL(ANT_IX).GANE;           
+                                                                        
+                  IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2                
+                  THEN                                                  
+                    SUM_GANE_ENHED2 = SUM_GANE_ENHED2 +                 
+                                   TABEL_2FAMIL(ANT_IX).GANE;           
+                END;                                                    
+            END;                                                        
+        END;                                                            
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED1 ' !! SUM_GANE_ENHED1;        
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED2 ' !! SUM_GANE_ENHED2;        
+                                                                        
+    /* Bestem endelig ejer procent*/                                    
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;                                                         
+              ANTAL_HENFØRT = ANTAL_HENFØRT + 1;                        
+    /*#04*/   IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED   
+              THEN                                                      
+                DO;                                                     
+                  IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1                
+                  THEN                                                  
+                    DO;                                                 
+                      IF SUM_GANE_ENHED1 > 0                            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =             
+                                    (TABEL_2FAMIL(ANT_IX).GANE/         
+                                              SUM_GANE_ENHED1) * 10000; 
+                      ELSE                                              
+                        TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;          
+                    END;                                                
+                                                                        
+                  IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2                
+                  THEN                                                  
+                    DO;                                                 
+                      IF SUM_GANE_ENHED2 > 0                            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =             
+                                     (TABEL_2FAMIL(ANT_IX).GANE/        
+                                               SUM_GANE_ENHED2) * 10000;
+                      ELSE                                              
+                        TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;          
+                    END;                                                
+                                                                        
+                  IF TABEL_2FAMIL(ANT_IX).BESTEMT_GANE > 0              
+                  THEN                                                  
+                    TABEL_2FAMIL(ANT_IX).GANE =                         
+                       TABEL_2FAMIL(ANT_IX).BESTEMT_GANE;               
+            END;                                                        
+          ELSE                                                          
+            DO;                                                         
+               TABEL_2FAMIL(ANT_IX).GANE = 0;                           
+            END;                                                        
+          END;                                                          
+        END;                                                            
+                                                                        
+ END BEHANDL_HENFØRTE_EJER;                                             
+ /*********************************************************************/
+ /* Henfør de ejer som ikke er henført til den ejerbolig fordeling    */
+ /* som ikke har nogen ejer og beregn ejerprocent                     */
+ /*********************************************************************/
+ BEHANDL_ANTAG_HENFØRTE_EJER: PROC(PERIODE_NR);                         
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' ANTAG_HENFØRT_EJER ';                        
+                                                                        
+                                                                        
+        /* Undersøg om ejer er henført og antag match for dem */        
+        /* som ikke er henført                                */        
+                                                                        
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;  /* undersøg om ejer ikke er  henført */                
+              IF TABEL_2FAMIL(ANT_IX).DCPRCIR   =                       
+                 TABEL_2FAMIL(ANT_IX +1).DCPRCIR   &                    
+                 TABEL_2FAMIL(ANT_IX).                                  
+                        PERIODE(PERIODE_NR).MATCH_ENHED = NEJ &         
+                 TABEL_2FAMIL(ANT_IX+1).                                
+                        PERIODE(PERIODE_NR).MATCH_ENHED = NEJ           
+              THEN                                                      
+                DO;                                                     
+                  IF ^MIN_ET_MATCH_ENHED1                               
+                  THEN                                                  
+                    DO; /* Antag at ejer skal henføres */               
+                      IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).                           
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                                                                        
+                      IF TABEL_2FAMIL(ANT_IX+1).EENHEDLBNR = 1          
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX+1).                         
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                      ANTAL_ANTAGET = ANTAL_ANTAGET + 1;                
+                    END;                                                
+                                                                        
+                  IF ^MIN_ET_MATCH_ENHED2                               
+                  THEN                                                  
+                    DO; /* Antag at ejer skal henføres */               
+                      IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).                           
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                                                                        
+                      IF TABEL_2FAMIL(ANT_IX+1).EENHEDLBNR = 2          
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX+1).                         
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                      ANTAL_ANTAGET = ANTAL_ANTAGET + 1;                
+                    END;                                                
+                END;                                                    
+            END;                                                        
+        END;                                                            
+                                                                        
+                                                                        
+        /* Bestem sum af ejer procent for hver enhed */                 
+        DO ANT_IX = 1 TO IX;                                            
+           IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA     
+           THEN                                                         
+             DO;                                                        
+               IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED  
+               THEN                                                     
+                 DO;                                                    
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1               
+                   THEN                                                 
+                     SUM_GANE_ENHED1 = SUM_GANE_ENHED1 +                
+                                    TABEL_2FAMIL(ANT_IX).GANE;          
+                                                                        
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2               
+                   THEN                                                 
+                     SUM_GANE_ENHED2 = SUM_GANE_ENHED2 +                
+                                    TABEL_2FAMIL(ANT_IX).GANE;          
+                 END;                                                   
+             END;                                                       
+        END;                                                            
+                                                                        
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED1 ' !! SUM_GANE_ENHED1;        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED2 ' !! SUM_GANE_ENHED2;        
+                                                                        
+        /* Bestem endelig ejer procent*/                                
+        DO ANT_IX = 1 TO IX;                                            
+           IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA     
+           THEN                                                         
+             DO;                                                        
+               IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED  
+               THEN                                                     
+                 DO;                                                    
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1               
+                   THEN                                                 
+                     DO;                                                
+                       IF SUM_GANE_ENHED1 > 0                           
+                       THEN                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =            
+                                     (TABEL_2FAMIL(ANT_IX).GANE/        
+                                               SUM_GANE_ENHED1) * 10000;
+                       ELSE                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;         
+                     END;                                               
+                                                                        
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2               
+                   THEN                                                 
+                     DO;                                                
+                       IF SUM_GANE_ENHED2 > 0                           
+                       THEN                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =            
+                                     (TABEL_2FAMIL(ANT_IX).GANE/        
+                                               SUM_GANE_ENHED2) * 10000;
+                       ELSE                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;         
+                     END;                                               
+                                                                        
+                   TABEL_2FAMIL(ANT_IX).GANE =                          
+                               TABEL_2FAMIL(ANT_IX).BESTEMT_GANE;       
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                    TABEL_2FAMIL(ANT_IX).GANE = 0;                      
+                 END;                                                   
+                                                                        
+                LOG_BEHANDLING = LOG_BEHANDLING   !!                    
+                                 ' BESTEMT_GANE ' !!                    
+                                 TABEL_2FAMIL(ANT_IX).BESTEMT_GANE;     
+                                                                        
+                LOG_BEHANDLING = LOG_BEHANDLING   !!                    
+                                 ' GANE ' !!                            
+                                 TABEL_2FAMIL(ANT_IX).GANE;             
+           END;                                                         
+        END;                                                            
+                                                                        
+ END BEHANDL_ANTAG_HENFØRTE_EJER;                                       
+ /*********************************************************************/
+ /* Da alle ejer er henført til den ene enhed og der ikke er henført  */
+ /* nogen ejer til den anden enhed antages ejerene at have råderet    */
+ /* over den anden enhed når ejerprocent skal bestemmes               */
+ /*********************************************************************/
+ BEHANDL_ANTAG_HENFØRTE_EJER_2: PROC(PERIODE_NR);                       
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' ANTAG_HENFØRT_EJER_2';                       
+                                                                        
+                                                                        
+        /* Henfør ejer er til den enhed som mangler ejer   */           
+        /* ved at antage match for dem                     */           
+                                                                        
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;  /* undersøg om ejer ikke er henført til enhed */       
+                  IF ^MIN_ET_MATCH_ENHED1                               
+                  THEN                                                  
+                    DO; /* Antag at ejer skal henføres */               
+                      IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).                           
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                                                                        
+                      IF TABEL_2FAMIL(ANT_IX+1).EENHEDLBNR = 1          
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX+1).                         
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                                                                        
+                      ANTAL_ANTAGET = ANTAL_ANTAGET + 1;                
+                    END;                                                
+                                                                        
+                  IF ^MIN_ET_MATCH_ENHED2                               
+                  THEN                                                  
+                    DO; /* Antag at ejer skal henføres */               
+                      IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2            
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX).                           
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                                                                        
+                      IF TABEL_2FAMIL(ANT_IX+1).EENHEDLBNR = 2          
+                      THEN                                              
+                        TABEL_2FAMIL(ANT_IX+1).                         
+                               PERIODE(PERIODE_NR).MATCH_ENHED = JA;    
+                      ANTAL_ANTAGET = ANTAL_ANTAGET + 1;                
+                    END;                                                
+            END;                                                        
+        END;                                                            
+                                                                        
+                                                                        
+        /* Bestem sum af ejer procent for hver enhed */                 
+        DO ANT_IX = 1 TO IX;                                            
+           IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA     
+           THEN                                                         
+             DO;                                                        
+               IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED  
+               THEN                                                     
+                 DO;                                                    
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1               
+                   THEN                                                 
+                     SUM_GANE_ENHED1 = SUM_GANE_ENHED1 +                
+                                    TABEL_2FAMIL(ANT_IX).GANE;          
+                                                                        
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2               
+                   THEN                                                 
+                     SUM_GANE_ENHED2 = SUM_GANE_ENHED2 +                
+                                    TABEL_2FAMIL(ANT_IX).GANE;          
+                 END;                                                   
+             END;                                                       
+        END;                                                            
+                                                                        
+                                                                        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED1 ' !! SUM_GANE_ENHED1;        
+        LOG_BEHANDLING = LOG_BEHANDLING !!                              
+                         ' SUM_GANE_ENHED2 ' !! SUM_GANE_ENHED2;        
+                                                                        
+        /* Bestem endelig ejer procent*/                                
+        DO ANT_IX = 1 TO IX;                                            
+           IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA     
+           THEN                                                         
+             DO;                                                        
+               IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).MATCH_ENHED  
+               THEN                                                     
+                 DO;                                                    
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 1               
+                   THEN                                                 
+                     DO;                                                
+                       IF SUM_GANE_ENHED1 > 0                           
+                       THEN                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =            
+                                     (TABEL_2FAMIL(ANT_IX).GANE/        
+                                               SUM_GANE_ENHED1) * 10000;
+                       ELSE                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;         
+                     END;                                               
+                                                                        
+                   IF TABEL_2FAMIL(ANT_IX).EENHEDLBNR = 2               
+                   THEN                                                 
+                     DO;                                                
+                       IF SUM_GANE_ENHED2 > 0                           
+                       THEN                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE =            
+                                     (TABEL_2FAMIL(ANT_IX).GANE/        
+                                               SUM_GANE_ENHED2) * 10000;
+                       ELSE                                             
+                         TABEL_2FAMIL(ANT_IX).BESTEMT_GANE = 0;         
+                     END;                                               
+                                                                        
+                   TABEL_2FAMIL(ANT_IX).GANE =                          
+                               TABEL_2FAMIL(ANT_IX).BESTEMT_GANE;       
+                 END;                                                   
+               ELSE                                                     
+                 DO;                                                    
+                    TABEL_2FAMIL(ANT_IX).GANE = 0;                      
+                 END;                                                   
+                                                                        
+                LOG_BEHANDLING = LOG_BEHANDLING   !!                    
+                                 ' BESTEMT_GANE ' !!                    
+                                 TABEL_2FAMIL(ANT_IX).BESTEMT_GANE;     
+                                                                        
+                LOG_BEHANDLING = LOG_BEHANDLING   !!                    
+                                 ' GANE ' !!                            
+                                 TABEL_2FAMIL(ANT_IX).GANE;             
+           END;                                                         
+        END;                                                            
+                                                                        
+ END BEHANDL_ANTAG_HENFØRTE_EJER_2;                                     
+ /*********************************************************************/
+ END AFSLUT_EJENDOM;                                                    
+ /*********************************************************************/
+ /* MATCH PÅ CSRP ADRESSE TAGET FRA BE84300L OG TILRETTET             */
+ /* DER SØGES I CSRP MED DEN ENHED SOM UNDERSØGES                     */
+ /*********************************************************************/
+ UDFYLD_SØG: PROC;                                                      
+                                                                        
+ DCL     HJ_PIC4         PIC       '(4)9';                              
+ DCL     HJ_CHAR1        CHAR      (1);                                 
+                                                                        
+ DCL     STORE       CHAR (29) INIT ('ABCDEFGHIJKLMNOPQRSTUVWXYZÅØÆ');  
+ DCL     SMÅ         CHAR (29) INIT ('abcdefghijklmnopqrstuvwxyzåøæ');  
+                                                                        
+     SØG_DCPR          = '';                                            
+     SØG_EKOMNR        = '';                                            
+     SØG_VEJK_ENHED    = '';                                            
+     SØG_HUSNR_ENHED1  = '';                                            
+     SØG_HUSNR_ENHED2  = '';                                            
+     SØG_ETAGE1        = '';                                            
+     SØG_ETAGE2        = '';                                            
+     SØG_ETAGE3        = '';                                            
+     SØG_SIDE_DØRNR1   = '';                                            
+     SØG_SIDE_DØRNR2   = '';                                            
+     SØG_SIDE_DØRNR3   = '';                                            
+     SØG_HUSBOGSTAV1   = '';                                            
+     SØG_HUSBOGSTAV2   = '';                                            
+     SØG_HUSBOGSTAV3   = '';                                            
+                                                                        
+     SØG_DCPR      = TABEL_2FAMIL(IX).DCPRCIR;                          
+     SØG_EKOMNR    = TABEL_2FAMIL(IX).EKOMNR;                           
+     HJ_PIC4       = TABEL_2FAMIL(IX).VEJK_ENHED;                       
+     SØG_VEJK_ENHED  = HJ_PIC4;                                         
+                                                                        
+     SØG_HUSNR_ENHED1 = SUBSTR(TABEL_2FAMIL(IX).HUSNR_ENHED,1,3);       
+     SØG_HUSNR_ENHED2 = SUBSTR(TABEL_2FAMIL(IX).HUSNR_ENHED,1,3);       
+                                                                        
+     IF SØG_HUSNR_ENHED1 = '   '                                        
+     THEN                                                               
+       SØG_HUSNR_ENHED2 = '000';                                        
+                                                                        
+     IF SØG_HUSNR_ENHED1 = '000'                                        
+     THEN                                                               
+       SØG_HUSNR_ENHED2 = '   ';                                        
+                                                                        
+     HJ_CHAR1 = SUBSTR(TABEL_2FAMIL(IX).HUSNR_ENHED,4,1);               
+     SØG_HUSBOGSTAV1 = TRANSLATE (HJ_CHAR1, STORE, SMÅ);                
+     SØG_HUSBOGSTAV2 = TRANSLATE (HJ_CHAR1, SMÅ, STORE);                
+                                                                        
+     SELECT;                                                            
+       WHEN(TABEL_2FAMIL(IX).ETAGE_ENHED = '  ' !                       
+          TABEL_2FAMIL(IX).ETAGE_ENHED = '00')                          
+         DO;                                                            
+           SØG_ETAGE1 = TABEL_2FAMIL(IX).ETAGE_ENHED;                   
+           SØG_ETAGE2 = '  ';                                           
+           SØG_ETAGE3 = '00';                                           
+         END;                                                           
+                                                                        
+        WHEN(VERIFY(SUBSTR(TABEL_2FAMIL(IX).ETAGE_ENHED                 
+            ,1,1),' 0') = 0 &                                           
+           VERIFY(SUBSTR(TABEL_2FAMIL(IX).ETAGE_ENHED                   
+            ,2,1),'0123456789') = 0)                                    
+         DO;                                                            
+           /* Numerisk       */                                         
+           SØG_ETAGE1 = '0' !!                                          
+                      SUBSTR(TABEL_2FAMIL(IX).ETAGE_ENHED,2,1);         
+           /* Højrestillet   */                                         
+           SØG_ETAGE2 = ' ' !!                                          
+                      SUBSTR(TABEL_2FAMIL(IX).ETAGE_ENHED,2,1);         
+           /* Venstrestillet */                                         
+           SØG_ETAGE3 =                                                 
+                      SUBSTR(TABEL_2FAMIL(IX).ETAGE_ENHED,2,1) !! ' ';  
+         END;                                                           
+       OTHER                                                            
+         DO;                                                            
+         SØG_ETAGE1 = TABEL_2FAMIL(IX).ETAGE_ENHED;                     
+         SØG_ETAGE2 =                                                   
+              TRANSLATE (TABEL_2FAMIL(IX).ETAGE_ENHED, STORE, SMÅ);     
+         SØG_ETAGE3 =                                                   
+              TRANSLATE (TABEL_2FAMIL(IX).ETAGE_ENHED, SMÅ, STORE);     
+         END;                                                           
+     END; /*SELECT*/                                                    
+                                                                        
+     IF VERIFY(TABEL_2FAMIL(IX).SDØR_ENHED,'0123456789') = 0            
+     THEN                                                               
+       DO;                                                              
+         SØG_SIDE_DØRNR1 = TRIM(TABEL_2FAMIL(IX).SDØR_ENHED,' 0');      
+         SØG_SIDE_DØRNR2 = TABEL_2FAMIL(IX).SDØR_ENHED;                 
+         HJ_PIC4         = TABEL_2FAMIL(IX).SDØR_ENHED;                 
+         SØG_SIDE_DØRNR3 = HJ_PIC4;                                     
+       END;                                                             
+     ELSE                                                               
+       DO;                                                              
+         /* FELTET ER VENSTRE STILLET I TABELLEN*/                      
+         SØG_SIDE_DØRNR1 = TRIM(TABEL_2FAMIL(IX).SDØR_ENHED,' 0');      
+         SØG_SIDE_DØRNR2 = TRANSLATE (SØG_SIDE_DØRNR1, STORE, SMÅ);     
+         SØG_SIDE_DØRNR3 = TRANSLATE (SØG_SIDE_DØRNR1, SMÅ, STORE);     
+       END;                                                             
+                                                                        
+ /* PUT SKIP LIST('TABEL_2FAMIL(IX).DCPRCIR ',                          
+                    TABEL_2FAMIL(IX).DCPRCIR);                          
+    PUT SKIP LIST('TABEL_2FAMIL(IX).EKOMNR ',                           
+                     TABEL_2FAMIL(IX).EKOMNR);                          
+    PUT SKIP LIST('TABEL_2FAMIL(IX).EEJDNR ',                           
+                    TABEL_2FAMIL(IX).EEJDNR);                           
+    PUT SKIP LIST('TABEL_2FAMIL(IX).EENHEDLBNR ',                       
+                    TABEL_2FAMIL(IX).EENHEDLBNR);                       
+                                                                        
+    PUT SKIP LIST('SØG_DCPR          = ',SØG_DCPR);                     
+    PUT SKIP LIST('SØG_EKOMNR        = ',SØG_EKOMNR);                   
+    PUT SKIP LIST('SØG_VEJK_ENHED    = ',SØG_VEJK_ENHED);               
+    PUT SKIP LIST('SØG_HUSNR_ENHED1  = ',SØG_HUSNR_ENHED1);             
+    PUT SKIP LIST('SØG_HUSNR_ENHED2  = ',SØG_HUSNR_ENHED2);             
+    PUT SKIP LIST('SØG_ETAGE1        = ',SØG_ETAGE1);                   
+    PUT SKIP LIST('SØG_ETAGE2        = ',SØG_ETAGE2);                   
+    PUT SKIP LIST('SØG_ETAGE3        = ',SØG_ETAGE3);                   
+    PUT SKIP LIST('SØG_SIDE_DØRNR1   = ',SØG_SIDE_DØRNR1);              
+    PUT SKIP LIST('SØG_SIDE_DØRNR2   = ',SØG_SIDE_DØRNR2);              
+    PUT SKIP LIST('SØG_SIDE_DØRNR3   = ',SØG_SIDE_DØRNR3);              
+    PUT SKIP LIST('SØG_HUSBOGSTAV1   = ',SØG_HUSBOGSTAV1);              
+    PUT SKIP LIST('SØG_HUSBOGSTAV2   = ',SØG_HUSBOGSTAV2);              
+    PUT SKIP LIST('SØG_HUSBOGSTAV3   = ',SØG_HUSBOGSTAV3); */           
+                                                                        
+ END UDFYLD_SØG;                                                        
+ /*********************************************************************/
+ /* Opsæt TEKFEJLNR fejlnummer der bruges til senere at opsætte       */
+ /* endeligt EVS fejlnummer i BE84300/BE84400 ?                       */
+ /* Gane skal nulstilles ved fejl markering                           */
+ /*********************************************************************/
+ OPSÆT_FEJLNUMMER: PROC(PERIODE_NR);                                    
+                                                                        
+ DCL PERIODE_NR BIN FIXED(15);                                          
+                                                                        
+        DO ANT_IX = 1 TO IX;                                            
+          IF TABEL_2FAMIL(ANT_IX).PERIODE(PERIODE_NR).ER_EJER = JA      
+          THEN                                                          
+            DO;                                                         
+              TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3902;                    
+              TABEL_2FAMIL(ANT_IX).GANE      = 0;                       
+            END;                                                        
+        END;                                                            
+                                                                        
+ END OPSÆT_FEJLNUMMER;                                                  
+ /*********************************************************************/
+ /* Opsæt TEKFEJLNR fejlnummer der bruges til senere at opsætte       */
+ /* endeligt EVS fejlnummer i BE84300/BE84400 ?                       */
+ /* Gane skal nulstilles ved fejl markering                           */
+ /*********************************************************************/
+ OPSÆT_FEJLNUMMER_PÅ_ALLE_EJER: PROC;                                   
+                                                                        
+        DO ANT_IX = 1 TO IX;                                            
+          TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3902;                        
+          TABEL_2FAMIL(ANT_IX).GANE      = 0;                           
+        END;                                                            
+                                                                        
+ END OPSÆT_FEJLNUMMER_PÅ_ALLE_EJER;                                     
+ /*********************************************************************/
+ /* Skriv BE339O record fra input areal                               */
+ /*********************************************************************/
+ SKRIV_INPUT_BE339O: PROC;                                              
+                                                                        
+      ANTAL_SKREVET = ANTAL_SKREVET + 1;                                
+                                                                        
+      WRITE FILE(BE339O) FROM(BE338_AREA);                              
+                                                                        
+ END SKRIV_INPUT_BE339O;                                                
+ /*********************************************************************/
+ /* Skriv BE339O record fra tabel areal                               */
+ /*********************************************************************/
+ SKRIV_TABEL_BE339O: PROC;                                              
+                                                                        
+      ANTAL_SKREVET = ANTAL_SKREVET + 1;                                
+                                                                        
+      IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR > 0                             
+      THEN                                                              
+        DO;                                                             
+          ANTAL_MED_TEKFEJL = ANTAL_MED_TEKFEJL + 1;                    
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 9999                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_9999 = ANTAL_TEKFEJLNR_9999 + 1;            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 9998                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_9998 = ANTAL_TEKFEJLNR_9998 + 1;            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3700                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_3700 = ANTAL_TEKFEJLNR_3700 + 1;            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3701                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_3701 = ANTAL_TEKFEJLNR_3701 + 1;            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3800                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_3800 = ANTAL_TEKFEJLNR_3800 + 1;            
+                                                                        
+          IF TABEL_2FAMIL(ANT_IX).TEKFEJLNR = 3902                      
+          THEN                                                          
+            ANTAL_TEKFEJLNR_3902 = ANTAL_TEKFEJLNR_3902 + 1;            
+                                                                        
+        END;                                                            
+                                                                        
+      WRITE FILE(BE339O) FROM(BE339);                                   
+                                                                        
+ END SKRIV_TABEL_BE339O;                                                
+ /*********************************************************************/
+ SKRIV_LOG: PROC;                                                       
+                                                                        
+      WRITE FILE(BE3391O) FROM(LOG_BEHANDLING);                         
+                                                                        
+ END SKRIV_LOG;                                                         
+ /*********************************************************************/
+ /* Luk filer og put skip tællere                                     */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+      CLOSE FILE(BE338I);                                               
+      CLOSE FILE(BE339O);                                               
+      CLOSE FILE(BE3391O);                                              
+                                                                        
+      PUT SKIP LIST('ANTAL LÆST               ',ANTAL_LÆST);            
+      PUT SKIP LIST('ANTAL MED CEJDTYPE 4     ',ANTAL_CEJDTYPE4);       
+      PUT SKIP LIST('ANTAL MED CEJDTYPE 5     ',ANTAL_CEJDTYPE5);       
+      PUT SKIP LIST('ANTAL EJER_ADR FRA CSRP  ',ANTAL_EJER_ADR_CSRP);   
+      PUT SKIP LIST('ANTAL SKREVET            ',ANTAL_SKREVET);         
+      PUT SKIP LIST('ANTAL HENFØRT            ',ANTAL_HENFØRT);         
+      PUT SKIP LIST('ANTAL ANTAGET HENFØRT    ',ANTAL_ANTAGET);         
+      PUT SKIP LIST('ANTAL IKKE HENFØRT       ',ANTAL_IKKE_HENFØRT);    
+      PUT SKIP LIST('ANTAL DUBLETTER OPRETTET ',ANTAL_DUB_OPRET);       
+                                                                        
+      PUT SKIP LIST('ANTAL ENHEDSLBNR SAT LIG 1',ANTAL_SAT_ENHEDLBNR1); 
+                                                                        
+      PUT SKIP LIST('ANTAL ADRESSER HENTET    ',ANTAL_BQ805_OK);        
+      PUT SKIP LIST('ANTAL ADDRESSER EJ FUNDET',ANTAL_BQ805_EJ_OK);     
+                                                                        
+      PUT SKIP LIST('ANTAL TEKFEJL OPSAT       ',ANTAL_MED_TEKFEJL);    
+      PUT SKIP LIST('ANTAL TEKFEJLNR 3700 FEJL ',ANTAL_TEKFEJLNR_3700); 
+      PUT SKIP LIST('ANTAL TEKFEJLNR 3701 ADVIS',ANTAL_TEKFEJLNR_3701); 
+      PUT SKIP LIST('ANTAL TEKFEJLNR 3800 ADVIS',ANTAL_TEKFEJLNR_3800); 
+      PUT SKIP LIST('ANTAL TEKFEJLNR 3902 ADVIS',ANTAL_TEKFEJLNR_3902); 
+      PUT SKIP LIST('ANTAL TEKFEJLNR 9998 ADVIS',ANTAL_TEKFEJLNR_9998); 
+      PUT SKIP LIST('ANTAL TEKFEJLNR 9999 ADVIS',ANTAL_TEKFEJLNR_9999); 
+                                                                        
+      PUT SKIP LIST('Program BE33925 sluttet');                         
+                                                                        
+ END AFSLUT;                                                            
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE          RUTINE *
+ **********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /* Anvend makro BE33700M - Dan et venstrestillet adresse felt        */
+ /*                         på 50 karakterer                          */
+ /*********************************************************************/
+ OPSÆT_ENHEDS_ADRESSE: PROC RETURNS(CHAR(50));                          
+                                                                        
+ VEJ_ADRESSENAVN = TJEK_ENHEDBELIG;   //D1177                           
+ HUS_NUMMER      = DCLBE80200T.HUSNR_ENH;                               
+ BYGNING_NUMMER  = '';                                                  
+ ETAGE           = DCLBE80200T.ETAGE_ENH;                               
+ SIDE_DØRNR      = DCLBE80200T.DØRNR_ENH;                               
+                                                                        
+ %INCLUDE BE33700M;      /* Kode skal ligge her efter init af felter */ 
+                                                                        
+ RETURN(WAREAL);                                                        
+                                                                        
+ END OPSÆT_ENHEDS_ADRESSE;                                              
+ /********************************************************************/ 
+ /* TJEK_ENHEDBELIG  D1177                                           */ 
+ /*         læser adresse fra vejregister                            */ 
+ /********************************************************************/ 
+ TJEK_ENHEDBELIG: PROC RETURNS(CHAR(20));                               
+                                                                        
+ DCL VEJ_NAVN CHAR(20);                                                 
+                                                                        
+ DCL Small  CHAR(28) INIT ('abcdefghijklmnopqrstuvxyzæøå');             
+ DCL Big  CHAR(28) INIT ('ABCDEFGHIJKLMNOPQRSTUVXYZÆØÅ');               
+                                                                        
+ VEJ_NAVN   = DCLBE80200T.ADRSNAVN_ENH;                                 
+                                                                        
+                                                                        
+   // tjek om snavs(ej bogstav) i første karakter i vejnavn             
+   If                                                                   
+       VERIFY(SUBSTR(VEJ_NAVN,1,1),Small) = 0                           
+       ! VERIFY(SUBSTR(VEJ_NAVN,1,1),Big)  = 0                          
+        THEN;   // alt formodes ok                                      
+        ELSE                                                            
+         IF SUBSTR(VEJ_NAVN,1,9) ^= '6.Julivej'  THEN                   
+         DO;                                                            
+            EXEC SQL SELECT VEJADRNVN                                   
+                        INTO :VEJ_NAVN                                  
+                        FROM BQ80500T                                   
+                        WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR             
+                        AND EKOMNR = :DCLBE80200T.EKOMNR                
+                        AND VEJKOD = :DCLBE80200T.VEJK_ENH              
+                        ORDER BY DATA_ID, INSERT_TS DESC                
+                        FETCH FIRST 1 ROW ONLY;                         
+                                                                        
+             SELECT (SQLCA.SQLCODE);                                    
+              WHEN(0) DO;                                               
+                ANTAL_BQ805_OK = ANTAL_BQ805_OK + 1;                    
+              END;                                                      
+                                                                        
+              WHEN(100) DO;                                             
+                ANTAL_BQ805_EJ_OK = ANTAL_BQ805_EJ_OK + 1;              
+              END;                                                      
+                                                                        
+              OTHERWISE DO;                                             
+                PUT SKIP LIST('BQ80500T SELECT SQLCODE ',SQLCA.SQLCODE);
+                ABENDTXT = '102 SELECT BQ80500T';                       
+                CALL SQL_FEJL;                                          
+              END;                                                      
+            END;                                                        
+                                                                        
+                                                                        
+         END;                                                           
+                                                                        
+                                                                        
+ RETURN(VEJ_NAVN);                                                      
+                                                                        
+ END TJEK_ENHEDBELIG;                                                   
+ /*********************************************************************/
+ /* Hvis ejers adresse ikke udfyldt fra ESR tages den fra CSRP        */
+ /* der tages kun oplysninger aktuel CSRP                             */
+ /* Opslaget sker ved indlæsning for at sikre alle bliver behandlet   */
+ /*********************************************************************/
+ OPSÆT_EJER_ADRESSE_FRA_CSRP: PROC;                                     
+                                                                        
+     DCLBE70000T = '';                                                  
+                                                                        
+     DCLBE70000T.PNR = BE338.DCPRCIR;                                   
+                                                                        
+     IF BE338.VEJK_EJER  = 0                                            
+     THEN                                                               
+       DO;                                                              
+          EXEC SQL                                                      
+            SELECT  T1.PNR,                                             
+                    T1.VEJKOD,                                          
+                    T1.HUSNR,                                           
+                    T1.HUSBOGSTAADR,                                    
+                    T1.ETAGENR,                                         
+                    T1.SIDEDOERNR                                       
+                                                                        
+          INTO :DCLBE70000T.PNR,                                        
+               :DCLBE70000T.VEJKOD,                                     
+               :DCLBE70000T.HUSNR,                                      
+               :DCLBE70000T.HUSBOGSTAADR,                               
+               :DCLBE70000T.ETAGENR,                                    
+               :DCLBE70000T.SIDEDOERNR                                  
+                                                                        
+          FROM BE70000T T1                                              
+          WHERE  T1.PNR   = :DCLBE70000T.PNR                            
+          fetch first 1 row only;  /* af sikkerheds hensyn, hvis */     
+                                   /* der ligger en person med 2 */     
+                                   /* kommunenumre               */     
+                                                                        
+          SELECT (SQLCA.SQLCODE);                                       
+            WHEN (0)                                                    
+              DO;                                                       
+                BE338.VEJK_EJER  = DCLBE70000T.VEJKOD;                  
+                BE338.HUSNR_EJER = DCLBE70000T.HUSNR !!                 
+                                   DCLBE70000T.HUSBOGSTAADR;            
+                BE338.ETAGE_EJER = DCLBE70000T.ETAGENR;                 
+                BE338.SDØR_EJER  = DCLBE70000T.SIDEDOERNR;              
+                ANTAL_EJER_ADR_CSRP = ANTAL_EJER_ADR_CSRP + 1;          
+              END;                                                      
+            WHEN (100);                                                 
+           OTHERWISE                                                    
+            PUT SKIP LIST                                               
+             ('SELECT_CSRP_PERSON for ' !! DCLBE70000T.PNR !!           
+              ' gået galt SQLKODE = ' !! SQLCA.SQLCODE);                
+         END; /*SELECT*/                                                
+       END;                                                             
+                                                                        
+ END OPSÆT_EJER_ADRESSE_FRA_CSRP;                                       
+ /*********************************************************************/
+ INSERT_BE80200T: PROC;                                                 
+                                                                        
+  DCL EJBOLFDLNR_INDICATOR FIXED BIN(15) INIT(0);                       
+  DCL UPDATE_TS_INDICATOR  FIXED BIN(15) INIT(-1);                      
+  DCL UPDATE_AF_INDICATOR  FIXED BIN(15) INIT(-1);                      
+                                                                        
+  DCL EX  FIXED BIN(15);                                                
+                                                                        
+  DCLBE80200T.EKOMNR       = TABEL_2FAMIL(IX).EKOMNR;                   
+  DCLBE80200T.EEJDNR       = TABEL_2FAMIL(IX).EEJDNR;                   
+  DCLBE80200T.EENHEDLBNR   = TABEL_2FAMIL(IX).EENHEDLBNR;               
+  DCLBE80200T.INSERT_AF    = 'BE33925';                                 
+  DCLBE80200T.EJBOLFDLNR   = TABEL_2FAMIL(IX).EENHEDLBNR;               
+  EX                       = TABEL_2FAMIL(IX).EENHEDLBNR;               
+                                                                        
+  /* Kode ændret i forbindelse med variabel vurderingsår ##EBD */       
+  IF BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_SLUT' !                        
+     BE55600M.AFVIKLINGS_ID = 'SUPPL_EVS_SLUT'                          
+  THEN                                                                  
+    DO;                                                                 
+      DCLBE80200T.VEJK_ENH  =                                           
+                  TABEL_2FAMIL(IX).VURDOPLNY.VEJK_EJEB(EX);             
+      DCLBE80200T.HUSNR_ENH =                                           
+                  TABEL_2FAMIL(IX).VURDOPLNY.HUSNR_EJEB(EX);            
+      DCLBE80200T.ETAGE_ENH =                                           
+                  TABEL_2FAMIL(IX).VURDOPLNY.ETAGE_EJEB(EX);            
+      DCLBE80200T.DØRNR_ENH =                                           
+                  TABEL_2FAMIL(IX).VURDOPLNY.SDØR_EJEB(EX);             
+      DCLBE80200T.DVURDÅR    = TABEL_2FAMIL(IX).VURDOPLNY.DVURDÅR;      
+      /* Vejnavn */                                                     
+      DCLBE80200T.ADRSNAVN_ENH =                                        
+                  SUBSTR(TABEL_2FAMIL(IX).ENHEDBELIG,1,20);             
+    END;                                                                
+  ELSE                                                                  
+    DO;                                                                 
+      DCLBE80200T.VEJK_ENH  =                                           
+               TABEL_2FAMIL(IX).VURDOPLGL.VEJK_EJEB(EX);                
+      DCLBE80200T.HUSNR_ENH =                                           
+               TABEL_2FAMIL(IX).VURDOPLGL.HUSNR_EJEB(EX);               
+      DCLBE80200T.ETAGE_ENH =                                           
+               TABEL_2FAMIL(IX).VURDOPLGL.ETAGE_EJEB(EX);               
+      DCLBE80200T.DØRNR_ENH =                                           
+               TABEL_2FAMIL(IX).VURDOPLGL.SDØR_EJEB(EX);                
+      DCLBE80200T.DVURDÅR    = TABEL_2FAMIL(IX).VURDOPLGL.DVURDÅR;      
+      /* Vejnavn */                                                     
+      DCLBE80200T.ADRSNAVN_ENH =                                        
+               SUBSTR(TABEL_2FAMIL(IX).ENHEDBELIG,1,20);                
+    END;                                                                
+                                                                        
+     EXEC SQL INSERT                                                    
+         INTO  BE80200T                                                 
+               (EKOMNR                                                  
+               ,EEJDNR                                                  
+               ,EENHEDLBNR                                              
+               ,VEJK_ENH                                                
+               ,HUSNR_ENH                                               
+               ,ETAGE_ENH                                               
+               ,DØRNR_ENH                                               
+               ,ADRSNAVN_ENH                                            
+               ,EJBOLFDLNR                                              
+               ,DVURDÅR                                                 
+               ,INSERT_TS                                               
+               ,INSERT_AF                                               
+               ,UPDATE_TS                                               
+               ,UPDATE_AF)                                              
+         VALUES(:DCLBE80200T.EKOMNR                                     
+               ,:DCLBE80200T.EEJDNR                                     
+               ,:DCLBE80200T.EENHEDLBNR                                 
+               ,:DCLBE80200T.VEJK_ENH                                   
+               ,:DCLBE80200T.HUSNR_ENH                                  
+               ,:DCLBE80200T.ETAGE_ENH                                  
+               ,:DCLBE80200T.DØRNR_ENH                                  
+               ,:DCLBE80200T.ADRSNAVN_ENH                               
+               ,:DCLBE80200T.EJBOLFDLNR                                 
+                :EJBOLFDLNR_INDICATOR                                   
+               ,:DCLBE80200T.DVURDÅR                                    
+               ,CURRENT TIMESTAMP                                       
+               ,:DCLBE80200T.INSERT_AF                                  
+               ,:DCLBE80200T.UPDATE_TS                                  
+                :UPDATE_TS_INDICATOR                                    
+               ,:DCLBE80200T.UPDATE_AF                                  
+                :UPDATE_AF_INDICATOR);                                  
+                                                                        
+       SELECT(SQLCA.SQLCODE);                                           
+         WHEN(0)                                                        
+           DO;                                                          
+           END;                                                         
+         OTHERWISE                                                      
+           DO;                                                          
+             PUT SKIP LIST('BE80200T INSERT SQLCODE ',SQLCA.SQLCODE);   
+             ABENDTXT = '101 INSERT BE80200T';                          
+             CALL SQL_FEJL;                                             
+           END;                                                         
+       END; /*SELECT*/                                                  
+                                                                        
+ END INSERT_BE80200T;                                                   
+ /*********************************************************************/
+ END BE33925;                                                           

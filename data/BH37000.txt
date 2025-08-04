@@ -1,0 +1,434 @@
+ BH37000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2002/EVS SLUT 2001                         *
+ * PROGRAMNAVN: BH37000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE AKTIVE OG VALIDE EJENDOMME   *
+ *              FRA EVS SLUT 2000.                                     *
+ * PGMFORLØB:   1. ÅBEN EVS UDTRÆKSFIL FOR 2000.                       *
+ *              2. DECLARE CURSOR_1.                                   *
+ *              3. OPEN CURSOR_1.                                      *
+ *              4. LÆS RECORDE FRA EVS UDTRÆKSFIL(EKOMNR. <> 999).     *
+ *              5. CHECK RECORDE MED PERSONTABEL 2001.                 *
+ *              6. HVIS RECORDEN IKKE FINDES SKRIVES DEN.              *
+ *              7. LUK CURSOR_1.                                       *
+ *              8. LUK EVS UDTRÆKSFIL.                                 *
+ *              9. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     BQ01100T - EVS EJENDOMSTABEL 2001.                     *
+ *              BQ01200T - EVS PERSONTABEL 2001.                       *
+ *              BH37000I - BH30000N UDTRÆK FRA EVS SLUT 2000.          *
+ *              BH37010I - BH30000N UDTRÆK FRA EVS SLUT 2000.          *
+ * UDDATA:      BH37000O - REDUCERET BH30000N UDTRÆK FRA EVS SLUT 2000.*
+ *              BH37010O - REDUCERET BH30000N UDTRÆK FRA EVS SLUT 2000.*
+ *              BH37001Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: ESBEN BRODERSEN       ESB,     T&S BRØNDBY 10.07.2002. *
+ * ÆNDRINGSLOG:                                                        *
+ *                                                                     *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2001');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE RX41500T;  /* BORGE_TILKNYTTET TABEL        */
+         EXEC SQL INCLUDE RX33300V;  /* ADMINISTRATIV ENHED TABEL     */
+         EXEC SQL INCLUDE BQ01100T;  /* EVS EJENDOMSTABELLEN 2001     */
+         EXEC SQL INCLUDE BQ01200T;  /* EVS PERSONTABELLEN   2001     */
+         EXEC SQL INCLUDE SQLCA;     /* SQL KOMMUNIKATIONSAREAL       */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     DCLCPRNR       DEC FIXED (11)   INIT(0);                       
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+         2 ÅR           PIC   '99',                                     
+         2 MD           PIC   '99',                                     
+         2 DAG          PIC   '99';                                     
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH3700I FILE INPUT  RECORD; /* EVS UDTRÆK EXCL. KOMMUNE 999 */ 
+ DCL     BH3701I FILE INPUT  RECORD; /* EVS UDTRÆK KUN   KOMMUNE 999 */ 
+ DCL     BH3700O FILE OUTPUT RECORD; /* EVS UDTRÆK EXCL. KOMMUNE 999 */ 
+ DCL     BH3701O FILE OUTPUT RECORD; /* EVS UDTRÆK KUN   KOMMUNE 999 */ 
+ DCL     INDDATA CHAR(6000) VAR;                                        
+ DCL     EOF_BH3700I   BIT(1) INIT('0'B);                               
+ DCL     EOF_BH3701I   BIT(1) INIT('0'B);                               
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_SLUT  BASED (ADDR(INDDATA)),                          
+         %INCLUDE BH30000N;;                                            
+                                                                        
+ DCL     1 PERSON,                                                      
+         %INCLUDE BQ01200N;;                                            
+                                                                        
+ DCL     1 INDK_PERS,                                                   
+         %INCLUDE BQ00006N;;                                            
+                                                                        
+ DCL     1 EJENDOM,                                                     
+         %INCLUDE BQ01100N;;                                            
+ /*********************************************************************/
+  DCL    1 GEM,                                                         
+           3 ENHED        BIN FIXED (31),                               
+           3 ORG_ID       BIN FIXED (15) UNAL,                          
+           3 ORG_NAVN     CHAR(50);                                     
+ /*********************************************************************/
+  DCL    1 TSS_STRUK_KON,                                               
+           3 DCPRN        DEC FIXED (11),      /* PERSONNUMMER        */
+           3 EKOMNR       BIN FIXED (15) UNAL, /* KOMMUNENR           */
+           3 EEJDNR       BIN FIXED (31) UNAL, /* EJENDOMSNUMMER      */
+           3 SLKOMNR      BIN FIXED (15) UNAL, /* SLUTLIGNINGSKOMMUNE */
+           3 SLKNAVN      CHAR(50);            /* SLUTLIGNINGSKOMMUNE */
+ /*********************************************************************/
+  DCL    1 TSS_STRUK,                                                   
+           3 DCPRN        PIC '(10)9',         /* PERSONNUMMER        */
+           3 KOMMA1       CHAR(1) INIT(','),                            
+           3 EKOMNR       PIC '999',           /* KOMMUNENR           */
+           3 KOMMA2       CHAR(1) INIT(','),                            
+           3 EEJDNR       PIC  '(6)9',         /* EJENDOMSNUMMER      */
+           3 KOMMA3       CHAR(1) INIT(','),                            
+           3 SLKOMNR      PIC  '999',          /* SLUTLIGNINGSKOMMUNE */
+           3 KOMMA4       CHAR(1) INIT(','),                            
+           3 SLKNAVN      CHAR(50),            /* SLUTLIGNINGSKOMMUNE */
+           3 KOMMA5       CHAR(1) INIT(',');                            
+ /*********************************************************************/
+  DCL    1 CSC_STRUK,                                                   
+           3 DCPRN        DEC FIXED (11),      /* PERSONNUMMER        */
+           3 EKOMNR       BIN FIXED (15) UNAL, /* KOMMUNENR           */
+           3 EEJDNR       BIN FIXED (31) UNAL; /* EJENDOMSNUMMER      */
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+ DCL   ANTLÆS_REC_1      BIN FIXED (31) INIT(0);/* LÆSTE FRA FIL      */
+ DCL   ANTLÆS_REC_2      BIN FIXED (31) INIT(0);/* LÆSTE FRA FIL      */
+ DCL   ANTSKRIV_1        BIN FIXED (31) INIT(0);/* SKREVET EXCL UDLAND*/
+ DCL   ANTSKRIV_2        BIN FIXED (31) INIT(0);/* SKREVET UDLAND     */
+ DCL   ANTSKRIV_3        BIN FIXED (31) INIT(0);/* SKREVET UDLAND     */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (45);                                     
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH37000');                 
+            END;                                                        
+         ON ENDFILE(BH3700I) EOF_BH3700I = '1'B;                        
+         ON ENDFILE(BH3701I) EOF_BH3701I = '1'B;                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         DT = DATE;                                                     
+         CALL ZZ20390('*OPEN','BH37001Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' UDTRÆK FRA EVS SLUT 2000    ' !! 'DATO: '   
+                       !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;  
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH37000 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+         CALL OPSTART_1;                                                
+         CALL LAES_RECORD_1;                                            
+         DO WHILE (EOF_BH3700I ^= '1'B);                                
+           CALL CHEK_MED_TABEL_1;                                       
+           CALL LAES_RECORD_1;                                          
+         END;                                                           
+         CALL AFSLUT_1;                                                 
+                                                                        
+         CALL OPSTART_2;                                                
+         CALL LAES_RECORD_2;                                            
+         DO WHILE (EOF_BH3701I ^= '1'B);                                
+           CALL CHEK_MED_TABEL_2;                                       
+           CALL LAES_RECORD_2;                                          
+         END;                                                           
+         CALL AFSLUT_2;                                                 
+ /*********************************************************************/
+ OPSTART_1:PROC;                                                        
+         UDTRÆK_SLUT       = '';                                        
+         PERSON            = '';                                        
+         EJENDOM           = '';                                        
+         OPEN FILE (BH3700I) TITLE ('BH37000I');                        
+         OPEN FILE (BH3700O) TITLE ('BH37000O');                        
+ END OPSTART_1;                                                         
+ /*********************************************************************/
+ OPSTART_2:PROC;                                                        
+         UDTRÆK_SLUT       = '';                                        
+         PERSON            = '';                                        
+         EJENDOM           = '';                                        
+         OPEN FILE (BH3701I) TITLE ('BH37010I');                        
+         OPEN FILE (BH3701O) TITLE ('BH37010O');                        
+ END OPSTART_2;                                                         
+ /*********************************************************************/
+ LAES_RECORD_1:PROC;                                                    
+   READ FILE(BH3700I) INTO (UDTRÆK_SLUT);                               
+   DCLCPRNR = UDTRÆK_SLUT.DCPRN;                                        
+   ANTLÆS_REC_1 = ANTLÆS_REC_1 + 1;                                     
+ END LAES_RECORD_1;                                                     
+ /*********************************************************************/
+ LAES_RECORD_2:PROC;                                                    
+   READ FILE(BH3701I) INTO (UDTRÆK_SLUT);                               
+   DCLCPRNR = UDTRÆK_SLUT.DCPRN;                                        
+   ANTLÆS_REC_2 = ANTLÆS_REC_2 + 1;                                     
+ END LAES_RECORD_2;                                                     
+ /*********************************************************************/
+ CHEK_MED_TABEL_1:PROC;                                                 
+   CALL DECLARE_CURSOR_1;                                               
+   CALL OPEN_CURSOR_1;                                                  
+   CALL FETCH_CURSOR_1;                                                 
+   IF SQLCA.SQLCODE = 100 THEN   /* DER SKAL KUN SKRIVE HVIS IKKE .. */ 
+     DO;                                                                
+       TSS_STRUK.SLKOMNR  = 0;                                          
+       TSS_STRUK.SLKNAVN  = 'IKKE FUNDET';                              
+       CALL SELECT_BORGER_TILKNYT;                                      
+       TSS_STRUK.DCPRN    = UDTRÆK_SLUT.DCPRN;                          
+       TSS_STRUK.EKOMNR   = UDTRÆK_SLUT.EKOMNR;                         
+       TSS_STRUK.EEJDNR   = UDTRÆK_SLUT.EEJDNR;                         
+       WRITE FILE (BH3700O) FROM (TSS_STRUK);                           
+       ANTSKRIV_1 = ANTSKRIV_1 + 1;                                     
+     END;                                                               
+   ELSE                                                                 
+     DO;                                                                
+     END;                                                               
+   CALL CLOSE_CURSOR_1;                                                 
+ END CHEK_MED_TABEL_1;                                                  
+ /*********************************************************************/
+ CHEK_MED_TABEL_2:PROC;                                                 
+   CALL DECLARE_CURSOR_2;                                               
+   CALL OPEN_CURSOR_2;                                                  
+   CALL FETCH_CURSOR_2;                                                 
+   IF SQLCA.SQLCODE = 100 THEN   /* DER SKAL KUN SKRIVE HVIS IKKE .. */ 
+     DO;                                                                
+       CSC_STRUK.DCPRN    = UDTRÆK_SLUT.DCPRN;                          
+       CSC_STRUK.EKOMNR   = UDTRÆK_SLUT.EKOMNR;                         
+       CSC_STRUK.EEJDNR   = UDTRÆK_SLUT.EEJDNR;                         
+       WRITE FILE (BH3701O) FROM (CSC_STRUK);                           
+       ANTSKRIV_2 = ANTSKRIV_2 + 1;                                     
+       TSS_STRUK.SLKOMNR  = 0;                                          
+       TSS_STRUK.SLKNAVN  = 'IKKE FUNDET';                              
+       CALL SELECT_BORGER_TILKNYT;                                      
+       TSS_STRUK.DCPRN    = UDTRÆK_SLUT.DCPRN;                          
+       TSS_STRUK.EKOMNR   = UDTRÆK_SLUT.EKOMNR;                         
+       TSS_STRUK.EEJDNR   = UDTRÆK_SLUT.EEJDNR;                         
+       WRITE FILE (BH3700O) FROM (TSS_STRUK);                           
+       ANTSKRIV_3 = ANTSKRIV_3 + 1;                                     
+     END;                                                               
+   ELSE                                                                 
+     DO;                                                                
+     END;                                                               
+   CALL CLOSE_CURSOR_2;                                                 
+ END CHEK_MED_TABEL_2;                                                  
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF PERSONTABEL BQ01200T                RUTINE */
+ /*********************************************************************/
+ OPEN_CURSOR_1:PROC;                                                    
+                                                                        
+         EXEC SQL OPEN CURSOR_1;                                        
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN CURSOR_1';                              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_CURSOR_1;                                                     
+ /*********************************************************************/
+ OPEN_CURSOR_2:PROC;                                                    
+                                                                        
+         EXEC SQL OPEN CURSOR_2;                                        
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN CURSOR_2';                              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_CURSOR_2;                                                     
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF PERSONTABEL BQ01200T               RUTINE */
+ /*********************************************************************/
+ CLOSE_CURSOR_1:PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE CURSOR_1;                                       
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE_CURSOR_1';                             
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_CURSOR_1;                                                    
+ /*********************************************************************/
+ CLOSE_CURSOR_2:PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE CURSOR_2;                                       
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE_CURSOR_2';                             
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_CURSOR_2;                                                    
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL:PROC;                                                         
+                                                                        
+         CLOSE FILE (BH3700I);                                          
+         CLOSE FILE (BH3701I);                                          
+         CLOSE FILE (BH3700O);                                          
+         CLOSE FILE (BH3701O);                                          
+         CALL CLOSE_CURSOR_1;                                           
+         CALL CLOSE_CURSOR_2;                                           
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = 'BH37000 ** 250 ' !! FEJLTEKST;                    
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT_1:PROC;                                                         
+         CLOSE FILE (BH3700I);                                          
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL ØVRIGE LÆST FRA FIL......................'; 
+         LIN.ANT   = ANTLÆS_REC_1;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+         LIN.TEKST = 'ANTAL ØVRIGE SKREVET TIL FIL...................'; 
+         LIN.ANT   = ANTSKRIV_1;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+ END AFSLUT_1;                                                          
+ /*********************************************************************/
+ AFSLUT_2:PROC;                                                         
+         CLOSE FILE (BH3701I);                                          
+         CLOSE FILE (BH3700O);                                          
+         CLOSE FILE (BH3701O);                                          
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL UDENLANDSKE LÆST FRA FIL.................'; 
+         LIN.ANT   = ANTLÆS_REC_2;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+         LIN.TEKST = 'ANTAL UDENLANDSKE SKREVET TIL FIL.CSC..........'; 
+         LIN.ANT   = ANTSKRIV_2;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+         LIN.TEKST = 'ANTAL UDENLANDSKE SKREVET TIL FIL.T&S..........'; 
+         LIN.ANT   = ANTSKRIV_3;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT_2;                                                          
+ /*********************************************************************/
+ SELECT_BORGER_TILKNYT:PROC;                                            
+      EXEC SQL                                                          
+      SELECT ADM_ENHEDS_ID                                              
+      INTO:GEM.ENHED                                                    
+      FROM RX41500T                                                     
+      WHERE   PERSONNUMMER = :DCLCPRNR                                  
+        AND   STARTDATO   <= '2001-01-01'                               
+        AND   SLUTDATO    >= '2001-12-31'                               
+        AND   KOMMUNETYPE_ID = 6;           /* SLUTLIGNINGSKOMMUNE */   
+      SELECT(SQLCA.SQLCODE);                                            
+        WHEN(0) CALL OMSAET_ENHED;                                      
+        WHEN(100);                                                      
+        OTHERWISE CALL SQL_FEJL;                                        
+      END;                                                              
+ END SELECT_BORGER_TILKNYT;                                             
+ /*********************************************************************/
+ OMSAET_ENHED:PROC;                                                     
+                                                                        
+      EXEC SQL                                                          
+           SELECT DISTINCT ORGANISATIONS_ID,                            
+                           ORGANISATIONS_NAVN                           
+           INTO:GEM.ORG_ID,                                             
+               :GEM.ORG_NAVN                                            
+           FROM RX33300V                                                
+           WHERE   ADM_ENHEDS_ID      =:GEM.ENHED                       
+             AND   ORGANISATIONS_TYPE =1;                               
+                                                                        
+           SELECT(SQLCA.SQLCODE);                                       
+             WHEN(0)                                                    
+               DO;                                                      
+                 TSS_STRUK.SLKOMNR = GEM.ORG_ID;                        
+                 TSS_STRUK.SLKNAVN = GEM.ORG_NAVN;                      
+               END;                                                     
+             WHEN(100);                                                 
+             OTHERWISE CALL SQL_FEJL;                                   
+           END;                                                         
+ END OMSAET_ENHED;                                                      
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ %INCLUDE BH37000M;             /* DECLARE OG FETCH SQL STATEMENTS.   */
+ %INCLUDE BS55111M;             /* CHECK OM KOMNR OG EJENDOMSNR ER OK */
+ %INCLUDE ZM90051M;             /* KONV BIN15 TIL CHAR                */
+ %INCLUDE BS34307M;             /* KONV BF31 TIL CHAR6                */
+ %INCLUDE BH30001M;             /* KONV DATO FRA CHAR TIL DEC FIXED   */
+ %INCLUDE BH30002M;             /* KONV CHAR(10) TIL DEC FIXED(11)    */
+                                                                        
+ END BH37000;                                                           

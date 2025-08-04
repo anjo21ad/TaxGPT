@@ -1,0 +1,803 @@
+ BL32700: /* OPSPLIT DIVERSE TRANSAKTIONER TIL KONTROLSYSTEMET */       
+         PROC OPTIONS (MAIN);                                           
+ /*********************************************************************/
+ /*                                                                   */
+ /*      PROGRAMMET FORETAGER OPSPLITNING AF DIVERSE TRANSAKTIONS-    */
+ /*      FILER TIL KONTROLSYSTEMET, SÅLEDES AT DER LEVERES 2 DATASÆT  */
+ /*      TIL DC FRA OG MED SLUT-LIGNINGSÅR 1996. ARTERNE 16, 18, 72   */
+ /*      OG 78 SKAL LEVERES TIL DC MED EVT. MODTAGER-PERSONNR., SOM   */
+ /*      SÆTTES LIG BLANK AF DETTE PROGRAM, HVIS MODERSYSTEMET IKKE   */
+ /*      HAR/HAVDE MULIGHED FOR INDBERETNING AF DENNE OPLYSNING.      */
+ /*                                                                   */
+ /*      DER UDSKRIVES TOTALER TIL BRUG VED AFSTEMNING AF DET SAMLEDE */
+ /*      MATERIALE TIL KONTROLSYSTEMET.                               */
+ /*                                                                   */
+ /*      INPUT :                                                      */
+ /*      1. B.L30100D.??? DATASÆT FRA DIV. MODERSYST. MED LRECL=27.   */
+ /*         (FRA SYSTEMER  U D E N  MULIGHED FOR MODTAGER-PERSONNR.)  */
+ /*      2. B.L30200D.??? DATASÆT FRA DIV. MODERSYST. MED LRECL=37.   */
+ /*         (FRA SYSTEMER  M E D    MULIGHED FOR MODTAGER-PERSONNR.)  */
+ /*                                                                   */
+ /*      OUTPUT :                                                     */
+ /*      1. B.L32700D     DATASÆT TIL SLS-P UDEN MODTAGER-PERSONNR.   */
+ /*      2. B.L32710D     DATASÆT TIL SLS-P MED  MODTAGER-PERSONNR.   */
+ /*                                                                   */
+ /*                                                                   */
+ /*      PROGRAMMERET AF AAGE RASMUSSEN, PFB SKAT    DECEMBER 1996    */
+ /*                                                                   */
+ /*      RETTELSER:      AAGE RASMUSSEN, PFB SKAT    NOVEMBER 1997    */
+ /*                      (DATORUTINE UDSKIFTET A.H.T. ÅR2000)         */
+ /*                                                                   */
+ /*      RETTET:       AAGE RASMUSSEN, LSU SKAT   JAN 2001            */
+ /*                    (KALD TIL ZZ20301 ÆNDRET TIL ZZ20300)          */
+ /*                                                                   */
+ /*      RETTET:       BO SCHMIDT, PFK SKAT JAN 2006                  */
+ /*                    (RETTELSE I FORBINDELSE MED KOMMUNEREFORM ÆRØ).*/
+ /*                                                                   */
+ /*      RETTET:       BO SCHMIDT, PFK SKAT OKT 2006                  */
+ /*                   (RETTELSE I FORBINDELSE MED KOMMUNEREFORM ØVRIG)*/
+ /*********************************************************************/
+                                                                        
+ DCL     BL301I  RECORD FILE INPUT;                                     
+ DCL     BL302I  RECORD FILE INPUT;                                     
+ DCL     BL3270O RECORD FILE OUTPUT;                                    
+ DCL     BL3271O RECORD FILE OUTPUT;                                    
+                                                                        
+ DCL     RECIN   CHAR (50) VAR;                                         
+                                                                        
+ DCL     1 IND               BASED(ADDR(RECIN)),                        
+           2 LGD BIN FIXED  (15),                                       
+           %INCLUDE BL32700N;                                           
+                                                                        
+ DCL     REC_37  CHAR (37);                                             
+ DCL     REC_27  CHAR (27)   BASED(ADDR(REC_37));                       
+                                                                        
+ DCL     1 UD                BASED(ADDR(REC_37)),                       
+           %INCLUDE BL32700N;                                           
+ DCL     UD_DATO CHAR (6)    BASED(ADDR(UD.DATO));                      
+ DCL     UD_MPNR CHAR (10)   BASED(ADDR(UD.MPNR));                      
+                                                                        
+         /***      TÆLLEVÆRKER       ***/                               
+ DCL     1 TVTAB (100),                                                 
+          2 TVART  FIXED  (9),                 /* ANTAL LÆSTE PR.ART */ 
+          2 TVBEL  FIXED (15),                 /* BELØB PR. ART      */ 
+          2 TVMPNR FIXED  (9);                 /* MED MODT. PNR.     */ 
+ DCL     TOTLÆS    FIXED (11) INIT (0);        /* ANTAL LÆSTE        */ 
+ DCL     TOTBEL    FIXED (15) INIT (0);                                 
+ DCL     TOTMPNR   FIXED (11) INIT (0);                                 
+ DCL     TOTSKR1   FIXED (11) INIT (0);        /* ANTAL SKREVNE L27  */ 
+ DCL     TOTSKR2   FIXED (11) INIT (0);        /* ANTAL SKREVNE L37  */ 
+ DCL     FÆLLES    FIXED  (1) INIT (0);                                 
+         /***      PRINTLINIER       ***/                               
+ DCL     LINIE           CHAR (133) INIT (' ');                         
+ DCL     1 L1      BASED (ADDR(LINIE)),                                 
+          2 CCA          CHAR (1),                                      
+          2 TEKST        CHAR (59),                                     
+          2 PLÆSIALT     PIC  'ZZ.ZZZ.ZZZ.ZZ9';                         
+ DCL     1 L2      BASED (ADDR(LINIE)),                                 
+          2 FIL          CHAR (9),                                      
+          2 PLÆSART      PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 FIL1         CHAR (10),                                     
+          2 PART         PIC  '99',                                     
+          2 FIL2         CHAR (2),                                      
+          2 PBELART      PIC  'ZZZ.ZZZ.ZZZ.ZZZ.ZZZ-',                   
+          2 FIL3         CHAR (6),                                      
+          2 PMPNR        PIC  'ZZ.ZZZ.ZZZ.ZZZ';                         
+                                                                        
+ %INCLUDE ZZ20301M;                                                     
+         /***  DIV. FELTER OG RUTINER ***/                              
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     INDEX        BIN FIXED (15,0);                                 
+ DCL     I            BIN FIXED (15,0);                                 
+ DCL     EOF_BL301    BIT  (1);                                         
+ DCL     EOF_BL302    BIT  (1);                                         
+ DCL     JA           BIT  (1) INIT ('1'B);                             
+ DCL     NEJ          BIT  (1) INIT ('0'B);                             
+ DCL     SP_KNR       CHAR (8);            /* KOMNR. TIL KOM.BRUD.  */  
+ DCL     ADDR         BUILTIN;                                          
+ DCL     SUBSTR       BUILTIN;                                          
+ DCL     VERIFY       BUILTIN;                                          
+ DCL     ZS30101      ENTRY;                                            
+ DCL     ZS38100      ENTRY OPTIONS (INTER ASM);                        
+ DCL     ZS61900      ENTRY;                                            
+ /*********************************************************************/
+ /*      HOUSEKEEPING                                                 */
+ /*********************************************************************/
+         CALL ZS61900;                             /* LOGGER KST-DATO */
+         CALL ZS38100(DATO1);                      /* SKAF DAGS DATO  */
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OPEN FILE (BL301I)  TITLE ('BL30100I');                        
+         OPEN FILE (BL302I)  TITLE ('BL30200I');                        
+         OPEN FILE (BL3270O) TITLE ('BL32700O');                        
+         OPEN FILE (BL3271O) TITLE ('BL32710O');                        
+         CALL ZZ20390 ('*OPEN','BL32701Y');                             
+                                                                        
+         SP_KNR = '0999    ';                                           
+         CALL ZZ20390 ('*SUB','BL32701Y',SP_KNR);                       
+                                                                        
+         ON ENDFILE (BL301I)                                            
+            EOF_BL301 = JA;                                             
+         ON ENDFILE (BL302I)                                            
+            EOF_BL302 = JA;                                             
+         EOF_BL301 = NEJ;                                               
+         EOF_BL302 = NEJ;                                               
+ /*********************************************************************/
+ /*      HOVEDSTYRING                                                 */
+ /*********************************************************************/
+         CALL NULSTIL;                                                  
+         CALL SKAF_BL301;                                               
+         DO WHILE (EOF_BL301 = NEJ);                                    
+            CALL BEHANDL_INPUT;                                         
+            CALL SKAF_BL301;                                            
+         END;                                                           
+         CALL AFSLUT_BL301;                                             
+         CALL NULSTIL;                                                  
+         CALL SKAF_BL302;                                               
+         DO WHILE (EOF_BL302 = NEJ);                                    
+            CALL BEHANDL_INPUT;                                         
+            CALL SKAF_BL302;                                            
+         END;                                                           
+         CALL AFSLUT_BL302;                                             
+         CALL AFSLUT;                                                   
+ /*********************************************************************/
+ /*      LÆS INPUT-DATASÆT B.L30100D.??? D.V.S. DIV. ARTER FRA SYSTEM */
+ /*      U D E N  MULIGHED FOR AT LEVERE MODTAGERS PERSONNR.          */
+ /*********************************************************************/
+ SKAF_BL301: PROC;                                                      
+                                                                        
+         READ FILE (BL301I) INTO (RECIN);                               
+                                                                        
+         IF EOF_BL301 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               IF LGD ^= 27                                             
+               THEN                                                     
+                  CALL ZS30101 (5,'BL32700 ** 251 ' !!                  
+                  'FORKERT DATASÆT MEDTAGET UNDER BL30100O  ',2);       
+               TOTLÆS = TOTLÆS + 1;                                     
+            END;                                                        
+                                                                        
+ END SKAF_BL301;                                                        
+ /*********************************************************************/
+ /*      LÆS INPUT-DATASÆT B.L30200D.??? D.V.S. DIV. ARTER FRA SYSTEM */
+ /*      M E D  MULIGHED FOR AT LEVERE MODTAGERS PERSONNR.            */
+ /*********************************************************************/
+ SKAF_BL302: PROC;                                                      
+                                                                        
+         READ FILE (BL302I) INTO (RECIN);                               
+                                                                        
+         IF EOF_BL302 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               IF LGD ^= 37                                             
+               THEN                                                     
+                  CALL ZS30101 (5,'BL32700 ** 252 ' !!                  
+                  'FORKERT DATASÆT MEDTAGET UNDER BL30200O  ',2);       
+               TOTLÆS = TOTLÆS + 1;                                     
+            END;                                                        
+                                                                        
+ END SKAF_BL302;                                                        
+ /*********************************************************************/
+ /*      NULSTIL KONTROLOPTÆLLINGER                                   */
+ /*********************************************************************/
+ NULSTIL: PROC;                                                         
+                                                                        
+         DO I = 1 TO 100;                                               
+            TVTAB(*).TVART  = 0;                                        
+            TVTAB(*).TVBEL  = 0;                                        
+            TVTAB(*).TVMPNR = 0;                                        
+         END;                                                           
+                                                                        
+         TOTLÆS  = 0;                                                   
+         TOTBEL  = 0;                                                   
+         TOTMPNR = 0;                                                   
+         TOTSKR1 = 0;                                                   
+         TOTSKR2 = 0;                                                   
+                                                                        
+ END NULSTIL;                                                           
+ /*********************************************************************/
+ /*      BEHANDLING AF INPUT D.V.S. UNDERSØG OM AKTUEL ART ER  M E D  */
+ /*      ELLER  U D E N  MODTAGERS PERSONNR., OG SKRIV DEREFTER PÅ    */
+ /*      DET RELEVANTE OUTPUT-DATASÆT.                                */
+ /*********************************************************************/
+ BEHANDL_INPUT: PROC;                                                   
+                                                                        
+         INDEX = IND.ART + 1;                                           
+                                                                        
+         TVART(INDEX) = TVART(INDEX) + 1;                               
+         TVBEL(INDEX) = TVBEL(INDEX) + IND.BELØB;                       
+                                                                        
+         REC_37 = RECIN;                                                
+                                                                        
+         IF IND.KOMNR = '443'                                           
+          ! IND.KOMNR = '493'                                           
+         THEN                                                           
+            UD.KOMNR = '492';                                           
+                                                                        
+         IF IND.KOMNR = '189'                                           
+          ! IND.KOMNR = '207'                                           
+         THEN                                                           
+            UD.KOMNR = '190';                                           
+                                                                        
+         IF IND.KOMNR = '208'                                           
+          ! IND.KOMNR = '227'                                           
+         THEN                                                           
+            UD.KOMNR = '210';                                           
+                                                                        
+         IF IND.KOMNR = '181'                                           
+          ! IND.KOMNR = '205'                                           
+         THEN                                                           
+            UD.KOMNR = '230';                                           
+                                                                        
+         IF IND.KOMNR = '209'                                           
+          ! IND.KOMNR = '225'                                           
+          ! IND.KOMNR = '229'                                           
+          ! IND.KOMNR = '233'                                           
+         THEN                                                           
+            UD.KOMNR = '250';                                           
+                                                                        
+         IF IND.KOMNR = '211'                                           
+          ! IND.KOMNR = '221'                                           
+         THEN                                                           
+            UD.KOMNR = '260';                                           
+                                                                        
+         IF IND.KOMNR = '213'                                           
+          ! IND.KOMNR = '215'                                           
+         THEN                                                           
+            UD.KOMNR = '270';                                           
+                                                                        
+         IF IND.KOMNR = '219'                                           
+          ! IND.KOMNR = '231'                                           
+         THEN                                                           
+            UD.KOMNR = '219';                                           
+                                                                        
+         IF IND.KOMNR = '171'                                           
+          ! IND.KOMNR = '235'                                           
+          ! IND.KOMNR = '237'                                           
+         THEN                                                           
+            UD.KOMNR = '240';                                           
+                                                                        
+         IF IND.KOMNR = '251'                                           
+          ! IND.KOMNR = '257'                                           
+          ! IND.KOMNR = '261'                                           
+         THEN                                                           
+            UD.KOMNR = '350';                                           
+                                                                        
+         IF IND.KOMNR = '259'                                           
+          ! IND.KOMNR = '267'                                           
+         THEN                                                           
+            UD.KOMNR = '259';                                           
+                                                                        
+         IF IND.KOMNR = '255'                                           
+          ! IND.KOMNR = '263'                                           
+          ! IND.KOMNR = '265'                                           
+         THEN                                                           
+            UD.KOMNR = '265';                                           
+                                                                        
+         IF IND.KOMNR = '305'                                           
+          ! IND.KOMNR = '327'                                           
+          ! IND.KOMNR = '343'                                           
+         THEN                                                           
+            UD.KOMNR = '306';                                           
+                                                                        
+         IF IND.KOMNR = '313'                                           
+          ! IND.KOMNR = '351'                                           
+          ! IND.KOMNR = '385'                                           
+         THEN                                                           
+            UD.KOMNR = '320';                                           
+                                                                        
+         IF IND.KOMNR = '315'                                           
+          ! IND.KOMNR = '321'                                           
+          ! IND.KOMNR = '339'                                           
+          ! IND.KOMNR = '341'                                           
+          ! IND.KOMNR = '345'                                           
+         THEN                                                           
+            UD.KOMNR = '316';                                           
+                                                                        
+         IF IND.KOMNR = '301'                                           
+          ! IND.KOMNR = '309'                                           
+          ! IND.KOMNR = '317'                                           
+          ! IND.KOMNR = '319'                                           
+          ! IND.KOMNR = '323'                                           
+         THEN                                                           
+            UD.KOMNR = '326';                                           
+                                                                        
+         IF IND.KOMNR = '311'                                           
+          ! IND.KOMNR = '325'                                           
+          ! IND.KOMNR = '331'                                           
+          ! IND.KOMNR = '333'                                           
+         THEN                                                           
+            UD.KOMNR = '330';                                           
+                                                                        
+         IF IND.KOMNR = '303'                                           
+          ! IND.KOMNR = '335'                                           
+          ! IND.KOMNR = '337'                                           
+         THEN                                                           
+            UD.KOMNR = '340';                                           
+                                                                        
+         IF IND.KOMNR = '355'                                           
+          ! IND.KOMNR = '359'                                           
+          ! IND.KOMNR = '363'                                           
+          ! IND.KOMNR = '367'                                           
+          ! IND.KOMNR = '379'                                           
+          ! IND.KOMNR = '381'                                           
+          ! IND.KOMNR = '383'                                           
+         THEN                                                           
+            UD.KOMNR = '360';                                           
+                                                                        
+         IF IND.KOMNR = '369'                                           
+          ! IND.KOMNR = '371'                                           
+          ! IND.KOMNR = '375'                                           
+          ! IND.KOMNR = '387'                                           
+          ! IND.KOMNR = '391'                                           
+          ! IND.KOMNR = '395'                                           
+         THEN                                                           
+            UD.KOMNR = '376';                                           
+                                                                        
+         IF IND.KOMNR = '307'                                           
+          ! IND.KOMNR = '353'                                           
+          ! IND.KOMNR = '357'                                           
+          ! IND.KOMNR = '373'                                           
+          ! IND.KOMNR = '393'                                           
+         THEN                                                           
+            UD.KOMNR = '370';                                           
+                                                                        
+         IF IND.KOMNR = '271'                                           
+          ! IND.KOMNR = '389'                                           
+         THEN                                                           
+            UD.KOMNR = '336';                                           
+                                                                        
+         IF IND.KOMNR = '361'                                           
+          ! IND.KOMNR = '365'                                           
+          ! IND.KOMNR = '377'                                           
+          ! IND.KOMNR = '397'                                           
+         THEN                                                           
+            UD.KOMNR = '390';                                           
+                                                                        
+         IF IND.KOMNR = '421'                                           
+          ! IND.KOMNR = '433'                                           
+          ! IND.KOMNR = '437'                                           
+          ! IND.KOMNR = '485'                                           
+          ! IND.KOMNR = '491'                                           
+          ! IND.KOMNR = '499'                                           
+         THEN                                                           
+            UD.KOMNR = '420';                                           
+                                                                        
+         IF IND.KOMNR = '425'                                           
+          ! IND.KOMNR = '431'                                           
+          ! IND.KOMNR = '473'                                           
+          ! IND.KOMNR = '477'                                           
+          ! IND.KOMNR = '497'                                           
+         THEN                                                           
+            UD.KOMNR = '430';                                           
+                                                                        
+         IF IND.KOMNR = '439'                                           
+          ! IND.KOMNR = '441'                                           
+          ! IND.KOMNR = '447'                                           
+         THEN                                                           
+            UD.KOMNR = '440';                                           
+                                                                        
+         IF IND.KOMNR = '429'                                           
+          ! IND.KOMNR = '445'                                           
+          ! IND.KOMNR = '451'                                           
+         THEN                                                           
+            UD.KOMNR = '410';                                           
+                                                                        
+         IF IND.KOMNR = '449'                                           
+          ! IND.KOMNR = '489'                                           
+          ! IND.KOMNR = '495'                                           
+         THEN                                                           
+            UD.KOMNR = '450';                                           
+                                                                        
+         IF IND.KOMNR = '427'                                           
+          ! IND.KOMNR = '435'                                           
+          ! IND.KOMNR = '479'                                           
+         THEN                                                           
+            UD.KOMNR = '479';                                           
+                                                                        
+         IF IND.KOMNR = '475'                                           
+          ! IND.KOMNR = '481'                                           
+          ! IND.KOMNR = '487'                                           
+         THEN                                                           
+            UD.KOMNR = '482';                                           
+                                                                        
+         IF IND.KOMNR = '423'                                           
+          ! IND.KOMNR = '471'                                           
+          ! IND.KOMNR = '483'                                           
+         THEN                                                           
+            UD.KOMNR = '480';                                           
+                                                                        
+         IF IND.KOMNR = '511'                                           
+          ! IND.KOMNR = '515'                                           
+          ! IND.KOMNR = '543'                                           
+         THEN                                                           
+            UD.KOMNR = '510';                                           
+                                                                        
+         IF IND.KOMNR = '501'                                           
+          ! IND.KOMNR = '507'                                           
+          ! IND.KOMNR = '513'                                           
+          ! IND.KOMNR = '523'                                           
+          ! IND.KOMNR = '533'                                           
+          ! IND.KOMNR = '535'                                           
+          ! IND.KOMNR = '537'                                           
+         THEN                                                           
+            UD.KOMNR = '540';                                           
+                                                                        
+         IF IND.KOMNR = '505'                                           
+          ! IND.KOMNR = '517'                                           
+          ! IND.KOMNR = '521'                                           
+          ! IND.KOMNR = '525'                                           
+          ! IND.KOMNR = '531'                                           
+          ! IND.KOMNR = '541'                                           
+         THEN                                                           
+            UD.KOMNR = '550';                                           
+                                                                        
+         IF IND.KOMNR = '503'                                           
+          ! IND.KOMNR = '519'                                           
+          ! IND.KOMNR = '529'                                           
+          ! IND.KOMNR = '539'                                           
+          ! IND.KOMNR = '545'                                           
+         THEN                                                           
+            UD.KOMNR = '580';                                           
+                                                                        
+         IF IND.KOMNR = '557'                                           
+          ! IND.KOMNR = '561'                                           
+          ! IND.KOMNR = '571'                                           
+         THEN                                                           
+            UD.KOMNR = '561';                                           
+                                                                        
+         IF IND.KOMNR = '551'                                           
+          ! IND.KOMNR = '565'                                           
+         THEN                                                           
+            UD.KOMNR = '530';                                           
+                                                                        
+         IF IND.KOMNR = '553'                                           
+          ! IND.KOMNR = '555'                                           
+          ! IND.KOMNR = '567'                                           
+          ! IND.KOMNR = '573'                                           
+          ! IND.KOMNR = '577'                                           
+         THEN                                                           
+            UD.KOMNR = '573';                                           
+                                                                        
+         IF IND.KOMNR = '527'                                           
+          ! IND.KOMNR = '559'                                           
+          ! IND.KOMNR = '569'                                           
+          ! IND.KOMNR = '575'                                           
+         THEN                                                           
+            UD.KOMNR = '575';                                           
+                                                                        
+         IF IND.KOMNR = '509'                                           
+          ! IND.KOMNR = '621'                                           
+          ! IND.KOMNR = '623'                                           
+          ! IND.KOMNR = '629'                                           
+         THEN                                                           
+            UD.KOMNR = '621';                                           
+                                                                        
+         IF IND.KOMNR = '603'                                           
+          ! IND.KOMNR = '605'                                           
+          ! IND.KOMNR = '611'                                           
+          ! IND.KOMNR = '617'                                           
+          ! IND.KOMNR = '631'                                           
+         THEN                                                           
+            UD.KOMNR = '630';                                           
+                                                                        
+         IF IND.KOMNR = '613'                                           
+          ! IND.KOMNR = '619'                                           
+          ! IND.KOMNR = '627'                                           
+         THEN                                                           
+            UD.KOMNR = '766';                                           
+                                                                        
+         IF IND.KOMNR = '601'                                           
+          ! IND.KOMNR = '609'                                           
+          ! IND.KOMNR = '615'                                           
+         THEN                                                           
+            UD.KOMNR = '615';                                           
+                                                                        
+         IF IND.KOMNR = '651'                                           
+          ! IND.KOMNR = '657'                                           
+          ! IND.KOMNR = '677'                                           
+          ! IND.KOMNR = '685'                                           
+         THEN                                                           
+            UD.KOMNR = '657';                                           
+                                                                        
+         IF IND.KOMNR = '661'                                           
+          ! IND.KOMNR = '679'                                           
+          ! IND.KOMNR = '683'                                           
+         THEN                                                           
+            UD.KOMNR = '661';                                           
+                                                                        
+         IF IND.KOMNR = '625'                                           
+          ! IND.KOMNR = '653'                                           
+          ! IND.KOMNR = '663'                                           
+         THEN                                                           
+            UD.KOMNR = '756';                                           
+                                                                        
+         IF IND.KOMNR = '665'                                           
+          ! IND.KOMNR = '673'                                           
+         THEN                                                           
+            UD.KOMNR = '665';                                           
+                                                                        
+         IF IND.KOMNR = '655'                                           
+          ! IND.KOMNR = '659'                                           
+          ! IND.KOMNR = '667'                                           
+          ! IND.KOMNR = '669'                                           
+          ! IND.KOMNR = '681'                                           
+         THEN                                                           
+            UD.KOMNR = '760';                                           
+                                                                        
+         IF IND.KOMNR = '671'                                           
+          ! IND.KOMNR = '675'                                           
+         THEN                                                           
+            UD.KOMNR = '671';                                           
+                                                                        
+         IF IND.KOMNR = '701'                                           
+          ! IND.KOMNR = '721'                                           
+          ! IND.KOMNR = '733'                                           
+          ! IND.KOMNR = '739'                                           
+         THEN                                                           
+            UD.KOMNR = '706';                                           
+                                                                        
+         IF IND.KOMNR = '707'                                           
+          ! IND.KOMNR = '725'                                           
+          ! IND.KOMNR = '735'                                           
+         THEN                                                           
+            UD.KOMNR = '707';                                           
+                                                                        
+         IF IND.KOMNR = '709'                                           
+          ! IND.KOMNR = '711'                                           
+          ! IND.KOMNR = '713'                                           
+          ! IND.KOMNR = '767'                                           
+         THEN                                                           
+            UD.KOMNR = '710';                                           
+                                                                        
+         IF IND.KOMNR = '717'                                           
+          ! IND.KOMNR = '723'                                           
+          ! IND.KOMNR = '729'                                           
+          ! IND.KOMNR = '731'                                           
+          ! IND.KOMNR = '747'                                           
+         THEN                                                           
+            UD.KOMNR = '730';                                           
+                                                                        
+         IF IND.KOMNR = '705'                                           
+          ! IND.KOMNR = '743'                                           
+          ! IND.KOMNR = '749'                                           
+          ! IND.KOMNR = '771'                                           
+         THEN                                                           
+            UD.KOMNR = '740';                                           
+                                                                        
+         IF IND.KOMNR = '703'                                           
+          ! IND.KOMNR = '715'                                           
+          ! IND.KOMNR = '737'                                           
+          ! IND.KOMNR = '745'                                           
+         THEN                                                           
+            UD.KOMNR = '746';                                           
+                                                                        
+         IF IND.KOMNR = '777'                                           
+          ! IND.KOMNR = '779'                                           
+          ! IND.KOMNR = '781'                                           
+          ! IND.KOMNR = '783'                                           
+         THEN                                                           
+            UD.KOMNR = '779';                                           
+                                                                        
+         IF IND.KOMNR = '761'                                           
+          ! IND.KOMNR = '763'                                           
+          ! IND.KOMNR = '769'                                           
+          ! IND.KOMNR = '775'                                           
+          ! IND.KOMNR = '789'                                           
+          ! IND.KOMNR = '791'                                           
+         THEN                                                           
+            UD.KOMNR = '791';                                           
+                                                                        
+         IF IND.KOMNR = '765'                                           
+          ! IND.KOMNR = '785'                                           
+          ! IND.KOMNR = '787'                                           
+         THEN                                                           
+            UD.KOMNR = '787';                                           
+                                                                        
+         IF IND.KOMNR = '805'                                           
+          ! IND.KOMNR = '807'                                           
+         THEN                                                           
+            UD.KOMNR = '810';                                           
+                                                                        
+         IF IND.KOMNR = '813'                                           
+          ! IND.KOMNR = '841'                                           
+          ! IND.KOMNR = '847'                                           
+         THEN                                                           
+            UD.KOMNR = '813';                                           
+                                                                        
+         IF IND.KOMNR = '819'                                           
+          ! IND.KOMNR = '821'                                           
+          ! IND.KOMNR = '829'                                           
+          ! IND.KOMNR = '839'                                           
+         THEN                                                           
+            UD.KOMNR = '860';                                           
+                                                                        
+         IF IND.KOMNR = '719'                                           
+          ! IND.KOMNR = '801'                                           
+          ! IND.KOMNR = '815'                                           
+          ! IND.KOMNR = '823'                                           
+         THEN                                                           
+            UD.KOMNR = '846';                                           
+                                                                        
+         IF IND.KOMNR = '833'                                           
+          ! IND.KOMNR = '843'                                           
+          ! IND.KOMNR = '845'                                           
+         THEN                                                           
+            UD.KOMNR = '840';                                           
+                                                                        
+         IF IND.KOMNR = '803'                                           
+          ! IND.KOMNR = '811'                                           
+          ! IND.KOMNR = '835'                                           
+          ! IND.KOMNR = '849'                                           
+         THEN                                                           
+            UD.KOMNR = '849';                                           
+                                                                        
+         IF IND.KOMNR = '817'                                           
+          ! IND.KOMNR = '831'                                           
+          ! IND.KOMNR = '837'                                           
+          ! IND.KOMNR = '851'                                           
+         THEN                                                           
+            UD.KOMNR = '851';                                           
+                                                                        
+         IF IND.KOMNR = '793'                                           
+          ! IND.KOMNR = '809'                                           
+          ! IND.KOMNR = '827'                                           
+          ! IND.KOMNR = '861'                                           
+         THEN                                                           
+            UD.KOMNR = '820';                                           
+                                                                        
+         IF UD_DATO > '000000'                                          
+         THEN;                                                          
+         ELSE                                                           
+            UD_DATO = '000000';                                         
+                                                                        
+         IF (UD.ART = 16 !                                              
+             UD.ART = 18 !                                              
+             UD.ART = 72 !                                              
+             UD.ART = 78)                                               
+         THEN                                                           
+            DO;                                                         
+               IF IND.LGD  = 27                                         
+               THEN                                                     
+                  UD.MPNR = 0;                                          
+               ELSE                                                     
+                  IF VERIFY(UD_MPNR,'0123456789') = 0 &                 
+                     UD_MPNR > '0000000000'                             
+                  THEN                                                  
+                     DO;                                                
+                        TVMPNR(INDEX) = TVMPNR(INDEX) + 1;              
+                        TOTMPNR = TOTMPNR + 1;                          
+                     END;                                               
+                  ELSE                                                  
+                     UD.MPNR = 0;                                       
+               WRITE FILE (BL3271O) FROM (REC_37);                      
+               TOTSKR2 = TOTSKR2 + 1;                                   
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               WRITE FILE (BL3270O) FROM (REC_27);                      
+               TOTSKR1 = TOTSKR1 + 1;                                   
+            END;                                                        
+                                                                        
+ END BEHANDL_INPUT;                                                     
+ /*********************************************************************/
+ /*      AFSLUT BEHANDLING AF INPUT DATASÆT B.L30100D SAMT UDSKRIV    */
+ /*      KONTROLTOTALER                                               */
+ /*********************************************************************/
+ AFSLUT_BL301: PROC;                                                    
+                                                                        
+         FÆLLES = 1;                                                    
+         CALL SKRIV_FÆLLES;                                             
+                                                                        
+ END AFSLUT_BL301;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      AFSLUT BEHANDLING AF INPUT DATASÆT B.L30200D SAMT UDSKRIV    */
+ /*      KONTROLTOTALER                                               */
+ /*********************************************************************/
+ AFSLUT_BL302: PROC;                                                    
+                                                                        
+         FÆLLES = 2;                                                    
+         CALL SKRIV_FÆLLES;                                             
+                                                                        
+ END AFSLUT_BL302;                                                      
+ /*********************************************************************/
+ /*      SKRIV KONTROLTOTALER                                         */
+ /*********************************************************************/
+ SKRIV_FÆLLES: PROC;                                                    
+                                                                        
+         LINIE = ' ';                                                   
+         CCA = ZZWS2;                                                   
+         TEKST = 'PROGRAM BL32700L:     TOTAL FRA KONTROLSYSTEM';       
+         SUBSTR (LINIE,51,24)  = 'UDSKREVET DEN ' !! UDDATO;            
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = ' ';                                                   
+         CCA = ZZWS2;                                                   
+         IF FÆLLES = 1                                                  
+         THEN                                                           
+            TEKST = 'ANTAL INPUT-INDIVIDER FRA B.L30100D      ';        
+         ELSE                                                           
+            TEKST = 'ANTAL INPUT-INDIVIDER FRA B.L30200D      ';        
+         PLÆSIALT = TOTLÆS;                                             
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '       SOM ER FORDELT SÅLEDES:';                      
+         CCA  = ZZWS2;                                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE =                                                        
+         '               ANTAL         ART                BELØB        M
+ ED MODT.PNR.';                                                         
+         CCA  = ZZWS2;                                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = ' ';                                                   
+                                                                        
+         DO I = 1 TO 100;                                               
+                                                                        
+            IF TVART(I) ^= 0                                            
+            THEN                                                        
+               DO;                                                      
+                  CCA = ZZWS1;                                          
+                  PLÆSART = TVART (I);                                  
+                  PART    = I - 1;                                      
+                  PBELART = TVBEL(I);                                   
+                  PMPNR   = TVMPNR(I);                                  
+                  CALL ZZ20300 (LINIE,'01');                            
+                  LINIE = ' ';                                          
+                  TOTBEL = TOTBEL + TVBEL (I);                          
+               END;                                                     
+                                                                        
+         END;                                                           
+                                                                        
+         LINIE = ' ';                                                   
+         CCA  = ZZWS2;                                                  
+         TEKST = 'I ALT';                                               
+         PLÆSART = TOTLÆS;                                              
+         PBELART = TOTBEL;                                              
+         PMPNR   = TOTMPNR;                                             
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = ' ';                                                   
+         CCA  = ZZWS2;                                                  
+         TEKST = 'ANTAL OUTPUTINDIVIDER TIL B.L32700D      ';           
+         PLÆSIALT = TOTSKR1;                                            
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = ' ';                                                   
+         CCA  = ZZWK1;                                                  
+         TEKST = 'ANTAL OUTPUTINDIVIDER TIL B.L32710D      ';           
+         PLÆSIALT = TOTSKR2;                                            
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+ END SKRIV_FÆLLES;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      AFSLUT PROGRAM                                               */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE (BL301I),                                           
+               FILE (BL302I),                                           
+               FILE (BL3270O),                                          
+               FILE (BL3271O);                                          
+                                                                        
+         CALL ZZ20300 (' ','99');                                       
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+                                                                        
+ END BL32700;                                                           

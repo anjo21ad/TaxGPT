@@ -1,0 +1,2503 @@
+ BH55300:/*** AJOURFØR MINI MT-FIL TIL EVS FORSKUD ELLER EVS SLUT ***/  
+         PROCEDURE (EXECPARM) OPTIONS (MAIN);                           
+ /*********************************************************************/
+ /*                                                                   */
+ /*      NAVN            AJOURFØR MANDTALS TABEL BQ76000T TIL EVS     */
+ /*                      FORSKUD ELLER EVS SLUT                       */
+ /*                                                                   */
+ /*                                                                   */
+ /*      FUNKTION        AT AJOURFØRE MT TIL FORSKUD/SLUT MED OPLYS-  */
+ /*                      NINGER FRA UDTRÆK FRA COR OG SOC. PENSIONER  */
+ /*                      VEDRØRENDE FØRTIDSPENSIONISTER M.V.          */
+ /*                      DISSE PERSONER FÅR OPSAT KODER HERFOR A.H.T. */
+ /*                      BEREGNINGEN AF EJENDOMSVÆRDISKAT SAMT        */
+ /*                      VED BESTEMMELSEN AF HVILKE PERSONER(EJERE)   */
+ /*                      DER OPFYLDER BETINGELSERNE FOR AT BLIVE      */
+ /*                      BEREGNET SOM 'HELÅRSBEBOER' AF SOMMERHUS.    */
+ /*                                                                   */
+ /*      INDDATA         BH76000T     MANDTALS TABEL MED FORSKUDS OPL */
+ /*                                   EFTER REPARATION AF DHENVN M.V. */
+ /*                                   SAMT MT DATA FRA SIDSTE ÅR      */
+ /*                      BQ64000T     UDTRÆK COR                      */
+ /*                      BQ62000T     UDTRÆK FRA SLUT OPGØRELSE       */
+ /*                      BQ63000T     UDTRÆK PENS. SYSTEMET WISP      */
+ /*                                                                   */
+ /*      UDDATA          BH76000T     AJOURFØRT  MANDTALS TABEL       */
+ /*                      BH55301Y     KØRSELSKONTROLLISTE             */
+ /*                                                                   */
+ /*********************************************************************/
+ /* ÆNDRINGSLOG: Lene Maj Jensen       QLE               09.01.2017   */
+ /*              Omlægning af mandtalsfil og udtræk til DB2           */
+ /*              samt tilføjelse af oprydningsdel ved omkørsel        */
+ /*                                                                   */
+ /*********************************************************************/
+         DEFAULT RANGE(*) STATIC UNALIGNED CONN;                        
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF TABELLER OG FILER                                 */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;          /* SQL KOMMUNIKATIONSAREAL        */  
+                                                                        
+ DCL     SYSPRINT        EXTERNAL FILE PRINT;                           
+ DCL     BH553I FILE RECORD INPUT;     /* Parameter Forskud-Slut */     
+                                                                        
+ /*********************************************************************/
+ /*      PARAMETER INPUT                                              */
+ /*********************************************************************/
+                                                                        
+ DCL     1 BH553_PARM,                                                  
+         %INCLUDE BH54900N;                                             
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF GL. MT-FIL FRA GL. EVS SLUT INDKOMSTÅR            */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     1 GL_MT_AREA,                                                  
+         %INCLUDE BQ7600TN;  /* afspejler tabel BQ76000T */             
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF Output areal til MT-FIL                           */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     1 OUT_MT,                                                      
+         %INCLUDE BQ7600TN;  /* afspejler tabel BQ76000T */             
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ENTRY OG BUILTIN                                  */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;              /* PROGRAM-KOMMUNIKATION */
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS67000         ENTRY;                                         
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     1 TV,                                                          
+           2 SCFRÅR      FIXED DEC (7),                                 
+           2 FCFRÅR      FIXED DEC (7);                                 
+ DCL     ANT_MT          FIXED  (7) INIT (0); /* ANTAL LÆSTE MT       */
+ DCL     ANT_GLMT        FIXED  (7) INIT (0); /* ANTAL LÆSTE GL MT    */
+ DCL     ANT_COR         FIXED  (7) INIT (0); /* ANTAL LÆSTE COR      */
+ DCL     ANT_SLUT        FIXED  (7) INIT (0); /* ANTAL LÆSTE SLUT     */
+ DCL     ANT_PENS        FIXED  (7) INIT (0); /* ANTAL LÆSTE PENS     */
+ DCL     ANT_DUB         FIXED  (7) INIT (0); /* ANTAL SKREVNE DUBLET.*/
+ DCL     ANT_UPD         FIXED  (7) INIT (0); /* ANTAL UPDATES        */
+ DCL     ANT_INS         FIXED  (7) INIT (0); /* ANTAL INSERTS        */
+ DCL     ANT_COMM        FIXED  (7) INIT (0); /* COMMIT TÆLLER        */
+ DCL     ANT_BLOT_DØDE   FIXED  (7) INIT (0); /* ANTAL SKREVNE DUBLET.*/
+ DCL     ANT_AJOUR       FIXED  (7) INIT (0); /* ANTAL AJOURFØRTE     */
+ DCL     ANT_NYGIFTE     FIXED  (7) INIT (0); /* ANTAL NYGIFTE        */
+ DCL     ANT_TIDL_SAMB   FIXED  (7) INIT (0); /* ANTAL TIDL. SAMBESKAT*/
+ DCL     ANT_SKPL(0:9)   FIXED  (7);          /* ANTAL SKATTEPL.OMFANG*/
+ DCL     MT_OPTALT       FIXED  (7) INIT (0); /* ANTAL INDV. FRA MT   */
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH55300'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ØVRIGE FELTER                                     */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BH55300');      
+                                                                        
+ DCL     SLUTÅR0101         FIXED     (09)      INIT (0);               
+                                                                        
+ DCL     KALDT_FRA      CHAR (20)        INIT(' ');                     
+                                                                        
+ DCL     AJOURFØRT       BIT       (01)      INIT      ('0'B);          
+ DCL     MT_ER_FIKTIV    BIT       (01)      INIT      ('0'B);          
+ DCL     ÆGTE_ER_FIKTIV BIT       (01)      INIT      ('0'B);           
+ DCL     I               BIN FIXED (15)      INIT      (0);             
+ DCL     J               BIN FIXED (15)      INIT      (0);             
+ DCL     FEJL            PIC       '9'       INIT      (0);             
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M; /* OPSÆT AKTUELT INDKOMSTÅR M.V. */       
+                                                                        
+ DCL     HJ_SKPL         CHAR      (1);                                 
+ DCL     HJ_SKPL_PIC     PIC       '9'       BASED(ADDR(HJ_SKPL));      
+ DCL     HJ67            CHAR      (1);       /* KODE FOR 67-ÅRIGE    */
+ DCL     HJHNV67         CHAR      (1);       /* KODE FOR ÆGTEFÆLLE 67*/
+ DCL     HJ_CPR          PIC       '(10)9';                             
+ DCL     1 HJ_CPR1       BASED(ADDR(HJ_CPR)),                           
+           2 F1          CHAR      (04),                                
+           2 ÅR          PIC       '99',                                
+           2 LBNR        PIC       '9',                                 
+           2 F2          CHAR      (2),                                 
+           2 CHKCIF      PIC       '9';                                 
+                                                                        
+ DCL     ALDER           FIXED     (3);                                 
+ DCL     PRDATO2         FIXED     (9);                                 
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_BH553          BIT       (1);                              
+ DCL     JA                 BIT       (1)     INIT ('1'B);              
+ DCL     NEJ                BIT       (1)     INIT ('0'B);              
+ DCL     MT_FUNDET          BIT       (1)     INIT ('0'B);              
+ DCL     COR_FUNDET         BIT       (1)     INIT ('0'B);              
+ DCL     SLUT_FUNDET        BIT       (1)     INIT ('0'B);              
+ DCL     PENS_FUNDET        BIT       (1)     INIT ('0'B);              
+ DCL     GL_MT_FUNDET       BIT       (1)     INIT ('0'B);              
+ DCL     GLSPEC_MT_FUNDET   BIT       (1)     INIT ('0'B);              
+ DCL     TEST_PUT           BIT       (1)     INIT ('0'B);              
+ DCL     WS_OVERF_NAESTE    BIT       (1)     INIT ('0'B);              
+ DCL     WS_TEST_CPR        DEC FIXED (11,0);                           
+ DCL     WS_CHECK_FIKT_ÆGT  DEC FIXED (11,0);                           
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH55300L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (54)      INIT      (                
+           'AJOURFØRING MED PENSIONISTKODE M.V. PÅ MINI-MTFIL'),        
+           2 F2          CHAR      (14)      INIT      (' '),           
+           2 TEKST3      CHAR      (14)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (43)      INIT      (' '),           
+           2 TEKST1      CHAR      (89)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (50),                                
+           2 RCKOD       CHAR      (01)      INIT      (' '),           
+           2 F1          CHAR      (02)      INIT      (' '),           
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (68)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (50),                                
+           2 F2          CHAR      (83)      INIT      (' ');           
+         %INCLUDE ZZ20301M;                                             
+ /*********************************************************************/
+ /* M A C R O E R der SKAL ligge før koden grundet declare af cursors */
+ /*********************************************************************/
+ %INCLUDE BH54999M; /* CHECK OM OMKØRSEL, OG UDFØR EVT OPRYDNING */     
+ /*********************************************************************/
+ /* Declare af CURSORS                                                */
+ /*********************************************************************/
+         EXEC SQL DECLARE MTCURS CURSOR WITH HOLD FOR                   
+              SELECT                                                    
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRN,                                                   
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               CFØRFORS,                                                
+               CFØRCOR,                                                 
+               CFØRPENS,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CFØREFT,                                 
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CFØREFT,                                  
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CFØREFT,                                 
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN                                    
+          FROM BQ76000T                                                 
+          WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR                           
+          AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                    
+          ORDER BY TIL_EVS_AAR, AFVIKLINGS_ID, DCPRN;                   
+                                                                        
+          EXEC SQL DECLARE GLMTCURS CURSOR WITH HOLD FOR                
+              SELECT                                                    
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRN,                                                   
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               CFØRFORS,                                                
+               CFØRCOR,                                                 
+               CFØRPENS,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CFØREFT,                                 
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CFØREFT,                                  
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CFØREFT,                                 
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN                                    
+          FROM BQ76000T                                                 
+          WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR_GL                        
+          AND   AFVIKLINGS_ID = :WS_SLUT_AFVIKLINGS_ID                  
+          AND   CCIVS = 'D'                                             
+          AND   (HIST_OPD_DETTE_DCIÆN > 0 AND                           
+                 HIST_OPD_DETTE_DCIÆN < :SLUTÅR0101)                    
+          ORDER BY TIL_EVS_AAR, AFVIKLINGS_ID, DCPRN;                   
+          /* N.B.  Tages ALTID fra SLUT */                              
+                                                                        
+          /* cursor ændret til at benytte _DETTE_  QLE 5.12 */          
+                                                                        
+ /*********************************************************************/
+ /*      ON - CONDITIONS                                              */
+ /*********************************************************************/
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         EOF_BH553 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH55300L');             
+            END;                                                        
+                                                                        
+         CALL ZS61900;                            /* UDSKRIV SSI-DATO */
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH55301Y');                             
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         TV = '';                                                       
+                                                                        
+         DO I = 0 TO 9;                                                 
+            ANT_SKPL(I) = 0;                                            
+         END;                                                           
+         MT_OPTALT  = 0;                                                
+                                                                        
+         OPEN FILE (BH553I) TITLE ('BH55300P');                         
+                                                                        
+         ON ENDFILE (BH553I)                                            
+         BEGIN;                                                         
+            EOF_BH553 = JA;                                             
+         END;                                                           
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+         READ FILE (BH553I) INTO (BH553_PARM);                          
+                                                                        
+         IF EOF_BH553 = NEJ                                             
+         THEN DO;                                                       
+            SELECT (BH553_PARM.FS_MRK);                                 
+               WHEN ('F')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH553_PARM.FORSKUD_TXT;      
+                     WS_TIL_EVS_AAR = BH65300M.FORSKÅR;                 
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH553_PARM.SLUT_TXT;       
+                  END;                                                  
+               WHEN ('S')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH553_PARM.SLUT_TXT;         
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH553_PARM.SLUT_TXT;       
+                  END;                                                  
+               WHEN ('U')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH553_PARM.SUPPL_TXT;        
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH553_PARM.SLUT_TXT;       
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+                                                                        
+         END;                                                           
+                                                                        
+         /********************************************************/     
+         /*  CHECK OM FORGÆNGERE ER KØRT                         */     
+         /********************************************************/     
+         CALL CHECK_SEKVENS (BH553_PARM.FS_MRK); /* BH54997M */         
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER CHECK AF OMKØRSEL                        */     
+         /********************************************************/     
+         CALL CHECK_OM_OMKØRSEL; /* kode ligger i macro BH54999M */     
+         IF DER_SKAL_KØRES_OM                                           
+         THEN DO;                                                       
+            PUT SKIP LIST ('Omkørsel af ' !! WS_PROGRAMNAVN);           
+            CALL RYD_OP_FØR_OMKØRSEL;                                   
+         END;                                                           
+         ELSE DO;                                                       
+            PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);      
+         END;                                                           
+                                                                        
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+         CALL OPDATER_KØRSELSTABEL('START',BH553_PARM.FS_MRK);          
+                                                                        
+ /*********************************************************************/
+ /*      PROCESS                                                      */
+ /*********************************************************************/
+          put skip list ('GLSLUTÅR: ' !! GLSLUTÅR);                     
+                                                                        
+          /* TEST TEST QLE  5.12.2017 */                                
+          /* Find de gamle MT rækker, hvor personen */                  
+          /* ikke findes på ny MT og desuden er Død */                  
+          /* indtil videre selecter jeg bare en enkelt */               
+          GLSPEC_MT_FUNDET = NEJ;                                       
+          GL_MT_AREA = '';                                              
+          GL_MT_AREA.TIL_EVS_AAR    = WS_TIL_EVS_AAR_GL;                
+          GL_MT_AREA.AFVIKLINGS_ID  = WS_SLUT_AFVIKLINGS_ID;            
+          GL_MT_AREA.DCPRN          = 104270468;                        
+          CALL LÆS_GLMTSPEC;                                            
+          GLSPEC_MT_FUNDET = NEJ;                                       
+          GL_MT_AREA = '';                                              
+          GL_MT_AREA.TIL_EVS_AAR    = WS_TIL_EVS_AAR_GL;                
+          GL_MT_AREA.AFVIKLINGS_ID  = WS_SLUT_AFVIKLINGS_ID;            
+          GL_MT_AREA.DCPRN          = 104473210;                        
+          CALL LÆS_GLMTSPEC;                                            
+          GLSPEC_MT_FUNDET = NEJ;                                       
+          GL_MT_AREA = '';                                              
+          GL_MT_AREA.TIL_EVS_AAR    = WS_TIL_EVS_AAR_GL;                
+          GL_MT_AREA.AFVIKLINGS_ID  = WS_SLUT_AFVIKLINGS_ID;            
+          GL_MT_AREA.DCPRN          = 103200464;                        
+          CALL LÆS_GLMTSPEC;                                            
+          /* SLUT TEST TEST QLE */                                      
+                                                                        
+          /* Ajourfør MT-oplysninger */                                 
+                                                                        
+          CALL CLOSE_MTCURS;                                            
+          CALL OPEN_MTCURS;                                             
+          CALL FETCH_MTCURS;                                            
+                                                                        
+          DO WHILE (SQLCA.SQLCODE = 0);                                 
+             ANT_MT = ANT_MT + 1;                                       
+             CALL LÆS_COR;                                              
+             CALL LÆS_SLUT;                                             
+             CALL LÆS_PENS;                                             
+             CALL LÆS_GLMT; /* til brug for ovf historik */             
+                                                                        
+             /* HEREFTER AJOURFØRES NY MT-FIL FRA FORSKUD */            
+             /* MED OPLYSNINGER FRA COR, PENS OG/ELLER    */            
+             /* GL. MT-FIL FRA EVS SLUT GL. ÅR            */            
+                                                                        
+             CALL BEHANDL;                                              
+             CALL FETCH_MTCURS;                                         
+          END;                                                          
+                                                                        
+          IF ANT_COMM > 0                                               
+          THEN DO;                                                      
+             EXEC SQL COMMIT;                                           
+             Put skip list ('Commit efter ' !! ANT_COMM !!              
+                            ' opdateringer.  Ialt ' !! ANT_UPD !!       
+                            ' opdateringer');                           
+             ANT_COMM = 0;                                              
+          END;                                                          
+                                                                        
+          CALL CLOSE_MTCURS;                                            
+                                                                        
+          /* find og opdater de døde */                                 
+                                                                        
+          SLUTÅR0101 = BH65300M.ÅR0101;                                 
+                                                                        
+          CALL CLOSE_GLMTCURS;                                          
+          CALL OPEN_GLMTCURS;                                           
+          CALL FETCH_GLMTCURS;   /* altid med SLUT afviklings_id */     
+                                                                        
+          DO WHILE (SQLCA.SQLCODE = 0);                                 
+             CALL LÆS_MT;                                               
+             IF ^MT_FUNDET                                              
+             THEN DO;                                                   
+                CALL SKRIV_DØD;                                         
+             END;                                                       
+             CALL FETCH_GLMTCURS;                                       
+          END;                                                          
+                                                                        
+          IF ANT_COMM > 0                                               
+          THEN DO;                                                      
+             EXEC SQL COMMIT;                                           
+             Put skip list ('Commit efter ' !! ANT_COMM !!              
+                            ' opdateringer.  Ialt ' !! ANT_INS !!       
+                            ' opdateringer af døde');                   
+          END;                                                          
+                                                                        
+          CALL CLOSE_GLMTCURS;                                          
+                                                                        
+          CALL KONTROLLISTE;                                            
+          CALL AFSLUT;                                                  
+ /*********************************************************************/
+ /*      BEHANDLING AF INDLÆST DATA                                   */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+            out_mt = '';                                                
+            out_mt.til_evs_aar = dclbq76000t.til_evs_aar;               
+            out_mt.afviklings_id = dclbq76000t.afviklings_id;           
+            out_mt.dcprn = dclbq76000T.dcprn;                           
+            out_mt.programnavn = dclbq76000t.programnavn;               
+            out_mt.db2funktion = dclbq76000t.db2funktion;               
+                                                                        
+            AJOURFØRT = '0'B;                                           
+                                                                        
+            IF DCLBQ76000T.HIST_OPD_DETTE_CFØREFT = 1                   
+            THEN              /* 'NY' EFTERLØNSMODTAGER IFLG. FORSKUD */
+               out_mt.CFØRFORS = 1;                                     
+                                                                        
+            IF COR_FUNDET                                               
+            THEN DO;                                                    
+               IF DCLBQ64000T.DCPRN = DCLBQ76000T.DCPRN &               
+                  DCLBQ64000T.BEFTLØN > 0                               
+               THEN              /* EFTERLØNSMODTAGER IFLG. COR */      
+                  out_mt.CFØRCOR = 1;                                   
+            END;                                                        
+                                                                        
+            IF SLUT_FUNDET                                              
+            THEN DO;                                                    
+               IF DCLBQ62000T.DCPRN = DCLBQ76000T.DCPRN     /*SLUT06*/  
+               THEN              /* FORSKUDT REGNSKABSÅR IFLG SLUT  */  
+                  out_mt.CFRÅR = DCLBQ62000T.CFRÅR;                     
+               END;                                                     
+                                                                        
+            IF PENS_FUNDET                                              
+            THEN DO;                                                    
+               IF DCLBQ63000T.DCPRN = DCLBQ76000T.DCPRN                 
+               THEN              /* PENSIONIST M.V. IFLG. PENS  */      
+                  out_mt.CFØRPENS = 1;                                  
+            END;                                                        
+                                                                        
+            IF out_mt.CFØRFORS = 1 !                                    
+               out_mt.CFØRCOR  = 1 !                                    
+               out_mt.CFØRPENS = 1                                      
+            THEN                                                        
+               CALL OPSÆT_KODE;                                         
+            IF out_mt.CFRÅR >= '01'                                     
+            THEN                                                        
+               DO;                                                      
+                  IF out_mt.CFRÅR > '01'                                
+                  THEN                                                  
+                     DO;                                                
+                        out_mt.CFRÅROPR = 'S';                          
+                        TV.SCFRÅR = TV.SCFRÅR + 1;                      
+                     END;                                               
+               END;                                                     
+            ELSE                                                        
+               IF DCLBQ76000T.CRGN > '01'               /*SLUT05*/      
+               THEN                                                     
+                  DO;                                                   
+                     out_mt.CFRÅR = DCLBQ76000T.CRGN;    /*SLUT05*/     
+                     out_mt.CFRÅROPR = 'F';                             
+                     TV.FCFRÅR = TV.FCFRÅR + 1;                         
+                  END;                                                  
+               ELSE                                                     
+                  out_mt.CFRÅR = '  ';                                  
+                                                                        
+            CALL OPSÆT_INDKOMSTÅR                                       
+                 (out_mt.CFRÅR,out_mt.DRGNÅRFRA,                        
+                  out_mt.DRGNÅRTIL);                                    
+                                                                        
+            IF MT_ER_FIKTIV = NEJ /* qle 15-8-17 */                     
+            then do;              /* kun kald hvis IKKE fiktiv */       
+               CALL TEST_ALDER;                                         
+            end;                                                        
+                                                                        
+            CALL REGULER_MT_OPL;                                        
+                                                                        
+            if test_put                                                 
+            then do;                                                    
+               put skip list ('efter reguler_mt_opl indeholder ' !!     
+                              'out_mt.BPENSIND ' !! out_mt.BPENSIND !!  
+                              ' og dclbq76000t.BPENSIND ' !!            
+                              dclbq76000t.BPENSIND);                    
+            end;                                                        
+                                                                        
+            IF GL_MT_AREA.DCPRN = DCLBQ76000T.DCPRN &                   
+               MT_ER_FIKTIV = NEJ /* qle 16-8-17 kun hvis IKKE fiktiv */
+            THEN                                                        
+               CALL OVERF_HISTOPL;                                      
+                                                                        
+            /* blankstil hist_opd_naeste_* hvis fiktiv */               
+            /* personen har en fiktiv ægtefælle        */               
+            /* KIG HER -->   denne if tager for mange med */            
+            /* den virker for 102421620, men ikke for mange andre */    
+            /* ÆGTE_ER_FIKTIV = NEJ;                                    
+            WS_CHECK_FIKT_ÆGT = out_mt.HIST_OPD_NAESTE_DHENVN;          
+            CALL CHECK_OM_FIKTIV_ÆGTEFÆLLE;                             
+            IF MT_ER_FIKTIV    !                                        
+               ÆGTE_ER_FIKTIV                                           
+            THEN DO;                                                    
+               out_mt.HIST_OPD_NAESTE_DHENVN = 0;                       
+               if test_put                                              
+               then do;                                                 
+                  put skip list (DCLBQ76000T.DCPRN !!                   
+                  ' NAESTE_DHENV er blevet nulstillet');                
+                  put skip list ('MT_ER_FIKTIV: ' !! MT_ER_FIKTIV);     
+                  put skip list ('ÆGTE_ER_FIKTIV: ' !! ÆGTE_ER_FIKTIV); 
+                  put skip list ('WS_OVERF_NAESTE: ' !!                 
+                                                  WS_OVERF_NAESTE);     
+               end;                                                     
+            END;                                                        
+            ELSE DO;                                                    
+               if test_put                                              
+               then do;                                                 
+                  put skip list (DCLBQ76000T.DCPRN !!                   
+                  'NAESTE_DHENV er IKKE blevet nulstillet');            
+                  put skip list ('MT_ER_FIKTIV: ' !! MT_ER_FIKTIV);     
+                  put skip list ('ÆGTE_ER_FIKTIV: ' !! ÆGTE_ER_FIKTIV); 
+                  put skip list ('WS_OVERF_NAESTE: ' !!                 
+                                                  WS_OVERF_NAESTE);     
+               end;                                                     
+            END; */                                                     
+                                                                        
+            IF MT_ER_FIKTIV       /* qle 16-8-17 */                     
+            THEN DO;                                                    
+               out_mt.HIST_OPD_NAESTE_DHENVN = 0;                       
+            END;                                                        
+                                                                        
+            KALDT_FRA = 'BEHANDL';                                      
+                                                                        
+            if test_put                                                 
+            then do;                                                    
+               put skip list ('Så skal der opdateres MT');              
+            end;                                                        
+                                                                        
+            CALL OPDATER_MT_OPL;                                        
+                                                                        
+ END BEHANDL;                                                           
+                                                                        
+ /*********************************************************************/
+ /*      LÆSNING AF MT                                                */
+ /*********************************************************************/
+ LÆS_MT: PROC;                                                          
+                                                                        
+         MT_FUNDET = NEJ;                                               
+                                                                        
+         DCLBQ76000T = '';                                              
+         DCLBQ76000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                   
+         DCLBQ76000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;              
+         DCLBQ76000T.DCPRN          = GL_MT_AREA.DCPRN;                 
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRN,                                                   
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               CFØRFORS,                                                
+               CFØRCOR,                                                 
+               CFØRPENS,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CFØREFT,                                 
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CFØREFT,                                  
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CFØREFT,                                 
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN                                    
+                                                                        
+            INTO                                                        
+               :DCLBQ76000T.TIL_EVS_AAR,                                
+               :DCLBQ76000T.AFVIKLINGS_ID,                              
+               :DCLBQ76000T.DCPRN,                                      
+               :DCLBQ76000T.PROGRAMNAVN,                                
+               :DCLBQ76000T.DB2FUNKTION,                                
+               :DCLBQ76000T.CCIVS,                                      
+               :DCLBQ76000T.CPENS,                                      
+               :DCLBQ76000T.CRGN,                                       
+               :DCLBQ76000T.DSORP,                                      
+               :DCLBQ76000T.CPART,                                      
+               :DCLBQ76000T.CFRÅR,                                      
+               :DCLBQ76000T.CFRÅROPR,                                   
+               :DCLBQ76000T.DRGNÅRFRA,                                  
+               :DCLBQ76000T.DRGNÅRTIL,                                  
+               :DCLBQ76000T.BPENSIND,                                   
+               :DCLBQ76000T.BPENSGR,                                    
+               :DCLBQ76000T.CSTATUS,                                    
+               :DCLBQ76000T.CDØDÆGTF,                                   
+               :DCLBQ76000T.CDUBLET,                                    
+               :DCLBQ76000T.CÆGTF_OK,                                   
+               :DCLBQ76000T.CFØRFORS,                                   
+               :DCLBQ76000T.CFØRCOR,                                    
+               :DCLBQ76000T.CFØRPENS,                                   
+               :DCLBQ76000T.COVF_DHE,                                   
+               :DCLBQ76000T.FØROPL_DCIÆN_GL,                            
+               :DCLBQ76000T.FØROPL_CCIVS_GL,                            
+               :DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN,                     
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CSBSK,                      
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CFØREFT,                    
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CSKPLOM,                    
+               :DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN,                      
+               :DCLBQ76000T.HIST_OPD_DETTE_DHENVN,                      
+               :DCLBQ76000T.HIST_OPD_DETTE_CSBSK,                       
+               :DCLBQ76000T.HIST_OPD_DETTE_CFØREFT,                     
+               :DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM,                     
+               :DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,                       
+               :DCLBQ76000T.HIST_OPD_NAESTE_DHENVN,                     
+               :DCLBQ76000T.HIST_OPD_NAESTE_CSBSK,                      
+               :DCLBQ76000T.HIST_OPD_NAESTE_CFØREFT,                    
+               :DCLBQ76000T.HIST_OPD_NAESTE_CSKPLOM,                    
+               :DCLBQ76000T.HIST_OPD_NAESTE_DCIÆN                       
+            FROM BQ76000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBQ76000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ76000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ76000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               MT_FUNDET = JA;                                          
+               if DCLBQ76000t.dcprn = 104270468 !                       
+                  DCLBQ76000t.dcprn = 104473210 !                       
+                  DCLBQ76000t.dcprn = 103200464                         
+               then                                                     
+                  put skip list ('LÆS_MT ' !! dclbq76000t.dcprn !!      
+                                 ' med bpensind: ' !!                   
+                                 DCLBQ76000T.bpensind);                 
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ76000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END LÆS_MT;                                                            
+                                                                        
+ /********************************************************************/ 
+ /*                                                                  */ 
+ /********************************************************************/ 
+ CHECK_OM_FIKTIV_ÆGTEFÆLLE: PROC;                                       
+                                                                        
+         ÆGTE_ER_FIKTIV = NEJ;                                          
+         WS_TEST_CPR = 0;                                               
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list ('CHECK_OM_FIKTIV_ÆGTEFÆLLE med cpr ' !!      
+                           WS_CHECK_FIKT_ÆGT);                          
+         end;                                                           
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+               DCPRN                                                    
+            INTO                                                        
+               :WS_TEST_CPR                                             
+                                                                        
+            FROM BQ76000T                                               
+            WHERE TIL_EVS_AAR   = :WS_TIL_EVS_AAR                       
+            AND   DCPRN         = :WS_CHECK_FIKT_ÆGT                    
+            AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                  
+            AND   DB2FUNKTION   IN ('F','X')                            
+            AND   HIST_OPD_DETTE_DHENVN > 0                             
+            ;                                                           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ÆGTE_ER_FIKTIV = JA;                                     
+               if test_put                                              
+               then do;                                                 
+                 put skip list ('Der blev fundet en fiktiv på stam');   
+               end;                                                     
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ76 FIKTIV ÆGTE';                
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF ÆGTE_ER_FIKTIV = NEJ                                        
+         THEN DO;                                                       
+            EXEC SQL                                                    
+               SELECT DCPRN                                             
+               INTO                                                     
+                  :WS_TEST_CPR                                          
+               FROM BQ7600HT                                            
+               WHERE TIL_EVS_AAR   = :WS_TIL_EVS_AAR                    
+               AND   DCPRN         = :WS_CHECK_FIKT_ÆGT                 
+               AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT               
+               AND   DB2FUNKTION   IN ('F','X')                         
+               AND   HIST_OPD_DETTE_DHENVN > 0                          
+               FETCH FIRST 1 ROW ONLY                                   
+               ;                                                        
+                                                                        
+               SELECT(SQLCA.SQLCODE);                                   
+                  WHEN(0) DO;                                           
+                     ÆGTE_ER_FIKTIV = JA;                               
+                     if test_put                                        
+                     then do;                                           
+                        put skip list ('Der blev fundet en fiktiv ' !!  
+                                       'på hist');                      
+                     end;                                               
+                  END;                                                  
+                  WHEN(100) DO;                                         
+                  END;                                                  
+                  OTHERWISE DO;                                         
+                     ABENDTXT = '101 SELECT BQ76HIST FIKTIV ÆGTE';      
+                     CALL SQL_FEJL;                                     
+                  END;                                                  
+               END;                                                     
+         END;                                                           
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list ('WS_TEST_CPR: ' !! WS_TEST_CPR);             
+         end;                                                           
+                                                                        
+ END CHECK_OM_FIKTIV_ÆGTEFÆLLE;                                         
+ /********************************************************************/ 
+ /*      LÆSNING AF COR-UDTRÆK                                       */ 
+ /********************************************************************/ 
+ LÆS_COR: PROC;                                                         
+                                                                        
+         COR_FUNDET = NEJ;                                              
+                                                                        
+         DCLBQ64000T = '';                                              
+         DCLBQ64000T.TIL_EVS_AAR    = DCLBQ76000T.TIL_EVS_AAR;          
+         DCLBQ64000T.DCPRN          = DCLBQ76000T.DCPRN;                
+         DCLBQ64000T.AFVIKLINGS_ID  = DCLBQ76000T.AFVIKLINGS_ID;        
+                                                                        
+         EXEC SQL                                                       
+            SELECT TIL_EVS_AAR,INDKOMSTAAR,DCPRN,PROGRAMNAVN,DB2FUNKTION
+                   ,AFVIKLINGS_ID,BEFTLØN                               
+            INTO   :DCLBQ64000T.TIL_EVS_AAR,                            
+                   :DCLBQ64000T.INDKOMSTAAR,                            
+                   :DCLBQ64000T.DCPRN,                                  
+                   :DCLBQ64000T.PROGRAMNAVN,                            
+                   :DCLBQ64000T.DB2FUNKTION,                            
+                   :DCLBQ64000T.AFVIKLINGS_ID,                          
+                   :DCLBQ64000T.BEFTLØN                                 
+            FROM BQ64000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBQ64000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ64000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ64000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               COR_FUNDET = JA;                                         
+               ANT_COR = ANT_COR + 1;                                   
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ64000T LÆS_COR';                
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END LÆS_COR;                                                           
+ /*********************************************************************/
+ /*      LÆSNING AF SLUT-UDTRÆK                                       */
+ /*********************************************************************/
+ LÆS_SLUT: PROC;                                                        
+                                                                        
+         SLUT_FUNDET = NEJ;                                             
+                                                                        
+         DCLBQ62000T = '';                                              
+         DCLBQ62000T.TIL_EVS_AAR    = DCLBQ76000T.TIL_EVS_AAR;          
+         DCLBQ62000T.DCPRN          = DCLBQ76000T.DCPRN;                
+         DCLBQ62000T.AFVIKLINGS_ID  = DCLBQ76000T.AFVIKLINGS_ID;        
+                                                                        
+         EXEC SQL                                                       
+            SELECT TIL_EVS_AAR,INDKOMSTAAR,DCPRN,PROGRAMNAVN,DB2FUNKTION
+                   ,AFVIKLINGS_ID,CFRÅR                                 
+            INTO   :DCLBQ62000T.TIL_EVS_AAR,                            
+                   :DCLBQ62000T.INDKOMSTAAR,                            
+                   :DCLBQ62000T.DCPRN,                                  
+                   :DCLBQ62000T.PROGRAMNAVN,                            
+                   :DCLBQ62000T.DB2FUNKTION,                            
+                   :DCLBQ62000T.AFVIKLINGS_ID,                          
+                   :DCLBQ62000T.CFRÅR                                   
+            FROM BQ62000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBQ62000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ62000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ62000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               SLUT_FUNDET = JA;                                        
+               ANT_SLUT = ANT_SLUT + 1;                                 
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ62000T LÆS_SLUT';               
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END LÆS_SLUT;                                                          
+ /*********************************************************************/
+ /*      LÆSNING AF PENS-UDTRÆK                                       */
+ /*********************************************************************/
+ LÆS_PENS: PROC;                                                        
+                                                                        
+         PENS_FUNDET = NEJ;                                             
+                                                                        
+         DCLBQ63000T = '';                                              
+         DCLBQ63000T.TIL_EVS_AAR    = DCLBQ76000T.TIL_EVS_AAR;          
+         DCLBQ63000T.DCPRN          = DCLBQ76000T.DCPRN;                
+         DCLBQ63000T.AFVIKLINGS_ID  = DCLBQ76000T.AFVIKLINGS_ID;        
+                                                                        
+         EXEC SQL                                                       
+            SELECT TIL_EVS_AAR,DCPRN,PROGRAMNAVN,DB2FUNKTION            
+                   ,AFVIKLINGS_ID,CITYP                                 
+            INTO   :DCLBQ63000T.TIL_EVS_AAR,                            
+                   :DCLBQ63000T.DCPRN,                                  
+                   :DCLBQ63000T.PROGRAMNAVN,                            
+                   :DCLBQ63000T.DB2FUNKTION,                            
+                   :DCLBQ63000T.AFVIKLINGS_ID,                          
+                   :DCLBQ63000T.CITYP                                   
+            FROM BQ63000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBQ63000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBQ63000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBQ63000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               PENS_FUNDET = JA;                                        
+               ANT_PENS = ANT_PENS + 1;                                 
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ63000T LÆS_PENS';               
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END LÆS_PENS;                                                          
+ /*********************************************************************/
+ /*     MT-FILEN FRA EVS SLUT SIDSTE ÅR LÆSES                         */
+ /*********************************************************************/
+ LÆS_GLMT: PROC;                                                        
+                                                                        
+         GL_MT_FUNDET = NEJ;                                            
+                                                                        
+         GL_MT_AREA = '';                                               
+                                                                        
+         GL_MT_AREA.TIL_EVS_AAR    = WS_TIL_EVS_AAR_GL;                 
+         GL_MT_AREA.AFVIKLINGS_ID  = WS_SLUT_AFVIKLINGS_ID;             
+         GL_MT_AREA.DCPRN          = DCLBQ76000T.DCPRN;                 
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRN,                                                   
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               CFØRFORS,                                                
+               CFØRCOR,                                                 
+               CFØRPENS,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CFØREFT,                                 
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CFØREFT,                                  
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CFØREFT,                                 
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN                                    
+                                                                        
+            INTO                                                        
+               :GL_MT_AREA.TIL_EVS_AAR,                                 
+               :GL_MT_AREA.AFVIKLINGS_ID,                               
+               :GL_MT_AREA.DCPRN,                                       
+               :GL_MT_AREA.PROGRAMNAVN,                                 
+               :GL_MT_AREA.DB2FUNKTION,                                 
+               :GL_MT_AREA.CCIVS,                                       
+               :GL_MT_AREA.CPENS,                                       
+               :GL_MT_AREA.CRGN,                                        
+               :GL_MT_AREA.DSORP,                                       
+               :GL_MT_AREA.CPART,                                       
+               :GL_MT_AREA.CFRÅR,                                       
+               :GL_MT_AREA.CFRÅROPR,                                    
+               :GL_MT_AREA.DRGNÅRFRA,                                   
+               :GL_MT_AREA.DRGNÅRTIL,                                   
+               :GL_MT_AREA.BPENSIND,                                    
+               :GL_MT_AREA.BPENSGR,                                     
+               :GL_MT_AREA.CSTATUS,                                     
+               :GL_MT_AREA.CDØDÆGTF,                                    
+               :GL_MT_AREA.CDUBLET,                                     
+               :GL_MT_AREA.CÆGTF_OK,                                    
+               :GL_MT_AREA.CFØRFORS,                                    
+               :GL_MT_AREA.CFØRCOR,                                     
+               :GL_MT_AREA.CFØRPENS,                                    
+               :GL_MT_AREA.COVF_DHE,                                    
+               :GL_MT_AREA.FØROPL_DCIÆN_GL,                             
+               :GL_MT_AREA.FØROPL_CCIVS_GL,                             
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DCIÆN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_DHENVN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_CSBSK,                        
+               :GL_MT_AREA.HIST_OPD_DETTE_CFØREFT,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_DCIÆN,                        
+               :GL_MT_AREA.HIST_OPD_NAESTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_NAESTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_DCIÆN                        
+            FROM BQ76000T                                               
+            WHERE TIL_EVS_AAR   = :GL_MT_AREA.TIL_EVS_AAR               
+            AND   DCPRN         = :GL_MT_AREA.DCPRN                     
+            AND   AFVIKLINGS_ID = :GL_MT_AREA.AFVIKLINGS_ID;            
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               GL_MT_FUNDET = JA;                                       
+               ANT_GLMT = ANT_GLMT + 1;                                 
+               if GL_MT_AREA.dcprn = 104270468 !                        
+                  GL_MT_AREA.dcprn = 104473210 !                        
+                  GL_MT_AREA.dcprn = 103200464                          
+               then                                                     
+                  put skip list ('LÆS_GLMT ' !! GL_MT_AREA.dcprn !!     
+                                 ' med bpensind: ' !!                   
+                                 GL_MT_AREA.bpensind);                  
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ76000T LÆS_GLMT';               
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+                                                                        
+ END LÆS_GLMT;                                                          
+ /*********************************************************************/
+ /*     MT-FILEN FRA EVS SLUT SIDSTE ÅR LÆSES                         */
+ /*********************************************************************/
+ LÆS_GLMTSPEC: PROC;                                                    
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRN,                                                   
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               CFØRFORS,                                                
+               CFØRCOR,                                                 
+               CFØRPENS,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CFØREFT,                                 
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CFØREFT,                                  
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CFØREFT,                                 
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN                                    
+                                                                        
+            INTO                                                        
+               :GL_MT_AREA.TIL_EVS_AAR,                                 
+               :GL_MT_AREA.AFVIKLINGS_ID,                               
+               :GL_MT_AREA.DCPRN,                                       
+               :GL_MT_AREA.PROGRAMNAVN,                                 
+               :GL_MT_AREA.DB2FUNKTION,                                 
+               :GL_MT_AREA.CCIVS,                                       
+               :GL_MT_AREA.CPENS,                                       
+               :GL_MT_AREA.CRGN,                                        
+               :GL_MT_AREA.DSORP,                                       
+               :GL_MT_AREA.CPART,                                       
+               :GL_MT_AREA.CFRÅR,                                       
+               :GL_MT_AREA.CFRÅROPR,                                    
+               :GL_MT_AREA.DRGNÅRFRA,                                   
+               :GL_MT_AREA.DRGNÅRTIL,                                   
+               :GL_MT_AREA.BPENSIND,                                    
+               :GL_MT_AREA.BPENSGR,                                     
+               :GL_MT_AREA.CSTATUS,                                     
+               :GL_MT_AREA.CDØDÆGTF,                                    
+               :GL_MT_AREA.CDUBLET,                                     
+               :GL_MT_AREA.CÆGTF_OK,                                    
+               :GL_MT_AREA.CFØRFORS,                                    
+               :GL_MT_AREA.CFØRCOR,                                     
+               :GL_MT_AREA.CFØRPENS,                                    
+               :GL_MT_AREA.COVF_DHE,                                    
+               :GL_MT_AREA.FØROPL_DCIÆN_GL,                             
+               :GL_MT_AREA.FØROPL_CCIVS_GL,                             
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DCIÆN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_DHENVN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_CSBSK,                        
+               :GL_MT_AREA.HIST_OPD_DETTE_CFØREFT,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_DCIÆN,                        
+               :GL_MT_AREA.HIST_OPD_NAESTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_NAESTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_DCIÆN                        
+            FROM BQ76000T                                               
+            WHERE TIL_EVS_AAR   = :GL_MT_AREA.TIL_EVS_AAR               
+            AND   DCPRN         = :GL_MT_AREA.DCPRN                     
+            AND   AFVIKLINGS_ID = :GL_MT_AREA.AFVIKLINGS_ID;            
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               GLSPEC_MT_FUNDET = JA;                                   
+               ANT_GLMT = ANT_GLMT + 1;                                 
+               put skip list ('  GL_MT_AREA.DCPRN: ' !!                 
+                             GL_MT_AREA.DCPRN);                         
+               put skip list ('  GL_MT_AREA.CCIVS: ' !!                 
+                            GL_MT_AREA.CCIVS);                          
+               put skip list ('  GL_MT_AREA.HIST_OPD_DETTE_DCIÆN: ' !!  
+                           GL_MT_AREA.HIST_OPD_DETTE_DCIÆN);            
+               put skip list ('  GL_MT_AREA.HIST_OPD_DETTE_DCIÆN: ' !!  
+                           GL_MT_AREA.HIST_OPD_DETTE_DCIÆN);            
+               put skip list ('  ÅR0101: ' !! ÅR0101);                  
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT BQ76000T LÆS_GLMTSPEC';           
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+                                                                        
+ END LÆS_GLMTSPEC;                                                      
+ /*********************************************************************/
+ /*      OPSÆTNING AF KODE FOR FØRTIDSPENS./EFTERLØN                  */
+ /*********************************************************************/
+ OPSÆT_KODE: PROC;                                                      
+                                                                        
+        IF out_mt.CFØRCOR = 1          /* COR VEDRØRER GLSLUTÅR */      
+        THEN                                                            
+           out_mt.HIST_OPD_SIDSTE_CFØREFT = 2;                          
+        SELECT;                                                         
+          WHEN (out_mt.CFØRPENS = 1)                                    
+            DO;                                                         
+               out_mt.HIST_OPD_DETTE_CFØREFT = 1;                       
+               out_mt.HIST_OPD_NAESTE_CFØREFT = 1;                      
+            END;                                                        
+          OTHERWISE                                                     
+            DO;                                                         
+               out_mt.HIST_OPD_DETTE_CFØREFT = 2;                       
+               out_mt.HIST_OPD_NAESTE_CFØREFT = 2;                      
+            END;                                                        
+        END; /* SELECT */                                               
+        ANT_AJOUR = ANT_AJOUR + 1;                                      
+        AJOURFØRT = '1'B;                                               
+                                                                        
+ END OPSÆT_KODE;                                                        
+ /*********************************************************************/
+ /*     OPSÆT START- OG SLUTDATO FOR EN PERSONS INDKOMSTÅR            */
+ /*     HØRENDE TIL AKTUELT EVS SLUT ÅR UNDER HENSYNTAGEN TIL AT      */
+ /*     PERSONEN MÅSKE HAR FORSKUDT REGNSKABSÅR.                      */
+ /*********************************************************************/
+ OPSÆT_INDKOMSTÅR: PROC(CFRÅR,DRGNÅRFRA,DRGNÅRTIL);                     
+                                                                        
+ DCL     CFRÅR          CHAR      (2);                                  
+ DCL     DRGNÅRFRA      FIXED     (9);                                  
+ DCL     DRGNÅRTIL      FIXED     (9);                                  
+                                                                        
+         SELECT;                                                        
+           WHEN ( CFRÅR = '01' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.ÅR0101;   /*#01 SLUTÅR+0101*/      
+                DRGNÅRTIL = BH65300M.ÅR1231;   /*#01 SLUTÅR+1231*/      
+                CFRÅR = '  ';                                           
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '02' ) /*Fremad forskudt regnskab*/           
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.ÅR0201;      /*#01 SLUTÅR+0201*/   
+                DRGNÅRTIL = BH65300M.FORSKÅR0131; /*#01 FORSKÅR+0131*/  
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '03' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0131; /*#01 GLSLUTÅR+0301*/    
+                DRGNÅRTIL = BH65300M.ÅR0229;   /*#01 SLUTÅR+0229  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '04' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0401; /*#01 GLSLUTÅR+0401*/    
+                DRGNÅRTIL = BH65300M.ÅR0331;   /*#01 SLUTÅR+0331  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '05' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0501; /*#01 GLSLUTÅR+0501*/    
+                DRGNÅRTIL = BH65300M.ÅR0430;   /*#01 SLUTÅR+0430 X*/    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '06' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0601; /*#01 GLSLUTÅR+0601*/    
+                DRGNÅRTIL = BH65300M.ÅR0531;   /*#01 SLUTÅR+0531  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '07' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0701; /*#01 GLSLUTÅR+0701*/    
+                DRGNÅRTIL = BH65300M.ÅR0630;   /*#01 SLUTÅR+0630  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '08' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0801; /*#01 GLSLUTÅR+0801*/    
+                DRGNÅRTIL = BH65300M.ÅR0731;   /*#01 SLUTÅR+0731  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '09' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR0901; /*#01 GLSLUTÅR+0901*/    
+                DRGNÅRTIL = BH65300M.ÅR0831;   /*#01 SLUTÅR+0831  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '10' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR1001; /*#01 GLSLUTÅR+1001*/    
+                DRGNÅRTIL = BH65300M.ÅR0930;   /*#01 SLUTÅR+0930  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '11' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR1101; /*#01 GLSLUTÅR+1101*/    
+                DRGNÅRTIL = BH65300M.ÅR1031;   /*#01 SLUTÅR+1031  */    
+             END;                                                       
+                                                                        
+           WHEN ( CFRÅR = '12' )                                        
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.GLÅR1201; /*#01 GLSLUTÅR+1201*/    
+                DRGNÅRTIL = BH65300M.ÅR1130;   /*#01 SLUTÅR+1130  */    
+             END;                                                       
+                                                                        
+           /*Defect 147 EVS DRGNÅRFRA var ikke blevet årsrullet*/       
+           /*til forskud 2016 og slut 2015 så det stod til 20140101 */  
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+                DRGNÅRFRA = BH65300M.ÅR0101;   /*#01 SLUTÅR+0101*/      
+                DRGNÅRTIL = BH65300M.ÅR1231;   /*#01 SLUTÅR+1231*/      
+                CFRÅR = '  ';                                           
+             END;                                                       
+                                                                        
+                                                                        
+         END;        /* SELECT */                                       
+                                                                        
+ END OPSÆT_INDKOMSTÅR;                                                  
+ /*********************************************************************/
+ /* KONTROLLER OM AKTUEL PERSON OG/ELLER ÆGTEFÆLLE ER FYLDT 65/67     */
+ /* I ÅR, IDET SAMBESKATNINGSKODE 5 SKAL ÆNDRES TIL 1, HVIS DET       */
+ /* IKKE ER TILFÆLDET (SPECIEL REGEL FOR EVS).                        */
+ /*                                                                   */
+ /* FOR AT VÆRE OMFATTET AF REGLER FOR REDUKTION AF FØRTIDS- ELLER    */
+ /* INVALIDEPENSIONISTER, SKAL MAN VÆRE MELLEM 60 OG 64/66 ÅR, DERFOR */
+ /* NULSTILLES CFØREFT KODEN HVIS MAN ER UNDER 60 ELLER OVER 64/66 ÅR.*/
+ /*                                                                   */
+ /* KODEN CPENS OPSÆTTES FOR PENSIONISTER OVER 64/66 ÅR ELLER         */
+ /* UNDER 60 ÅR A.H.T. EVT. OVERSENDELSE AF TRANS TIL ESR.            */
+ /*********************************************************************/
+ TEST_ALDER: PROC;                                                      
+                                                                        
+         /* ER ALDER 65/67 ÅR ELLER DEROVER? */                         
+         HJ_CPR = DCLBQ76000T.DCPRN;          /* FØRST AKTUEL PERSON */ 
+         HJ67 = '0';                                                    
+                                                                        
+         IF DCLBQ76000T.CCIVS = 'D' &                                   
+            DCLBQ76000T.HIST_OPD_DETTE_DCIÆN <= out_mt.DRGNÅRTIL        
+         THEN                                                           
+            DO; /*  HVIS DØD I SLUTÅRET SKAL ALDER VÆRE PÅ DØDSDAGEN */ 
+               IF PERSON_ALDER_OK                                       
+                          (DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,HJ_CPR,'1') 
+                                                    /* 67 ÅR */         
+               THEN                                                     
+                  HJ67 = '1';                                           
+               ELSE                                                     
+               IF PERSON_ALDER_OK                                       
+                          (DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,HJ_CPR,'4') 
+                                                   /* 65 ÅR */          
+               THEN                                                     
+                  HJ67 = '1';                                           
+            END;                                                        
+         ELSE                                                           
+            DO; /* ELLERS SKAL ALDER VÆRE */                            
+                /* PR. 31.12. I AKTUELT REGNSKABSÅR */                  
+               IF PERSON_ALDER_OK                                       
+                  (out_mt.DRGNÅRTIL,HJ_CPR,'1') /* 67 ÅR */             
+               THEN                                                     
+                  DO;                                                   
+                     HJ67 = '1';                                        
+                     out_mt.CPENS = '1';                                
+                                        /*A.H.T. EVT. TRANS TIL ESR*/   
+                  END;                                                  
+               ELSE                                                     
+               IF PERSON_ALDER_OK                                       
+                  (out_mt.DRGNÅRTIL,HJ_CPR,'4') /* 65 ÅR */             
+               THEN                                                     
+                  DO;                                                   
+                     HJ67 = '1';                                        
+                     out_mt.CPENS = '1';                                
+                                         /*A.H.T. EVT. TRANS TIL ESR*/  
+                  END;                                                  
+            END;                                                        
+                                                                        
+         HJHNV67 = '0';                        /* DEREFTER ÆGTEFÆLLEN */
+                                                                        
+         IF DCLBQ76000T.HIST_OPD_DETTE_DHENVN > 0 &                     
+            DCLBQ76000T.CSTATUS ^= '2'                                  
+         THEN                                                           
+            DO;                                                         
+               HJ_CPR = DCLBQ76000T.HIST_OPD_DETTE_DHENVN;              
+               IF (DCLBQ76000T.CCIVS = 'E' !                            
+                   DCLBQ76000T.CCIVS = 'L') &                           
+                   DCLBQ76000T.HIST_OPD_DETTE_DCIÆN <=                  
+                               out_mt.DRGNÅRTIL                         
+               THEN                                                     
+                  DO; /*   HVIS DØD SKAL ALDER VÆRE PÅ DØDSDAGEN     */ 
+                     IF PERSON_ALDER_OK                                 
+                          (DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,HJ_CPR,'1') 
+                     THEN                                               
+                        HJHNV67 = '1';                                  
+                     ELSE                                               
+                     IF PERSON_ALDER_OK                                 
+                          (DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,HJ_CPR,'4') 
+                     THEN                                               
+                        HJHNV67 = '1';                                  
+                  END;                                                  
+               ELSE                                                     
+                  DO;                                                   
+                    /* HVIS IKKE ENKE SKAL ALDER VÆRE   */              
+                    /* PR. 31.12. I AKTUELT REGNSKABSÅR */              
+                    IF PERSON_ALDER_OK(out_mt.DRGNÅRTIL,HJ_CPR,'1')     
+                    THEN                                                
+                       HJHNV67 = '1';                                   
+                    ELSE                                                
+                    IF PERSON_ALDER_OK(out_mt.DRGNÅRTIL,HJ_CPR,'4')     
+                    THEN                                                
+                       HJHNV67 = '1';                                   
+                  END;                                                  
+            END;                                                        
+                                                                        
+         IF out_mt.HIST_OPD_DETTE_CFØREFT = 0 &                         
+                                      /* IKKE FØRTIDSPENSIONIST M.V */  
+            out_mt.HIST_OPD_NAESTE_CFØREFT = 0                          
+                                      /* I SLUT ELLER FORSKUD       */  
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         IF HJ67 = '1'                                                  
+         THEN                                                           
+            DO;                                                         
+               /* FYLDT 65/67 ÅR */                                     
+               out_mt.HIST_OPD_DETTE_CFØREFT = 0;                       
+               out_mt.HIST_OPD_NAESTE_CFØREFT = 0;                      
+               IF AJOURFØRT                                             
+               THEN                                                     
+                  ANT_AJOUR = ANT_AJOUR - 1;                            
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         /* ER AKTUEL PERSONS ALDER < 60 ÅR ELLER 60-66 ÅR INCL.? */    
+                                                                        
+         HJ_CPR = DCLBQ76000T.DCPRN;                                    
+                                                                        
+         IF DCLBQ76000T.CCIVS = 'D'                                     
+         THEN                                                           
+            DO;     /*    HVIS DØD SKAL ALDER VÆRE PÅ DØDSDAGEN      */ 
+               IF out_mt.HIST_OPD_DETTE_CFØREFT > 0 &                   
+                  DCLBQ76000T.HIST_OPD_DETTE_DCIÆN <=                   
+                           /*QEB ret 20180117*/  out_mt.DRGNÅRTIL &     
+                  PERSON_ALDER_OK                                       
+                          (DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,HJ_CPR,'2') 
+               THEN;                                /* 60-66 ÅR INCL. */
+               ELSE                                                     
+                  DO;                                                   
+                     out_mt.HIST_OPD_DETTE_CFØREFT = 0;                 
+                                              /* IKKE 60-66 ÅR INCL. */ 
+                     out_mt.HIST_OPD_SIDSTE_CFØREFT = 0;                
+                  END;                                                  
+                                                                        
+               out_mt.HIST_OPD_NAESTE_CFØREFT = 0;                      
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+              /* HVIS IKKE DØD SKAL ALDER VÆRE PR. 31.12  */            
+              /* FØRST UNDERSØGES STATUS I AKTUELT REGNSKABSÅR */       
+                                                                        
+              IF out_mt.HIST_OPD_DETTE_CFØREFT > 0 &                    
+                 PERSON_ALDER_OK(out_mt.DRGNÅRTIL,HJ_CPR,'2')           
+              THEN;                                 /* 60-66 ÅR INCL. */
+              ELSE                                                      
+                 out_mt.HIST_OPD_DETTE_CFØREFT = 0;                     
+                                              /* IKKE 60-66 ÅR INCL. */ 
+                                                                        
+              IF PERSON_ALDER_OK(out_mt.DRGNÅRTIL,HJ_CPR,'3') &         
+                 out_mt.CFØRPENS = 1                                    
+              THEN                                                      
+                 out_mt.CPENS = '1';                                    
+                     /* A.H.T. EVT. TRANS TIL ESR */                    
+                     /* OG SÅ UNDERSØGES STATUS I AKTUELT FORSKUDSÅR */ 
+              PRDATO2 = out_mt.DRGNÅRTIL + 10000;                       
+                                                                        
+              IF out_mt.HIST_OPD_NAESTE_CFØREFT > 0 &                   
+                 PERSON_ALDER_OK(PRDATO2,HJ_CPR,'2')                    
+              THEN;                                 /* 60-66 ÅR INCL. */
+              ELSE                                                      
+                 out_mt.HIST_OPD_NAESTE_CFØREFT = 0;                    
+                                               /* IKKE 60-66 ÅR INCL. */
+            END;                                                        
+                                                                        
+         IF out_mt.HIST_OPD_DETTE_CFØREFT = 0 &                         
+                                       /* IKKE FØRTIDSPENSIONIST M.V */ 
+            out_mt.HIST_OPD_NAESTE_CFØREFT = 0                          
+                                       /* I SLUT ELLER FORSKUD       */ 
+         THEN                                                           
+            IF AJOURFØRT                                                
+            THEN                                                        
+               ANT_AJOUR = ANT_AJOUR - 1;                               
+ END TEST_ALDER;                                                        
+                                                                        
+ /*********************************************************************/
+ /*      MINI MT-FIL TIL BEREGNING AJOURFØRES MED OPLYSNINGERNE FRA   */
+ /*      FORSKUD IR REGULERET FOR CIVILSTANDSÆNDRINGER                */
+ /*********************************************************************/
+ REGULER_MT_OPL: PROC;                                                  
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list ('reguler_mt_opl for ' !! dclbq76000t.dcprn); 
+         end;                                                           
+                                                                        
+         WS_OVERF_NAESTE = NEJ;                                         
+                                                                        
+         IF DCLBQ76000T.CRGN > '01'                                     
+         THEN                                                           
+            out_mt.CRGN   = DCLBQ76000T.CRGN;                           
+                                                                        
+         IF DCLBQ76000T.HIST_OPD_DETTE_DCIÆN >= GLÅR0901                
+          & DCLBQ76000T.HIST_OPD_DETTE_DCIÆN <= ÅR1231                  
+         THEN                                                           
+            DO;                                                         
+               /* RET EVT. SAMBESKATNINGSKODE HVIS */                   
+               /* PERSONEN HAR ÆNDRET CIVILSTAND   */                   
+               IF (DCLBQ76000T.CCIVS    = 'G'                           
+                !  DCLBQ76000T.CCIVS    = 'P')                          
+                &  DCLBQ76000T.HIST_OPD_DETTE_DHENVN   >  0             
+                &  DCLBQ76000T.CSTATUS ^= '2'                           
+               THEN                                                     
+                  DO;                                                   
+                     IF  DCLBQ76000T.HIST_OPD_DETTE_CSBSK < '2'         
+                      !  DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '4'         
+                     THEN                                               
+                        DO;            /*       HVIS NYGIFT     */      
+                           DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '3';      
+                           ANT_NYGIFTE = ANT_NYGIFTE + 1;               
+                        END;                                            
+                  END;                                                  
+               ELSE                                                     
+                  DO;                                                   
+                     IF DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '2' !        
+                        DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '3' !        
+                        DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '5' !        
+                        DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '6'          
+                     THEN                                               
+                        DO;            /*    HVIS IKKE LÆNGERE GIFT  */ 
+                           DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '1';      
+                           ANT_TIDL_SAMB = ANT_TIDL_SAMB + 1;           
+                        END;                                            
+                  END;                                                  
+            END;                                                        
+         IF DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '5'                      
+         THEN                                                           
+            DO;                                                         
+               IF HJ67    = '1'                                         
+                ! HJHNV67 = '1'                                         
+               THEN;                                                    
+               ELSE                                                     
+                  DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '1';               
+            END;                                                        
+         IF (DCLBQ76000T.CCIVS = 'D' &                                  
+             DCLBQ76000T.HIST_OPD_DETTE_DCIÆN < GLÅR0901) &             
+            DCLBQ76000T.HIST_OPD_DETTE_CSBSK ^= '4'                     
+         THEN                                                           
+            /* DØDE FØR 01.09.XXXX ER BEHANDLET I EVS SLUT GL. ÅR */    
+            DCLBQ76000T.HIST_OPD_DETTE_CSBSK = '1';                     
+         out_mt.DCPRN   = DCLBQ76000T.DCPRN;                            
+         out_mt.CCIVS   = DCLBQ76000T.CCIVS;                            
+         out_mt.CSTATUS = DCLBQ76000T.CSTATUS;                          
+         if test_put                                                    
+         then                                                           
+            put skip list ('bpensind udfyldes med ' !!                  
+                            DCLBQ76000T.BPENSIND);                      
+         out_mt.BPENSIND = DCLBQ76000T.BPENSIND;                        
+         out_mt.BPENSGR  = DCLBQ76000T.BPENSGR;                         
+         out_mt.COVF_DHE = DCLBQ76000T.COVF_DHE;                        
+         out_mt.FØROPL_DCIÆN_GL = DCLBQ76000T.FØROPL_DCIÆN_GL;          
+         out_mt.FØROPL_CCIVS_GL = DCLBQ76000T.FØROPL_CCIVS_GL;          
+         out_mt.HIST_OPD_DETTE_DHENVN  =                                
+                                 DCLBQ76000T.HIST_OPD_DETTE_DHENVN;     
+         out_mt.HIST_OPD_DETTE_CSBSK  =                                 
+                                   DCLBQ76000T.HIST_OPD_DETTE_CSBSK;    
+         out_mt.HIST_OPD_DETTE_CSKPLOM =                                
+                                   DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM;  
+                                                                        
+         IF DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM >= '0'                   
+         THEN                                                           
+            DO;                                                         
+               HJ_SKPL = DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM;            
+               I = HJ_SKPL_PIC;                                         
+               ANT_SKPL(I) = ANT_SKPL(I) + 1;                           
+            END;                                                        
+                                                                        
+         out_mt.HIST_OPD_DETTE_DCIÆN =                                  
+                                  DCLBQ76000T.HIST_OPD_DETTE_DCIÆN;     
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list (dclbq76000t.dcprn !! ' har cstatus ' !!      
+                           DCLBQ76000T.CSTATUS);                        
+         end;                                                           
+                                                                        
+         IF DCLBQ76000T.CSTATUS ^= '2'                                  
+         THEN DO;                                                       
+            if test_put                                                 
+            then do;                                                    
+               put skip list (dclbq76000t.dcprn !! ' start ' !!         
+                             'ændring af naeste_dhenvn');               
+            end;                                                        
+            out_mt.HIST_OPD_NAESTE_DHENVN =                             
+                         DCLBQ76000T.HIST_OPD_DETTE_DHENVN;             
+            WS_OVERF_NAESTE = JA;                                       
+            /* check lige om person har en fiktiv ægtefælle, så der */  
+            /* skal sættes 0 i naeste_dhenvn                        */  
+            /* men kun hvis personen selv har 0 i dciÆN             */  
+            if test_put                                                 
+            then do;                                                    
+               put skip list (dclbq76000t.dcprn !! ' checkes før ' !!   
+                             'fiktiv check af ægtefælle');              
+               put skip list ('   sidste_dhenvn: ' !!                   
+                                  DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN);  
+               put skip list ('   sidste_dciÆn: ' !!                    
+                                  DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN);   
+               put skip list ('   dette_dhenvn: ' !!                    
+                                  DCLBQ76000T.HIST_OPD_DETTE_DHENVN);   
+               put skip list ('   dette_dciÆn: ' !!                     
+                                  DCLBQ76000T.HIST_OPD_DETTE_DCIÆN);    
+               put skip list ('   naeste_dhenvn: ' !!                   
+                                  DCLBQ76000T.HIST_OPD_NAESTE_DHENVN);  
+               put skip list ('   naeste_dciÆn: ' !!                    
+                                  DCLBQ76000T.HIST_OPD_NAESTE_DCIÆN);   
+            end;                                                        
+            IF (DCLBQ76000T.HIST_OPD_DETTE_DHENVN > 0 &                 
+                DCLBQ76000T.HIST_OPD_DETTE_DCIÆN = 0                    
+                /* &                                                    
+                DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN > 0 &                
+                DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN = 0 */                
+                )                                                       
+            THEN DO;                                                    
+               if test_put                                              
+               then do;                                                 
+                   put skip list (dclbq76000t.dcprn !! ' opfylder' !!   
+                                 ' betingelser for et fiktivcheck');    
+               end;                                                     
+               if test_put                                              
+               then do;                                                 
+                  put skip list ('der checkes for fiktiv ægtefælle ' !! 
+                              'for person ' !!                          
+                               dclbq76000t.dcprn !! ' og ægtefælle '    
+                            !! DCLBQ76000T.HIST_OPD_DETTE_DHENVN);      
+               end;                                                     
+               ÆGTE_ER_FIKTIV = NEJ;                                    
+               WS_CHECK_FIKT_ÆGT = DCLBQ76000T.HIST_OPD_DETTE_DHENVN;   
+               CALL CHECK_OM_FIKTIV_ÆGTEFÆLLE;                          
+               if ÆGTE_ER_FIKTIV                                        
+               THEN DO;                                                 
+                  out_mt.HIST_OPD_NAESTE_DHENVN = 0;                    
+                  if test_put                                           
+                  then do;                                              
+                     put skip list ('hist_opd_naeste_dhenvn ' !!        
+                                 'sættes til 0 da ægtefælle ' !!        
+                                 WS_CHECK_FIKT_ÆGT !! ' er fiktiv ' !!  
+                                 'og der er 0 i dciæn sidste/denne');   
+                  end;                                                  
+               END;                                                     
+               ELSE DO;                                                 
+                  if test_put                                           
+                  then do;                                              
+                     put skip list (DCLBQ76000T.HIST_OPD_DETTE_DHENVN !!
+                              ' er ikke en fiktiv ægtefælle');          
+                  end;                                                  
+               END;                                                     
+            END;                                                        
+                                                                        
+         END;                                                           
+                                                                        
+         IF DCLBQ76000T.HIST_OPD_DETTE_CSBSK ^= '6'                     
+         THEN                                                           
+            out_mt.HIST_OPD_NAESTE_CSBSK =                              
+                                   DCLBQ76000T.HIST_OPD_DETTE_CSBSK;    
+         ELSE                                                           
+            out_mt.HIST_OPD_NAESTE_CSBSK = '5';                         
+                                        /* ÆGTEFÆLLES ALDER SKAL    */  
+                                        /* KUNNE OPSÆTTES I BH94100 */  
+                                                                        
+         out_mt.HIST_OPD_NAESTE_CSKPLOM =                               
+                                  DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM;   
+         out_mt.HIST_OPD_NAESTE_DCIÆN = 0;                              
+         IF out_mt.CCIVS = 'D' !                                        
+            out_mt.CCIVS = 'E' !                                        
+            out_mt.CCIVS = 'L' !                                        
+            out_mt.CCIVS = 'O' !                                        
+            out_mt.CCIVS = 'F'                                          
+         THEN                                                           
+            /* NULSTILLING AF AKTUELT FORSKUDSÅR HVOR BEREGNING SÅ  */  
+            /* VIL BLIVE STYRET AF EVT. KODE FOR ENKE EFTER (CENKE) */  
+            out_mt.HIST_OPD_NAESTE_CSBSK = '1';                         
+         /* GENEREL OPSÆTNING AF DSORP OG CPART        */               
+         /* JVF. CIVILSTANDSKODE OG SAMBESKATNINGSKODE */               
+         /* ændret, så DSORP ikke benyttes (sat til 0 i init) */        
+         out_mt.DSORP   = DCLBQ76000T.DCPRN;                            
+         out_mt.CPART   = '1';                                          
+         IF (DCLBQ76000T.HIST_OPD_DETTE_CSBSK    = '2'                  
+          !  DCLBQ76000T.HIST_OPD_DETTE_CSBSK    = '3'                  
+          !  DCLBQ76000T.HIST_OPD_DETTE_CSBSK    = '5'                  
+          !  DCLBQ76000T.HIST_OPD_DETTE_CSBSK    = '6')                 
+          &  DCLBQ76000T.HIST_OPD_DETTE_DHENVN   >  0                   
+          &  DCLBQ76000T.CSTATUS ^= '2'                                 
+         THEN                                                           
+            DO;                                                         
+               IF DCLBQ76000T.CCIVS = 'G'                               
+               THEN                                                     
+                  DO;                                                   
+                     HJ_CPR = DCLBQ76000T.DCPRN;                        
+                     IF VERIFY(HJ_CPR1.CHKCIF,'02468') = 0              
+                     THEN                                               
+                        DO;            /*     HVIS EN GIFT KVINDE    */ 
+                           out_mt.DSORP =                               
+                                DCLBQ76000T.HIST_OPD_DETTE_DHENVN;      
+                           out_mt.CPART = '2';                          
+                        END;                                            
+                  END;                                                  
+               IF DCLBQ76000T.CCIVS = 'P' &                             
+                  DCLBQ76000T.DCPRN < DCLBQ76000T.HIST_OPD_DETTE_DHENVN 
+               THEN                                                     
+                  DO;                  /* HVIS EN REGISTRERET PARTNER */
+                     out_mt.DSORP =                                     
+                            DCLBQ76000T.HIST_OPD_DETTE_DHENVN;          
+                     out_mt.CPART = '2';                                
+                  END;                                                  
+            END;                                                        
+                                                                        
+ END REGULER_MT_OPL;                                                    
+ /*********************************************************************/
+ /*      OPLYSNINGER FRA GL. MT-FIL OVERFØRES TIL NY MT-FIL           */
+ /*      OVERFØRSLEN SKER AF HENSYN TIL OPSÆTNING AF KODE FOR ENKE    */
+ /*      EFTER SAMT OPSÆTNING AF 1/7-98-STATUS HERUNDER OVERFØRSEL    */
+ /*      AF DENNE STATUS MELLEM NUVÆRENDE OG TIDLIGERE ÆGTEFÆLLER.    */
+ /*      nb. SIDSTE på bq76 = sidste år 2015                          */
+ /*          DETTE  på GL_MT_AREA = sidste år 2015                    */
+ /*********************************************************************/
+ OVERF_HISTOPL: PROC;                                                   
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list ('OVERF_HISTOPL');                            
+         end;                                                           
+                                                                        
+         IF out_mt.CSTATUS ^= '2'                                       
+         THEN                                                           
+           out_mt.HIST_OPD_SIDSTE_DHENVN  =                             
+                                     GL_MT_AREA.HIST_OPD_DETTE_DHENVN;  
+                                                                        
+         out_mt.HIST_OPD_SIDSTE_CSBSK =                                 
+                                      GL_MT_AREA.HIST_OPD_DETTE_CSBSK;  
+                                                                        
+         IF out_mt.HIST_OPD_SIDSTE_CFØREFT = 0                          
+         THEN                                                           
+           out_mt.HIST_OPD_SIDSTE_CFØREFT =                             
+                                   GL_MT_AREA.HIST_OPD_DETTE_CFØREFT;   
+                                                                        
+         out_mt.HIST_OPD_SIDSTE_CSKPLOM  =                              
+                                   GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM;   
+         out_mt.HIST_OPD_SIDSTE_DCIÆN =                                 
+                                   GL_MT_AREA.HIST_OPD_DETTE_DCIÆN;     
+                                                                        
+         IF out_mt.HIST_OPD_DETTE_DHENVN    = 0                         
+          & out_mt.CSTATUS          ^= '2'                              
+         THEN                                                           
+            out_mt.HIST_OPD_DETTE_DHENVN =                              
+                                   GL_MT_AREA.HIST_OPD_DETTE_DHENVN;    
+                                                                        
+ END OVERF_HISTOPL;                                                     
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV DØD                                                    */
+ /*********************************************************************/
+ SKRIV_DØD: PROC;                                                       
+                                                                        
+      if gl_mt_area.dcprn = 104270468 !                                 
+         gl_mt_area.dcprn = 104473210 !                                 
+         gl_mt_area.dcprn = 103200464                                   
+      then do;                                                          
+         put skip list ('SKRIV_DØD for ' !!                             
+                         gl_mt_area.dcprn);                             
+      end;                                                              
+                                                                        
+      out_mt = GL_MT_AREA, by name;                                     
+                                                                        
+      /* nedenstående felter Cdublet sættes altid til 0 */              
+      /* nedenstående felter CÆGTF_OK sættes altid til blank     */     
+      out_mt.CDUBLET = 0;                                               
+      /* out_mt.DSORP   = 0; */                                         
+      out_mt.CÆGTF_OK = ' ';                                            
+                                                                        
+      out_mt.CSTATUS  = 'D';                                            
+                                                                        
+      /* data tages fra HIST_OPD_SIDSTE til alle felterne */            
+      out_mt.HIST_OPD_SIDSTE_DHENVN  =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_DHENVN;     
+      out_mt.HIST_OPD_SIDSTE_CSBSK   =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSBSK;      
+      out_mt.HIST_OPD_SIDSTE_CFØREFT =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CFØREFT;    
+      out_mt.HIST_OPD_SIDSTE_CSKPLOM =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM;    
+      out_mt.HIST_OPD_SIDSTE_DCIÆN   =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_DCIÆN;      
+      out_mt.HIST_OPD_DETTE_DHENVN   =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_DHENVN;     
+      out_mt.HIST_OPD_DETTE_CSBSK   =                                   
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSBSK;      
+      out_mt.HIST_OPD_DETTE_CFØREFT =                                   
+                                  GL_MT_AREA.HIST_OPD_DETTE_CFØREFT;    
+      out_mt.HIST_OPD_DETTE_CSKPLOM =                                   
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM;    
+      out_mt.HIST_OPD_DETTE_DCIÆN   =                                   
+                                  GL_MT_AREA.HIST_OPD_DETTE_DCIÆN;      
+      out_mt.HIST_OPD_NAESTE_DHENVN  =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_DHENVN;     
+      out_mt.HIST_OPD_NAESTE_CSBSK   =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSBSK;      
+      out_mt.HIST_OPD_NAESTE_CFØREFT =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CFØREFT;    
+      out_mt.HIST_OPD_NAESTE_CSKPLOM =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM;    
+      out_mt.HIST_OPD_NAESTE_DCIÆN   =                                  
+                                  GL_MT_AREA.HIST_OPD_DETTE_DCIÆN;      
+                                                                        
+      CALL OPSÆT_INDKOMSTÅR                                             
+        (out_mt.CFRÅR,out_mt.DRGNÅRFRA,out_mt.DRGNÅRTIL);               
+                                                                        
+      /* Dannes under dette år - dvs. hvis gl_mt 2015, dannes 2016 */   
+      out_mt.TIL_EVS_AAR = WS_TIL_EVS_AAR;                              
+                                                                        
+      KALDT_FRA = 'SKRIV_DØD';                                          
+      CALL INSERT_MT_OPL;                                               
+                                                                        
+      ANT_BLOT_DØDE = ANT_BLOT_DØDE + 1;                                
+                                                                        
+ END SKRIV_DØD;                                                         
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF MT   BQ76000T                       RUTINE */
+ /*********************************************************************/
+ OPEN_MTCURS: PROC;                                                     
+                                                                        
+         EXEC SQL OPEN MTCURS;                                          
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN MTCURS';                             
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_MTCURS;                                                       
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF MANDTAL                            RUTINE */
+ /*********************************************************************/
+ FETCH_MTCURS: PROC;                                                    
+                                                                        
+         DCLBQ76000T = '';                                              
+                                                                        
+         SQLCA.SQLCODE = 0;                                             
+         TEST_PUT = NEJ;                                                
+                                                                        
+         MT_ER_FIKTIV = NEJ;                                            
+                                                                        
+         EXEC SQL FETCH MTCURS                                          
+                                                                        
+         INTO  :DCLBQ76000T.TIL_EVS_AAR,                                
+               :DCLBQ76000T.AFVIKLINGS_ID,                              
+               :DCLBQ76000T.DCPRN,                                      
+               :DCLBQ76000T.PROGRAMNAVN,                                
+               :DCLBQ76000T.DB2FUNKTION,                                
+               :DCLBQ76000T.CCIVS,                                      
+               :DCLBQ76000T.CPENS,                                      
+               :DCLBQ76000T.CRGN,                                       
+               :DCLBQ76000T.DSORP,                                      
+               :DCLBQ76000T.CPART,                                      
+               :DCLBQ76000T.CFRÅR,                                      
+               :DCLBQ76000T.CFRÅROPR,                                   
+               :DCLBQ76000T.DRGNÅRFRA,                                  
+               :DCLBQ76000T.DRGNÅRTIL,                                  
+               :DCLBQ76000T.BPENSIND,                                   
+               :DCLBQ76000T.BPENSGR,                                    
+               :DCLBQ76000T.CSTATUS,                                    
+               :DCLBQ76000T.CDØDÆGTF,                                   
+               :DCLBQ76000T.CDUBLET,                                    
+               :DCLBQ76000T.CÆGTF_OK,                                   
+               :DCLBQ76000T.CFØRFORS,                                   
+               :DCLBQ76000T.CFØRCOR,                                    
+               :DCLBQ76000T.CFØRPENS,                                   
+               :DCLBQ76000T.COVF_DHE,                                   
+               :DCLBQ76000T.FØROPL_DCIÆN_GL,                            
+               :DCLBQ76000T.FØROPL_CCIVS_GL,                            
+               :DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN,                     
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CSBSK,                      
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CFØREFT,                    
+               :DCLBQ76000T.HIST_OPD_SIDSTE_CSKPLOM,                    
+               :DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN,                      
+               :DCLBQ76000T.HIST_OPD_DETTE_DHENVN,                      
+               :DCLBQ76000T.HIST_OPD_DETTE_CSBSK,                       
+               :DCLBQ76000T.HIST_OPD_DETTE_CFØREFT,                     
+               :DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM,                     
+               :DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,                       
+               :DCLBQ76000T.HIST_OPD_NAESTE_DHENVN,                     
+               :DCLBQ76000T.HIST_OPD_NAESTE_CSBSK,                      
+               :DCLBQ76000T.HIST_OPD_NAESTE_CFØREFT,                    
+               :DCLBQ76000T.HIST_OPD_NAESTE_CSKPLOM,                    
+               :DCLBQ76000T.HIST_OPD_NAESTE_DCIÆN                       
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+                IF DCLBQ76000T.DCPRN = 104270468 !                      
+                   DCLBQ76000T.DCPRN = 104473210 !                      
+                   DCLBQ76000T.DCPRN = 103200464                        
+                THEN DO;                                                
+                   TEST_PUT = JA;                                       
+                   IF TEST_PUT                                          
+                   then                                                 
+                      put skip list (DCLBQ76000T.DCPRN !!               
+                                    ' behandles nu');                   
+                   if test_put                                          
+                   then                                                 
+                      put skip list ('FETCH_MTCURS ' !!                 
+                      dclbq76000t.dcprn !!                              
+                                 ' med bpensind: ' !!                   
+                                 dclbq76000t.bpensind);                 
+                END;                                                    
+                IF DCLBQ76000T.DB2FUNKTION = 'F'                        
+                THEN DO;                                                
+                   MT_ER_FIKTIV = JA;                                   
+                END;                                                    
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH MTCURS';                           
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_MTCURS;                                                      
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF MT   BQ76000T                      RUTINE */
+ /*********************************************************************/
+ CLOSE_MTCURS: PROC;                                                    
+                                                                        
+         EXEC SQL CLOSE MTCURS;                                         
+                                                                        
+ END CLOSE_MTCURS;                                                      
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF GAMMEL MT   BQ76000T                RUTINE */
+ /*********************************************************************/
+ OPEN_GLMTCURS: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN GLMTCURS;                                        
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN GLMTCURS';                           
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_GLMTCURS;                                                     
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF GAMMEL MT   BQ76000T               RUTINE */
+ /*********************************************************************/
+ FETCH_GLMTCURS: PROC;                                                  
+                                                                        
+         DCLBQ76000T = '';                                              
+                                                                        
+         SQLCA.SQLCODE = 0;                                             
+                                                                        
+         EXEC SQL FETCH GLMTCURS                                        
+                                                                        
+         INTO  :GL_MT_AREA.TIL_EVS_AAR,                                 
+               :GL_MT_AREA.AFVIKLINGS_ID,                               
+               :GL_MT_AREA.DCPRN,                                       
+               :GL_MT_AREA.PROGRAMNAVN,                                 
+               :GL_MT_AREA.DB2FUNKTION,                                 
+               :GL_MT_AREA.CCIVS,                                       
+               :GL_MT_AREA.CPENS,                                       
+               :GL_MT_AREA.CRGN,                                        
+               :GL_MT_AREA.DSORP,                                       
+               :GL_MT_AREA.CPART,                                       
+               :GL_MT_AREA.CFRÅR,                                       
+               :GL_MT_AREA.CFRÅROPR,                                    
+               :GL_MT_AREA.DRGNÅRFRA,                                   
+               :GL_MT_AREA.DRGNÅRTIL,                                   
+               :GL_MT_AREA.BPENSIND,                                    
+               :GL_MT_AREA.BPENSGR,                                     
+               :GL_MT_AREA.CSTATUS,                                     
+               :GL_MT_AREA.CDØDÆGTF,                                    
+               :GL_MT_AREA.CDUBLET,                                     
+               :GL_MT_AREA.CÆGTF_OK,                                    
+               :GL_MT_AREA.CFØRFORS,                                    
+               :GL_MT_AREA.CFØRCOR,                                     
+               :GL_MT_AREA.CFØRPENS,                                    
+               :GL_MT_AREA.COVF_DHE,                                    
+               :GL_MT_AREA.FØROPL_DCIÆN_GL,                             
+               :GL_MT_AREA.FØROPL_CCIVS_GL,                             
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_SIDSTE_DCIÆN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_DHENVN,                       
+               :GL_MT_AREA.HIST_OPD_DETTE_CSBSK,                        
+               :GL_MT_AREA.HIST_OPD_DETTE_CFØREFT,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_CSKPLOM,                      
+               :GL_MT_AREA.HIST_OPD_DETTE_DCIÆN,                        
+               :GL_MT_AREA.HIST_OPD_NAESTE_DHENVN,                      
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSBSK,                       
+               :GL_MT_AREA.HIST_OPD_NAESTE_CFØREFT,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_CSKPLOM,                     
+               :GL_MT_AREA.HIST_OPD_NAESTE_DCIÆN                        
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+                if gl_mt_area.dcprn = 104270468 !                       
+                   gl_mt_area.dcprn = 104473210 !                       
+                   gl_mt_area.dcprn = 103200464                         
+                then                                                    
+                   put skip list ('FETCH_GLMTCURS ' !!                  
+                   GL_MT_AREA.dcprn !!                                  
+                              ' med bpensind: ' !!                      
+                              GL_MT_AREA.bpensind);                     
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH GLMTCURS';                         
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_GLMTCURS;                                                    
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF GAMMELT ÅR MT  BQ76000T            RUTINE */
+ /*********************************************************************/
+ CLOSE_GLMTCURS: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE GLMTCURS;                                       
+                                                                        
+ END CLOSE_GLMTCURS;                                                    
+ /*********************************************************************/
+ /* UPDATE række på MT OPLYSNINGER                             RUTINE */
+ /*********************************************************************/
+ OPDATER_MT_OPL: PROC;                                                  
+                                                                        
+         if test_put                                                    
+         then do;                                                       
+            put skip list ('OPDATER_MT_OPL for ' !! out_mt.DCPRN);      
+            put skip list ('out_mt.bpensind: ' !! out_mt.bpensind);     
+         end;                                                           
+                                                                        
+         dclbq76000t = out_mt, by name;                                 
+                                                                        
+         DCLBQ76000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+                                                                        
+         /* Hvis rækken er oprettet fiktivt, skal den */                
+         /* fortsætte med at have F i db2funktion for */                
+         /* at blive håndteret korrekt i senere moduler */              
+         IF MT_ER_FIKTIV                                                
+         THEN DO;                                                       
+            DCLBQ76000T.DB2FUNKTION    = 'F';                           
+         END;                                                           
+         ELSE DO;                                                       
+            DCLBQ76000T.DB2FUNKTION    = 'U';                           
+         END;                                                           
+                                                                        
+         IF test_put                                                    
+         THEN DO;                                                       
+           PUT SKIP LIST ('Der bliver updated med ' !!                  
+           DCLBQ76000T.DB2FUNKTION !!                                   
+           ' for ' !! DCLBQ76000T.DCPRN);                               
+         END;                                                           
+                                                                        
+         EXEC SQL                                                       
+            UPDATE BQ76000T                                             
+            SET                                                         
+             TIL_EVS_AAR             = :DCLBQ76000T.TIL_EVS_AAR,        
+             AFVIKLINGS_ID           = :DCLBQ76000T.AFVIKLINGS_ID,      
+             DCPRN                   = :DCLBQ76000T.DCPRN,              
+             PROGRAMNAVN             = :DCLBQ76000T.PROGRAMNAVN,        
+             DB2FUNKTION             = :DCLBQ76000T.DB2FUNKTION,        
+             CCIVS                   = :DCLBQ76000T.CCIVS,              
+             CPENS                   = :DCLBQ76000T.CPENS,              
+             CRGN                    = :DCLBQ76000T.CRGN,               
+             DSORP                   = :DCLBQ76000T.DSORP,              
+             CPART                   = :DCLBQ76000T.CPART,              
+             CFRÅR                   = :DCLBQ76000T.CFRÅR,              
+             CFRÅROPR                = :DCLBQ76000T.CFRÅROPR,           
+             DRGNÅRFRA               = :DCLBQ76000T.DRGNÅRFRA,          
+             DRGNÅRTIL               = :DCLBQ76000T.DRGNÅRTIL,          
+             BPENSIND                = :DCLBQ76000T.BPENSIND,           
+             BPENSGR                 = :DCLBQ76000T.BPENSGR,            
+             CSTATUS                 = :DCLBQ76000T.CSTATUS,            
+             CDØDÆGTF                = :DCLBQ76000T.CDØDÆGTF,           
+             CDUBLET                 = :DCLBQ76000T.CDUBLET,            
+             CÆGTF_OK                = :DCLBQ76000T.CÆGTF_OK,           
+             CFØRFORS                = :DCLBQ76000T.CFØRFORS,           
+             CFØRCOR                 = :DCLBQ76000T.CFØRCOR,            
+             CFØRPENS                = :DCLBQ76000T.CFØRPENS,           
+             COVF_DHE                = :DCLBQ76000T.COVF_DHE,           
+             FØROPL_DCIÆN_GL         = :DCLBQ76000T.FØROPL_DCIÆN_GL,    
+             FØROPL_CCIVS_GL         = :DCLBQ76000T.FØROPL_CCIVS_GL,    
+             HIST_OPD_SIDSTE_DHENVN  =                                  
+                              :DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN,      
+             HIST_OPD_SIDSTE_CSBSK   =                                  
+                              :DCLBQ76000T.HIST_OPD_SIDSTE_CSBSK,       
+             HIST_OPD_SIDSTE_CFØREFT =                                  
+                              :DCLBQ76000T.HIST_OPD_SIDSTE_CFØREFT,     
+             HIST_OPD_SIDSTE_CSKPLOM =                                  
+                              :DCLBQ76000T.HIST_OPD_SIDSTE_CSKPLOM,     
+             HIST_OPD_SIDSTE_DCIÆN   =                                  
+                              :DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN,       
+             HIST_OPD_DETTE_DHENVN   =                                  
+                              :DCLBQ76000T.HIST_OPD_DETTE_DHENVN,       
+             HIST_OPD_DETTE_CSBSK    =                                  
+                              :DCLBQ76000T.HIST_OPD_DETTE_CSBSK,        
+             HIST_OPD_DETTE_CFØREFT  =                                  
+                              :DCLBQ76000T.HIST_OPD_DETTE_CFØREFT,      
+             HIST_OPD_DETTE_CSKPLOM  =                                  
+                              :DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM,      
+             HIST_OPD_DETTE_DCIÆN    =                                  
+                              :DCLBQ76000T.HIST_OPD_DETTE_DCIÆN,        
+             HIST_OPD_NAESTE_DHENVN  =                                  
+                             :DCLBQ76000T.HIST_OPD_NAESTE_DHENVN,       
+             HIST_OPD_NAESTE_CSBSK   =                                  
+                             :DCLBQ76000T.HIST_OPD_NAESTE_CSBSK,        
+             HIST_OPD_NAESTE_CFØREFT =                                  
+                             :DCLBQ76000T.HIST_OPD_NAESTE_CFØREFT,      
+             HIST_OPD_NAESTE_CSKPLOM =                                  
+                             :DCLBQ76000T.HIST_OPD_NAESTE_CSKPLOM,      
+             HIST_OPD_NAESTE_DCIÆN   =                                  
+                             :DCLBQ76000T.HIST_OPD_NAESTE_DCIÆN         
+                                                                        
+                                                                        
+            WHERE TIL_EVS_AAR   = :DCLBQ76000T.TIL_EVS_AAR              
+            AND   AFVIKLINGS_ID = :DCLBQ76000T.AFVIKLINGS_ID            
+            AND   DCPRN         = :DCLBQ76000T.DCPRN;                   
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_UPD = ANT_UPD + 1;                                   
+               ANT_COMM = ANT_COMM + 1;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               PUT SKIP LIST ('DCLBQ76000T: ' !! DCLBQ76000T);          
+               ABENDTXT = '101 UPDATE BQ76000T ' !! KALDT_FRA;          
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 9999                                             
+         THEN DO;                                                       
+             EXEC SQL COMMIT;                                           
+             Put skip list ('Commit efter ' !! ANT_COMM !!              
+                            ' opdateringer.  Ialt ' !! ANT_UPD !!       
+                            ' opdateringer');                           
+             ANT_COMM = 0;                                              
+         END;                                                           
+                                                                        
+ END OPDATER_MT_OPL;                                                    
+                                                                        
+ /*********************************************************************/
+ /* INSERT række på MT OPLYSNINGER                             RUTINE */
+ /*********************************************************************/
+ INSERT_MT_OPL: PROC;                                                   
+                                                                        
+         if out_mt.dcprn = 104270468 !                                  
+            out_mt.dcprn = 104473210 !                                  
+            out_mt.dcprn = 103200464                                    
+         then                                                           
+            put skip list ('INSERT_MT_OPL ' !!                          
+            out_mt.dcprn !!                                             
+                       ' med bpensind: ' !!                             
+                       out_mt.bpensind);                                
+                                                                        
+         dclbq76000t = out_mt, by name;                                 
+                                                                        
+         DCLBQ76000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+         DCLBQ76000T.DB2FUNKTION    = 'I';                              
+         DCLBQ76000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;              
+         DCLBQ76000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                   
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BQ76000T                                        
+            (  TIL_EVS_AAR  ,                                           
+               AFVIKLINGS_ID   ,                                        
+               DCPRN   ,                                                
+               PROGRAMNAVN ,                                            
+               DB2FUNKTION ,                                            
+               CCIVS   ,                                                
+               CPENS   ,                                                
+               CRGN    ,                                                
+               DSORP   ,                                                
+               CPART   ,                                                
+               CFRÅR   ,                                                
+               CFRÅROPR    ,                                            
+               DRGNÅRFRA   ,                                            
+               DRGNÅRTIL   ,                                            
+               BPENSIND    ,                                            
+               BPENSGR ,                                                
+               CSTATUS ,                                                
+               CDØDÆGTF    ,                                            
+               CDUBLET ,                                                
+               CÆGTF_OK    ,                                            
+               CFØRFORS    ,                                            
+               CFØRCOR ,                                                
+               CFØRPENS    ,                                            
+               COVF_DHE    ,                                            
+               FØROPL_DCIÆN_GL ,                                        
+               FØROPL_CCIVS_GL ,                                        
+               HIST_OPD_SIDSTE_DHENVN  ,                                
+               HIST_OPD_SIDSTE_CSBSK   ,                                
+               HIST_OPD_SIDSTE_CFØREFT ,                                
+               HIST_OPD_SIDSTE_CSKPLOM ,                                
+               HIST_OPD_SIDSTE_DCIÆN   ,                                
+               HIST_OPD_DETTE_DHENVN   ,                                
+               HIST_OPD_DETTE_CSBSK    ,                                
+               HIST_OPD_DETTE_CFØREFT  ,                                
+               HIST_OPD_DETTE_CSKPLOM  ,                                
+               HIST_OPD_DETTE_DCIÆN    ,                                
+               HIST_OPD_NAESTE_DHENVN  ,                                
+               HIST_OPD_NAESTE_CSBSK   ,                                
+               HIST_OPD_NAESTE_CFØREFT ,                                
+               HIST_OPD_NAESTE_CSKPLOM ,                                
+               HIST_OPD_NAESTE_DCIÆN                                    
+            )                                                           
+            values                                                      
+            (                                                           
+             :DCLBQ76000T.TIL_EVS_AAR ,                                 
+             :DCLBQ76000T.AFVIKLINGS_ID   ,                             
+             :DCLBQ76000T.DCPRN   ,                                     
+             :DCLBQ76000T.PROGRAMNAVN ,                                 
+             :DCLBQ76000T.DB2FUNKTION ,                                 
+             :DCLBQ76000T.CCIVS   ,                                     
+             :DCLBQ76000T.CPENS   ,                                     
+             :DCLBQ76000T.CRGN    ,                                     
+             :DCLBQ76000T.DSORP   ,                                     
+             :DCLBQ76000T.CPART   ,                                     
+             :DCLBQ76000T.CFRÅR   ,                                     
+             :DCLBQ76000T.CFRÅROPR    ,                                 
+             :DCLBQ76000T.DRGNÅRFRA   ,                                 
+             :DCLBQ76000T.DRGNÅRTIL   ,                                 
+             :DCLBQ76000T.BPENSIND    ,                                 
+             :DCLBQ76000T.BPENSGR ,                                     
+             :DCLBQ76000T.CSTATUS ,                                     
+             :DCLBQ76000T.CDØDÆGTF    ,                                 
+             :DCLBQ76000T.CDUBLET ,                                     
+             :DCLBQ76000T.CÆGTF_OK    ,                                 
+             :DCLBQ76000T.CFØRFORS    ,                                 
+             :DCLBQ76000T.CFØRCOR ,                                     
+             :DCLBQ76000T.CFØRPENS    ,                                 
+             :DCLBQ76000T.COVF_DHE    ,                                 
+             :DCLBQ76000T.FØROPL_DCIÆN_GL ,                             
+             :DCLBQ76000T.FØROPL_CCIVS_GL ,                             
+             :DCLBQ76000T.HIST_OPD_SIDSTE_DHENVN  ,                     
+             :DCLBQ76000T.HIST_OPD_SIDSTE_CSBSK   ,                     
+             :DCLBQ76000T.HIST_OPD_SIDSTE_CFØREFT ,                     
+             :DCLBQ76000T.HIST_OPD_SIDSTE_CSKPLOM ,                     
+             :DCLBQ76000T.HIST_OPD_SIDSTE_DCIÆN   ,                     
+             :DCLBQ76000T.HIST_OPD_DETTE_DHENVN   ,                     
+             :DCLBQ76000T.HIST_OPD_DETTE_CSBSK    ,                     
+             :DCLBQ76000T.HIST_OPD_DETTE_CFØREFT  ,                     
+             :DCLBQ76000T.HIST_OPD_DETTE_CSKPLOM  ,                     
+             :DCLBQ76000T.HIST_OPD_DETTE_DCIÆN    ,                     
+             :DCLBQ76000T.HIST_OPD_NAESTE_DHENVN  ,                     
+             :DCLBQ76000T.HIST_OPD_NAESTE_CSBSK   ,                     
+             :DCLBQ76000T.HIST_OPD_NAESTE_CFØREFT ,                     
+             :DCLBQ76000T.HIST_OPD_NAESTE_CSKPLOM ,                     
+             :DCLBQ76000T.HIST_OPD_NAESTE_DCIÆN                         
+                                                                        
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_INS = ANT_INS + 1;                                   
+               ANT_COMM = ANT_COMM + 1;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               PUT SKIP LIST ('DCLBQ76000T: ' !! DCLBQ76000T);          
+               ABENDTXT = '101 INSERT BQ76000T ' !! KALDT_FRA;          
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 9999                                             
+         THEN DO;                                                       
+            EXEC SQL COMMIT;                                            
+            Put skip list ('Commit efter ' !! ANT_COMM !!               
+                           ' opdateringer.  Ialt ' !! ANT_INS !!        
+                           ' opdateringer af døde');                    
+            ANT_COMM = 0;                                               
+         END;                                                           
+                                                                        
+ END INSERT_MT_OPL;                                                     
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE: PROC;                                                    
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ  MT BQ76000T';        
+         DETLIN1.ANTAL = ANT_MT;                                        
+                                                                        
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DO I = 0 TO 9;                                                 
+            IF ANT_SKPL(I) > 0                                          
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS2;                                  
+                  HJ_SKPL_PIC = I;                                      
+                  DETLIN1.TEKST =                                       
+                  'HERAF MED SKATTEPL.OMFANG ' !! HJ_SKPL;              
+                  DETLIN1.ANTAL = ANT_SKPL(I);                          
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ  COR BQ64000T';       
+         DETLIN1.ANTAL = ANT_COR;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ  SLUT BQ62000T';      
+         DETLIN1.ANTAL = ANT_SLUT;                                      
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ  PENS BQ63000T';      
+         DETLIN1.ANTAL = ANT_PENS;                                      
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ  GL MT BQ76000T';     
+         DETLIN1.ANTAL = ANT_GLMT;                                      
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'ANTAL SKREVNE PÅ         MT BQ76000T';        
+         DETLIN1.ANTAL = ANT_INS + ANT_UPD;                             
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.SCFRÅR;                                     
+         DETLIN1.TEKST = 'HERAF OPSAT FORSKUDT REGNSKABSÅR I SLUT    '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.FCFRÅR;                                     
+         DETLIN1.TEKST = 'HERAF OPSAT FORSKUDT REGNSKABSÅR I FORSKUD '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'HERAF AJOURFØRTE PÅ      MT BQ76000T';        
+         DETLIN1.ANTAL = ANT_AJOUR;                                     
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'HERAF ÆNDRET TIL SAMBESKATTET (NYGIFTE)';     
+         DETLIN1.ANTAL = ANT_NYGIFTE;                                   
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS2;                                         
+         DETLIN1.TEKST = 'HERAF ÆNDRET TIL EJ SAMBESKATTET';            
+         DETLIN1.ANTAL = ANT_TIDL_SAMB;                                 
+         CALL ZZ20300(DETLIN1,'01');                                    
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.TEKST = 'HERAF DØDE';                                  
+         DETLIN1.ANTAL = ANT_BLOT_DØDE;                                 
+         CALL ZZ20300(DETLIN1,'01');                                    
+ END KONTROLLISTE;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      UDSKRIV FEJLLISTE VEDR. KONSTATERET AFSTEMNINGFEJL PÅ        */
+ /*********************************************************************/
+ FEJLLISTE: PROC;                                                       
+         CALL ZZ20390 ('*OPEN','BH55302Y');                             
+         CALL ZZ20300(SIDELIN,'02');                                    
+         CALL ZZ20300(OVERLIN1,'02');                                   
+         OVERLIN2.TEKST1 = 'FEJLLISTE VEDR. MASKINEL AFSTEMNING';       
+         CALL ZZ20300(OVERLIN2,'02');                                   
+         IF FEJL = 1                                                    
+         THEN                                                           
+            DO;                                                         
+               SIDELIN.CCA   = ZZWS3;                                   
+               CALL ZZ20300(SIDELIN,'02');                              
+               DETLIN1.CCA   = ZZWS3;                                   
+               DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ MT BQ76000T';   
+               DETLIN1.ANTAL = ANT_MT;                                  
+               DETLIN1.RCKOD = ' ';                                     
+               CALL ZZ20300(DETLIN1,'02');                              
+               DETLIN1.TEKST =                                          
+               'ANTAL PERSONER IFØLGE AFSTEMNINGSINDIVID IALT  :';      
+               DETLIN1.ANTAL = MT_OPTALT;                               
+               DETLIN1.RCKOD = ' ';                                     
+               CALL ZZ20300(DETLIN1,'02');                              
+            END;                                                        
+         IF FEJL = 3                                                    
+         THEN                                                           
+            DO;                                                         
+               DETLIN1.CCA   = ZZWS2;                                   
+               DETLIN1.TEKST = 'ANTAL LÆSTE PERSONER PÅ GL MT BQ76000T';
+               DETLIN1.ANTAL = ANT_GLMT;                                
+               DETLIN1.RCKOD = ' ';                                     
+               CALL ZZ20300(DETLIN1,'02');                              
+            END;                                                        
+ END FEJLLISTE;                                                         
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      CLOSE AF FILER OG SPOOL                                      */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+         CALL ZZ20300(' ','99');                                        
+         CALL OPDATER_KØRSELSTABEL('SLUT',BH553_PARM.FS_MRK);           
+ END AFSLUT;                                                            
+ %INCLUDE BH65500M;     /* BEREGN/UNDERSØG EN PERSON'S ALDER */         
+ %INCLUDE BH54997M;     /* ER FORGÆNGERE KØRT. STOP HVIS IKKE */        
+ %INCLUDE BH54998M;     /* OPDATER KØRSELSTABEL */                      
+ END BH55300;                                                           

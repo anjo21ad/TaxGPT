@@ -1,0 +1,2120 @@
+ BE86700: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD / EVS SLUT                                 *
+ * PROGRAMNAVN: BE86700.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Konvertering af EVS til DB2-tabeller                   *
+ *              til ønsket år ifølge parameterfil                      *
+ * PGMFORLØB:   1. Slet data i tabeller for ønsket år/afv.id           *
+ *              2. Læs EVS seq dataset                                 *
+ *              3. Check hvilken type input og vælg korrekt struktur   *
+ *              4. SKRIV RÆKKER PÅ DB2-TABELLER                        *
+ *              5. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     Mandtal dataset (type iflg. BE86PI)                    *
+ *                  EVS1 - BE31700N                                    *
+ *                                                                     *
+ * UDDATA:      BE86701Y - KONTROLLISTE.                               *
+ *              BE67000T - EVS-OPLYSNINGER                             *
+ ***********************************************************************
+ * OPRETTET   : Lene Maj Jensen   QLE             BALLERUP 26.02.2018  *
+ * RETTET     : Esben Brodersen   EBD             BALLERUP 26.09.2018  *
+ * NYE FELTER EENHEDLBNR, TEKFEJLNR                                    *
+ * RETTET     : Per Brunk PBR                     BALLERUP 29.01.2021  *
+ * NYE FELTER vedr. mellemperiode                                      *
+ * RETTET     : Steen Pedersen SEP                Marts 2021           *
+ *              BE65300M rettet til BE55300M                           *
+ *              Fil BE867I er fjernet                                  *
+ *              Brug af BE867_PARM er erstattet af BE55300M            *
+ *              Nyt felt DATA_ID oprettet efter AFVIKLINGS_ID          *
+ *                                                                     *
+ * RETTET     : Per Brunk PBR                     BALLERUP 16.08.2021  *
+ * NYE FELTER KS46                                                     *
+ * RETTET     : Tina Carstens, TIC                BF17     20.06.2023  *
+ *              NYE FELTER                                             *
+ * RETTET     : JXT/MBS Forskud 2025 US1641246 ÆA53        17.01.2024  *
+ *              Nye felter BE770: EVSFEJ_COPR_DOVTG EVSFÆG_COPR_DOVTG  *
+ *                         RABATEJERANDEL COPR_RABATEJERANDEL          *
+ * RETTET     : JXT Forskud 2025 US#1728167 DB felter      22.05.2024  *
+ * RETTET     : JJJ Forskud 2025 BE55600M erstatter BE55300M 20.06.24  *
+ **********************************************************************/
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KOMMUNEDATA A/S 2006');    
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     BE86PI FILE RECORD INPUT;     /* Styring af inputtype   */     
+ DCL     BEEVSI FILE RECORD INPUT;     /* EVS-fil                */     
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF Øvrige filer                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     1 KOER_PARM,  /* styrer hvilket input der benyttes */          
+         3 KØRSELS_ID        CHAR(5),  /* MT1, MT2, ESR1, ESR2, EVS1 */ 
+         3 REST              CHAR(75);                                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+         EXEC SQL INCLUDE BE67000T;        /* EVS                     */
+                                                                        
+         /* Indikatorvariable BE67000T                                */
+         /* US#1728167 */                                               
+ DCL     1 DB2_SW,                                                      
+          2 EVSFEJ_EVSEFTERRABAT_SW      BIN FIXED (15),                
+          2 EVSFEJ_RABATBER_EJERANDEL_SW BIN FIXED (15),                
+          2 EVSFEJ_EJERANDEL_SW          BIN FIXED (15),                
+          2 EVSFÆG_EVSEFTERRABAT_SW      BIN FIXED (15),                
+          2 EVSFÆG_RABATBER_EJERANDEL_SW BIN FIXED (15),                
+          2 EVSFÆG_EJERANDEL_SW          BIN FIXED (15);                
+                                                                        
+                                                                        
+ DCL     1 EVS,                                                         
+         %INCLUDE BE6700TN;                                             
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF includes til evs-filer                            */
+ /* hvilken struktur der benyttes er parameterstyret                  */
+ /*********************************************************************/
+                                                                        
+             /* EVS BE31700N */                                         
+ DCL     BE317_AR        CHAR      (3500) VAR;                          
+                                                                        
+ DCL     1 BE317         BASED(ADDR(BE317_AR)),                         
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BE31700N;;                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_KØRSELS_ID                 CHAR(5);                         
+                                                                        
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE86700');              
+                                                                        
+ DCL     1 BE88Z_PARM,                                                  
+           %INCLUDE BE86700N;                                           
+                                                                        
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_BE88P       BIT       (01)      INIT      ('0'B);          
+ DCL     EOF_BHEVS       BIT       (01)      INIT      ('0'B);          
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     MATCH_FUNDET    BIT       (1)     INIT ('0'B);                 
+ DCL     TEST_PUT        BIT       (1)     INIT ('0'B);                 
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE86700'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*********************************************************************/
+                                                                        
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (1),                                 
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE86700L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (43)      INIT      (                
+           'EVS INPUT TIL BEREGNING '),                                 
+           2 ÅR          PIC       '9999',                              
+           2 F2          CHAR      (21)      INIT      ((21)' '),       
+           2 TEKST4      CHAR      (14)      INIT      (                
+           'UDSKREVET DEN '),                                           
+           2 DATO        CHAR      (10);                                
+                                                                        
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 F1          CHAR      (53)      INIT      (' '),           
+           2 TEKST1      CHAR      (79)      INIT                       
+           ('KØRSELSKONTROLLISTE');                                     
+                                                                        
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (53),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F1          CHAR      (68)      INIT      (' ');           
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANT_INS_EVS BIN FIXED (31) INIT(0);  /* HERAF INSERTED */      
+ DCL     ANT_LÆS BIN FIXED (31) INIT(0);      /* LÆST PÅ EVS-dataset */ 
+ /*********************************************************************/
+ /* Declare af Cursors                                                */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BHEVS = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE86700L');             
+            END;                                                        
+                                                                        
+         ON ENDFILE (BEEVSI)                                            
+         BEGIN;                                                         
+            EOF_BHEVS = JA;                                             
+            BE317.DCPRNUM = 9999999999;                                 
+         END;                                                           
+                                                                        
+         ON ENDFILE (BE86PI)                                            
+         BEGIN;                                                         
+            EOF_BE88P = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (BE86PI) TITLE ('BE8670PZ');                         
+         OPEN FILE (BEEVSI) TITLE ('BEEVS00I');                         
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.TIL_EVS_AAR;                
+                  OVERLIN1.TEKST2 = 'EVS data FORSKUD';                 
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.TIL_EVS_AAR;                
+                  OVERLIN1.TEKST2 = 'EVS data SLUT';                    
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.TIL_EVS_AAR;                
+                  OVERLIN1.TEKST2 = 'EVS data SUPPLEMENT';              
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+         READ FILE (BE86PI) INTO (KOER_PARM);                           
+                                                                        
+         IF EOF_BE88P = NEJ                                             
+         THEN DO;                                                       
+            SELECT (KOER_PARM.KØRSELS_ID);                              
+               WHEN ('EVS1')                                            
+                  DO;                                                   
+                     WS_KØRSELS_ID = KOER_PARM.KØRSELS_ID;              
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERKFEJL';                   
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         CALL ZZ20390('*OPEN','BE86701Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.ÅR   = GLSLUTÅR - 1;                                  
+         OVERLIN1.DATO = UDDATO;                                        
+         SIDELIN.CCA   = ZZIK1;                                         
+         OVERLIN1.CCA  = ZZWS2;                                         
+         OVERLIN2.CCA  = ZZWS3;                                         
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL RYD_DB2_TABELLER; /* for:                               */
+                                /* til_evs_aar = parm.aar             */
+                                /* afviklings_id = parm.afviklings_id */
+                                /* kørsels_id = koer_parm.kØRSELS_ID  */
+                                                                        
+         IF WS_KØRSELS_ID = 'EVS1'                                      
+         then do;                                                       
+            CALL BEHANDL_EVS1;                                          
+         end;                                                           
+                                                                        
+         exec sql commit;                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Behandl EVS med struktur BE31700N                                 */
+ /*********************************************************************/
+ BEHANDL_EVS1: PROC;                                                    
+                                                                        
+         CALL LÆS_EVS1_DATASET;                                         
+                                                                        
+         DO WHILE (^EOF_BHEVS);                                         
+                                                                        
+            /* Start med at nulstille output struktur */                
+            DCLBE67000T = '';                                           
+                                                                        
+            /* flyt data fra EVS-dataset til db2-struktur */            
+            IF KOER_PARM.KØRSELS_ID = 'EVS1'                            
+            THEN DO;                                                    
+               CALL FLYT_FELTER_BE317;                                  
+            END;                                                        
+                                                                        
+            CALL INSERT_EVSOPL;                                         
+                                                                        
+            CALL LÆS_EVS1_DATASET;                                      
+         END;                                                           
+                                                                        
+ END BEHANDL_EVS1;                                                      
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* Læs EVS dataset med BE31700N struktur                             */
+ /*********************************************************************/
+ LÆS_EVS1_DATASET: PROC;                                                
+                                                                        
+       EOF_BHEVS = '0'B;                                                
+                                                                        
+       READ FILE (BEEVSI) INTO (BE317_AR);                              
+                                                                        
+       ANT_LÆS = ANT_LÆS + 1;                                           
+                                                                        
+       IF BE317.DCPRNUM >= 9999999999                                   
+       THEN DO;                                                         
+          EOF_BHEVS = '1'B;                                             
+       END;                                                             
+                                                                        
+ END LÆS_EVS1_DATASET;                                                  
+                                                                        
+ /*********************************************************************/
+ /* FLYT FELTER FRA EVS1-struktur TIL DB2-STRUKTURER  FRA FORSKUD     */
+ /*********************************************************************/
+ FLYT_FELTER_BE317: PROC;                                               
+                                                                        
+    EVS = '';                                                           
+    EVS.TIL_EVS_AAR = WS_TIL_EVS_AAR;                                   
+    EVS.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                            
+    EVS.DATA_ID = BE55600M.DATA_ID;                                     
+    EVS.KØRSELS_ID = 'EVS1';                                            
+                                                                        
+    EVS.DCPRN = BE317.DCPRNUM;                                          
+    EVS.PROGRAMNAVN = WS_PROGRAMNAVN;                                   
+    EVS.DB2FUNKTION = 'I';                                              
+    EVS.DCPRN = BE317.DCPRNUM;                                          
+    EVS.EKOMNR = BE317.EKOMNUM;                                         
+    EVS.EEJDNR = BE317.EEJDNUM;                                         
+    EVS.EENHEDLBNR = BE317.EENHEDLBNUM;                                 
+    EVS.CITYP = BE317.CITYP;                                            
+    EVS.CUDLAND = BE317.CUDLAND;                                        
+    EVS.CSBSK = BE317.CSBSK;                                            
+    EVS.EVSSEJ_DCPRN = BE317.EVS_SLUT_EJER.DCPRN;                       
+    EVS.EVSSEJ_EKOMNR = BE317.EVS_SLUT_EJER.EKOMNR;                     
+    EVS.EVSSEJ_EEJDNR = BE317.EVS_SLUT_EJER.EEJDNR;                     
+    EVS.EVSSEJ_EENHEDLBNR = BE317.EVS_SLUT_EJER.EENHEDLBNR;             
+    EVS.EVSSEJ_CFRATYPE = BE317.EVS_SLUT_EJER.CFRATYPE;                 
+    EVS.EVSSEJ_DSORTDAT1 = BE317.EVS_SLUT_EJER.DSORTDAT1;               
+    EVS.EVSSEJ_DSORTDAT2 = BE317.EVS_SLUT_EJER.DSORTDAT2;               
+    EVS.EVSSEJ_EJDBELIG = BE317.EVS_SLUT_EJER.EJDBELIG;                 
+    EVS.EVSSEJ_VEJK_EJD = BE317.EVS_SLUT_EJER.VEJK_EJD;                 
+    EVS.EVSSEJ_HUSNR_EJD = BE317.EVS_SLUT_EJER.HUSNR_EJD;               
+    EVS.EVSSEJ_ETAGE_EJD = BE317.EVS_SLUT_EJER.ETAGE_EJD;               
+    EVS.EVSSEJ_SDØR_EJD =  BE317.EVS_SLUT_EJER.SDØR_EJD;                
+    EVS.EVSSEJ_ENHEDBELIG = BE317.EVS_SLUT_EJER.ENHEDBELIG;             
+    EVS.EVSSEJ_VEJK_ENHED = BE317.EVS_SLUT_EJER.VEJK_ENHED;             
+    EVS.EVSSEJ_HUSNR_ENHED = BE317.EVS_SLUT_EJER.HUSNR_ENHED;           
+    EVS.EVSSEJ_ETAGE_ENHED = BE317.EVS_SLUT_EJER.ETAGE_ENHED;           
+    EVS.EVSSEJ_SDØR_ENHED = BE317.EVS_SLUT_EJER.SDØR_ENHED;             
+    EVS.EVSSEJ_CLANDEKODE = BE317.EVS_SLUT_EJER.CLANDEKODE;             
+    EVS.EVSSEJ_CBENYT = BE317.EVS_SLUT_EJER.CBENYT;                     
+    EVS.EVSSEJ_CEJBOLTYP1 = BE317.EVS_SLUT_EJER.CEJBOLTYP1;             
+    EVS.EVSSEJ_CEJBOLTYP2 = BE317.EVS_SLUT_EJER.CEJBOLTYP2;             
+    EVS.EVSSEJ_FST_ELBNR = BE317.EVS_SLUT_EJER.FØRSTE.ELBNR;            
+    EVS.EVSSEJ_FST_EGENNR = BE317.EVS_SLUT_EJER.FØRSTE.EGENNR;          
+    EVS.EVSSEJ_FST_DFRAGLD = BE317.EVS_SLUT_EJER.FØRSTE.DFRAGLD;        
+    EVS.EVSSEJ_FST_DTILGLD = BE317.EVS_SLUT_EJER.FØRSTE.DTILGLD;        
+    EVS.EVSSEJ_FST_CDATAFRA = BE317.EVS_SLUT_EJER.FØRSTE.CDATAFRA;      
+    EVS.EVSSEJ_FST_CAJOUR = BE317.EVS_SLUT_EJER.FØRSTE.CAJOUR;          
+    EVS.EVSSEJ_FST_CSUPPL = BE317.EVS_SLUT_EJER.FØRSTE.CSUPPL;          
+    EVS.EVSSEJ_FST_DHENVN = BE317.EVS_SLUT_EJER.FØRSTE.DHENVN;          
+    EVS.EVSSEJ_FST_FEJLNR = BE317.EVS_SLUT_EJER.FØRSTE.FEJLNR;          
+    EVS.EVSSEJ_FST_CÆGTOPR = BE317.EVS_SLUT_EJER.FØRSTE.CÆGTOPR;        
+    EVS.EVSSEJ_FST_CSKPLOMF = BE317.EVS_SLUT_EJER.FØRSTE.CSKPLOMF;      
+    EVS.EVSSEJ_FST_CEJBEVS = BE317.EVS_SLUT_EJER.FØRSTE.CEJBEVS;        
+    EVS.EVSSEJ_FST_CEJDTYPE = BE317.EVS_SLUT_EJER.FØRSTE.CEJDTYPE;      
+    EVS.EVSSEJ_FST_FELT760 = BE317.EVS_SLUT_EJER.FØRSTE.FELT760;        
+    EVS.EVSSEJ_FST_CNEDSL1 = BE317.EVS_SLUT_EJER.FØRSTE.CNEDSL1;        
+    EVS.EVSSEJ_FST_DATO0107 = BE317.EVS_SLUT_EJER.FØRSTE.DATO0107;      
+    EVS.EVSSEJ_FST_DOVTG = BE317.EVS_SLUT_EJER.FØRSTE.DOVTG;            
+    EVS.EVSSEJ_FST_DAFSTAA = BE317.EVS_SLUT_EJER.FØRSTE.DAFSTAA;        
+    EVS.EVSSEJ_FST_DINDFLYT = BE317.EVS_SLUT_EJER.FØRSTE.DINDFLYT;      
+    EVS.EVSSEJ_FST_DFRAFLYT = BE317.EVS_SLUT_EJER.FØRSTE.DFRAFLYT;      
+    EVS.EVSSEJ_FST_CINDFLYT = BE317.EVS_SLUT_EJER.FØRSTE.CINDFLYT;      
+    EVS.EVSSEJ_FST_GPCTEJER = BE317.EVS_SLUT_EJER.FØRSTE.GPCTEJER;      
+    EVS.EVSSEJ_FST_GPCTEJER_SW = BE317.EVS_SLUT_EJER.FØRSTE.GPCTEJER_SW;
+    EVS.EVSSEJ_FST_FDAGUDLE = BE317.EVS_SLUT_EJER.FØRSTE.FDAGUDLE;      
+    EVS.EVSSEJ_FST_GPCTUDLE = BE317.EVS_SLUT_EJER.FØRSTE.GPCTUDLE;      
+    EVS.EVSSEJ_FST_FUDL100 = BE317.EVS_SLUT_EJER.FØRSTE.FUDL100;        
+    EVS.EVSSEJ_FST_FDAGERHV = BE317.EVS_SLUT_EJER.FØRSTE.FDAGERHV;      
+    EVS.EVSSEJ_FST_GPCTERHV = BE317.EVS_SLUT_EJER.FØRSTE.GPCTERHV;      
+    EVS.EVSSEJ_FST_FERHVFLER = BE317.EVS_SLUT_EJER.FØRSTE.FERHVFLER;    
+    EVS.EVSSEJ_FST_CBERGROP = BE317.EVS_SLUT_EJER.FØRSTE.CBERGROP;      
+  /*EVS.EVSSEJ_FST_CBERGRGLOP = BE317.EVS_SLUT_EJER.FØRSTE.CBERGRGLOP*/ 
+    EVS.EVSSEJ_FST_BBERGRL = BE317.EVS_SLUT_EJER.FØRSTE.BBERGRL;        
+    EVS.EVSSEJ_FST_BBERGRL_SW = BE317.EVS_SLUT_EJER.FØRSTE.BBERGRL_SW;  
+    EVS.EVSSEJ_FST_BBER2FAM = BE317.EVS_SLUT_EJER.FØRSTE.BBER2FAM;      
+    EVS.EVSSEJ_FST_BBER2FAM_SW = BE317.EVS_SLUT_EJER.FØRSTE.BBER2FAM_SW;
+    EVS.EVSSEJ_FST_BBERGRL_AKT = BE317.EVS_SLUT_EJER.FØRSTE.BBERGRL_AKT;
+    EVS.EVSSEJ_FST_BBERGRL_AKT_SW =                                     
+    BE317.EVS_SLUT_EJER.FØRSTE.BBERGRL_AKT_SW;                          
+    EVS.EVSSEJ_FST_BBER2FAM_AKT =                                       
+    BE317.EVS_SLUT_EJER.FØRSTE.BBER2FAM_AKT;                            
+    EVS.EVSSEJ_FST_BBER2FAM_AKT_SW =                                    
+    BE317.EVS_SLUT_EJER.FØRSTE.BBER2FAM_AKT_SW;                         
+    EVS.EVSSEJ_FST_VURMARK_AKT        =                                 
+    BE317.EVS_SLUT_EJER.FØRSTE.VURMARK_AKT_PER    ;                     
+    EVS.EVSSEJ_FST_VURMARK =                                            
+    BE317.EVS_SLUT_EJER.FØRSTE.VURMARK_PER        ;                     
+    EVS.EVSSEJ_FST_BPROM1 = BE317.EVS_SLUT_EJER.FØRSTE.BPROM1;          
+    EVS.EVSSEJ_FST_BPENSNED = BE317.EVS_SLUT_EJER.FØRSTE.BPENSNED;      
+    EVS.EVSSEJ_FST_BPENSNÆ = BE317.EVS_SLUT_EJER.FØRSTE.BPENSNÆ;        
+    EVS.EVSSEJ_FST_BSUM1 = BE317.EVS_SLUT_EJER.FØRSTE.BSUM1;            
+    EVS.EVSSEJ_FST_BSUM1_SW = BE317.EVS_SLUT_EJER.FØRSTE.BSUM1_SW;      
+    EVS.EVSSEJ_FST_BSUM3 = BE317.EVS_SLUT_EJER.FØRSTE.BSUM3;            
+    EVS.EVSSEJ_FST_BSUM3_SW = BE317.EVS_SLUT_EJER.FØRSTE.BSUM3_SW;      
+    EVS.EVSSEJ_FST_BNETTO = BE317.EVS_SLUT_EJER.FØRSTE.BNETTO;          
+    EVS.EVSSEJ_FST_BNETTO_SW = BE317.EVS_SLUT_EJER.FØRSTE.BNETTO_SW;    
+    EVS.EVSSEJ_FST_BEJERAN = BE317.EVS_SLUT_EJER.FØRSTE.BEJERAN;        
+    EVS.EVSSEJ_FST_BEJERAN_SW = BE317.EVS_SLUT_EJER.FØRSTE.BEJERAN_SW;  
+    EVS.EVSSEJ_FST_BEVSMAN = BE317.EVS_SLUT_EJER.FØRSTE.BEVSMAN;        
+    EVS.EVSSEJ_FST_BEVSMAN_SW = BE317.EVS_SLUT_EJER.FØRSTE.BEVSMAN_SW;  
+    EVS.EVSSEJ_FST_BMANNEDSL = BE317.EVS_SLUT_EJER.FØRSTE.BMANNEDSL;    
+    EVS.EVSSEJ_FST_CENKE = BE317.EVS_SLUT_EJER.FØRSTE.CENKE;            
+    EVS.EVSSEJ_FST_CENKEBOH = BE317.EVS_SLUT_EJER.FØRSTE.CENKEBOH;      
+    EVS.EVSSEJ_FST_BOBEHAKOD = BE317.EVS_SLUT_EJER.FØRSTE.BOBEHAKOD;    
+    EVS.EVSSEJ_FST_CIVILSTAND = BE317.EVS_SLUT_EJER.FØRSTE.CIVILSTAND;  
+    EVS.EVSSEJ_FST_CSLET = BE317.EVS_SLUT_EJER.FØRSTE.CSLET;            
+    EVS.EVSSEJ_FST_BEJBOL1 = BE317.EVS_SLUT_EJER.FØRSTE.BEJBOL1;        
+    EVS.EVSSEJ_FST_BEJBOL1_SW = BE317.EVS_SLUT_EJER.FØRSTE.BEJBOL1_SW;  
+    EVS.EVSSEJ_FST_BEJBOL2 = BE317.EVS_SLUT_EJER.FØRSTE.BEJBOL2;        
+    EVS.EVSSEJ_FST_BEJBOL2_SW = BE317.EVS_SLUT_EJER.FØRSTE.BEJBOL2_SW;  
+    EVS.EVSSEJ_FST_CANVEBOL = BE317.EVS_SLUT_EJER.FØRSTE.CANVEBOL;      
+    EVS.EVSSEJ_FST_CPTYPSLUT = BE317.EVS_SLUT_EJER.FØRSTE.CPTYPSLUT;    
+    EVS.EVSSEJ_FST_FELT759 = BE317.EVS_SLUT_EJER.FØRSTE.FELT759;        
+    EVS.EVSSEJ_FST_CEKSEMP = BE317.EVS_SLUT_EJER.FØRSTE.CEKSEMP;        
+    EVS.EVSSEJ_FST_CFRÅR = BE317.EVS_SLUT_EJER.FØRSTE.CFRÅR;            
+    EVS.EVSSEJ_FST_DRGNÅRFRA = BE317.EVS_SLUT_EJER.FØRSTE.DRGNÅRFRA;    
+    EVS.EVSSEJ_FST_DRGNÅRTIL = BE317.EVS_SLUT_EJER.FØRSTE.DRGNÅRTIL;    
+    EVS.EVSSEJ_FST_COMPLA = BE317.EVS_SLUT_EJER.FØRSTE.COMPLA;          
+    EVS.EVSSEJ_FST_DOMPLACPR = BE317.EVS_SLUT_EJER.FØRSTE.DOMPLACPR;    
+    EVS.EVSSEJ_FST_BUDLSKC = BE317.EVS_SLUT_EJER.FØRSTE.BUDLSKC;        
+    EVS.EVSSEJ_FST_BUDLSKC_SW = BE317.EVS_SLUT_EJER.FØRSTE.BUDLSKC_SW;  
+    EVS.EVSSEJ_SID_ELBNR = BE317.EVS_SLUT_EJER.SIDSTE.ELBNR;            
+    EVS.EVSSEJ_SID_EGENNR = BE317.EVS_SLUT_EJER.SIDSTE.EGENNR;          
+    EVS.EVSSEJ_SID_DFRAGLD = BE317.EVS_SLUT_EJER.SIDSTE.DFRAGLD;        
+    EVS.EVSSEJ_SID_DTILGLD = BE317.EVS_SLUT_EJER.SIDSTE.DTILGLD;        
+    EVS.EVSSEJ_SID_CDATAFRA = BE317.EVS_SLUT_EJER.SIDSTE.CDATAFRA;      
+    EVS.EVSSEJ_SID_CAJOUR = BE317.EVS_SLUT_EJER.SIDSTE.CAJOUR;          
+    EVS.EVSSEJ_SID_CSUPPL = BE317.EVS_SLUT_EJER.SIDSTE.CSUPPL;          
+    EVS.EVSSEJ_SID_DHENVN = BE317.EVS_SLUT_EJER.SIDSTE.DHENVN;          
+    EVS.EVSSEJ_SID_FEJLNR = BE317.EVS_SLUT_EJER.SIDSTE.FEJLNR;          
+    EVS.EVSSEJ_SID_CÆGTOPR = BE317.EVS_SLUT_EJER.SIDSTE.CÆGTOPR;        
+    EVS.EVSSEJ_SID_CSKPLOMF = BE317.EVS_SLUT_EJER.SIDSTE.CSKPLOMF;      
+    EVS.EVSSEJ_SID_CEJBEVS = BE317.EVS_SLUT_EJER.SIDSTE.CEJBEVS;        
+    EVS.EVSSEJ_SID_CEJDTYPE = BE317.EVS_SLUT_EJER.SIDSTE.CEJDTYPE;      
+    EVS.EVSSEJ_SID_FELT760 = BE317.EVS_SLUT_EJER.SIDSTE.FELT760;        
+    EVS.EVSSEJ_SID_CNEDSL1 = BE317.EVS_SLUT_EJER.SIDSTE.CNEDSL1;        
+    EVS.EVSSEJ_SID_DATO0107 = BE317.EVS_SLUT_EJER.SIDSTE.DATO0107;      
+    EVS.EVSSEJ_SID_DOVTG = BE317.EVS_SLUT_EJER.SIDSTE.DOVTG;            
+    EVS.EVSSEJ_SID_DAFSTAA = BE317.EVS_SLUT_EJER.SIDSTE.DAFSTAA;        
+    EVS.EVSSEJ_SID_DINDFLYT = BE317.EVS_SLUT_EJER.SIDSTE.DINDFLYT;      
+    EVS.EVSSEJ_SID_DFRAFLYT = BE317.EVS_SLUT_EJER.SIDSTE.DFRAFLYT;      
+    EVS.EVSSEJ_SID_CINDFLYT = BE317.EVS_SLUT_EJER.SIDSTE.CINDFLYT;      
+    EVS.EVSSEJ_SID_GPCTEJER = BE317.EVS_SLUT_EJER.SIDSTE.GPCTEJER;      
+    EVS.EVSSEJ_SID_GPCTEJER_SW = BE317.EVS_SLUT_EJER.SIDSTE.GPCTEJER_SW;
+    EVS.EVSSEJ_SID_FDAGUDLE = BE317.EVS_SLUT_EJER.SIDSTE.FDAGUDLE;      
+    EVS.EVSSEJ_SID_GPCTUDLE = BE317.EVS_SLUT_EJER.SIDSTE.GPCTUDLE;      
+    EVS.EVSSEJ_SID_FUDL100 = BE317.EVS_SLUT_EJER.SIDSTE.FUDL100;        
+    EVS.EVSSEJ_SID_FDAGERHV = BE317.EVS_SLUT_EJER.SIDSTE.FDAGERHV;      
+    EVS.EVSSEJ_SID_GPCTERHV = BE317.EVS_SLUT_EJER.SIDSTE.GPCTERHV;      
+    EVS.EVSSEJ_SID_FERHVFLER = BE317.EVS_SLUT_EJER.SIDSTE.FERHVFLER;    
+    EVS.EVSSEJ_SID_CBERGROP = BE317.EVS_SLUT_EJER.SIDSTE.CBERGROP;      
+ /* EVS.EVSSEJ_SID_CBERGRGLOP = BE317.EVS_SLUT_EJER.SIDSTE.CBERGRGLOP*/ 
+    EVS.EVSSEJ_SID_BBERGRL = BE317.EVS_SLUT_EJER.SIDSTE.BBERGRL;        
+    EVS.EVSSEJ_SID_BBERGRL_SW = BE317.EVS_SLUT_EJER.SIDSTE.BBERGRL_SW;  
+    EVS.EVSSEJ_SID_BBER2FAM = BE317.EVS_SLUT_EJER.SIDSTE.BBER2FAM;      
+    EVS.EVSSEJ_SID_BBER2FAM_SW = BE317.EVS_SLUT_EJER.SIDSTE.BBER2FAM_SW;
+    EVS.EVSSEJ_SID_BBERGRL_AKT = BE317.EVS_SLUT_EJER.SIDSTE.BBERGRL_AKT;
+    EVS.EVSSEJ_SID_BBERGRL_AKT_SW =                                     
+    BE317.EVS_SLUT_EJER.SIDSTE.BBERGRL_AKT_SW;                          
+    EVS.EVSSEJ_SID_BBER2FAM_AKT =                                       
+    BE317.EVS_SLUT_EJER.SIDSTE.BBER2FAM_AKT;                            
+    EVS.EVSSEJ_SID_BBER2FAM_AKT_SW =                                    
+    BE317.EVS_SLUT_EJER.SIDSTE.BBER2FAM_AKT_SW;                         
+    EVS.EVSSEJ_SID_VURMARK_AKT        =                                 
+    BE317.EVS_SLUT_EJER.SIDSTE.VURMARK_AKT_PER    ;                     
+    EVS.EVSSEJ_SID_VURMARK            =                                 
+    BE317.EVS_SLUT_EJER.SIDSTE.VURMARK_PER        ;                     
+    EVS.EVSSEJ_SID_BPROM1 = BE317.EVS_SLUT_EJER.SIDSTE.BPROM1;          
+    EVS.EVSSEJ_SID_BPENSNED = BE317.EVS_SLUT_EJER.SIDSTE.BPENSNED;      
+    EVS.EVSSEJ_SID_BPENSNÆ = BE317.EVS_SLUT_EJER.SIDSTE.BPENSNÆ;        
+    EVS.EVSSEJ_SID_BSUM1 = BE317.EVS_SLUT_EJER.SIDSTE.BSUM1;            
+    EVS.EVSSEJ_SID_BSUM1_SW = BE317.EVS_SLUT_EJER.SIDSTE.BSUM1_SW;      
+    EVS.EVSSEJ_SID_BSUM3 = BE317.EVS_SLUT_EJER.SIDSTE.BSUM3;            
+    EVS.EVSSEJ_SID_BSUM3_SW = BE317.EVS_SLUT_EJER.SIDSTE.BSUM3_SW;      
+    EVS.EVSSEJ_SID_BNETTO = BE317.EVS_SLUT_EJER.SIDSTE.BNETTO;          
+    EVS.EVSSEJ_SID_BNETTO_SW = BE317.EVS_SLUT_EJER.SIDSTE.BNETTO_SW;    
+    EVS.EVSSEJ_SID_BEJERAN = BE317.EVS_SLUT_EJER.SIDSTE.BEJERAN;        
+    EVS.EVSSEJ_SID_BEJERAN_SW = BE317.EVS_SLUT_EJER.SIDSTE.BEJERAN_SW;  
+    EVS.EVSSEJ_SID_BEVSMAN = BE317.EVS_SLUT_EJER.SIDSTE.BEVSMAN;        
+    EVS.EVSSEJ_SID_BEVSMAN_SW = BE317.EVS_SLUT_EJER.SIDSTE.BEVSMAN_SW;  
+    EVS.EVSSEJ_SID_BMANNEDSL = BE317.EVS_SLUT_EJER.SIDSTE.BMANNEDSL;    
+    EVS.EVSSEJ_SID_CENKE = BE317.EVS_SLUT_EJER.SIDSTE.CENKE;            
+    EVS.EVSSEJ_SID_CENKEBOH = BE317.EVS_SLUT_EJER.SIDSTE.CENKEBOH;      
+    EVS.EVSSEJ_SID_BOBEHAKOD = BE317.EVS_SLUT_EJER.SIDSTE.BOBEHAKOD;    
+    EVS.EVSSEJ_SID_CIVILSTAND = BE317.EVS_SLUT_EJER.SIDSTE.CIVILSTAND;  
+    EVS.EVSSEJ_SID_CSLET = BE317.EVS_SLUT_EJER.SIDSTE.CSLET;            
+    EVS.EVSSEJ_SID_BEJBOL1 = BE317.EVS_SLUT_EJER.SIDSTE.BEJBOL1;        
+    EVS.EVSSEJ_SID_BEJBOL1_SW = BE317.EVS_SLUT_EJER.SIDSTE.BEJBOL1_SW;  
+    EVS.EVSSEJ_SID_BEJBOL2 = BE317.EVS_SLUT_EJER.SIDSTE.BEJBOL2;        
+    EVS.EVSSEJ_SID_BEJBOL2_SW = BE317.EVS_SLUT_EJER.SIDSTE.BEJBOL2_SW;  
+    EVS.EVSSEJ_SID_CANVEBOL = BE317.EVS_SLUT_EJER.SIDSTE.CANVEBOL;      
+    EVS.EVSSEJ_SID_CPTYPSLUT = BE317.EVS_SLUT_EJER.SIDSTE.CPTYPSLUT;    
+    EVS.EVSSEJ_SID_FELT759 = BE317.EVS_SLUT_EJER.SIDSTE.FELT759;        
+    EVS.EVSSEJ_SID_CEKSEMP = BE317.EVS_SLUT_EJER.SIDSTE.CEKSEMP;        
+    EVS.EVSSEJ_SID_CFRÅR = BE317.EVS_SLUT_EJER.SIDSTE.CFRÅR;            
+    EVS.EVSSEJ_SID_DRGNÅRFRA = BE317.EVS_SLUT_EJER.SIDSTE.DRGNÅRFRA;    
+    EVS.EVSSEJ_SID_DRGNÅRTIL = BE317.EVS_SLUT_EJER.SIDSTE.DRGNÅRTIL;    
+    EVS.EVSSEJ_SID_COMPLA = BE317.EVS_SLUT_EJER.SIDSTE.COMPLA;          
+    EVS.EVSSEJ_SID_DOMPLACPR = BE317.EVS_SLUT_EJER.SIDSTE.DOMPLACPR;    
+    EVS.EVSSEJ_SID_BUDLSKC = BE317.EVS_SLUT_EJER.SIDSTE.BUDLSKC;        
+    EVS.EVSSEJ_SID_BUDLSKC_SW = BE317.EVS_SLUT_EJER.SIDSTE.BUDLSKC_SW;  
+    EVS.EVSSÆG_DCPRN = BE317.EVS_SLUT_ÆGTF.DCPRN;                       
+    EVS.EVSSÆG_EKOMNR = BE317.EVS_SLUT_ÆGTF.EKOMNR;                     
+    EVS.EVSSÆG_EEJDNR = BE317.EVS_SLUT_ÆGTF.EEJDNR;                     
+    EVS.EVSSÆG_EENHEDLBNR = BE317.EVS_SLUT_ÆGTF.EENHEDLBNR;             
+    EVS.EVSSÆG_CFRATYPE = BE317.EVS_SLUT_ÆGTF.CFRATYPE;                 
+    EVS.EVSSÆG_DSORTDAT1 = BE317.EVS_SLUT_ÆGTF.DSORTDAT1;               
+    EVS.EVSSÆG_DSORTDAT2 = BE317.EVS_SLUT_ÆGTF.DSORTDAT2;               
+    EVS.EVSSÆG_EJDBELIG = BE317.EVS_SLUT_ÆGTF.EJDBELIG;                 
+    EVS.EVSSÆG_VEJK_EJD  =  BE317.EVS_SLUT_ÆGTF.VEJK_EJD;               
+    EVS.EVSSÆG_HUSNR_EJD = BE317.EVS_SLUT_ÆGTF.HUSNR_EJD;               
+    EVS.EVSSÆG_ETAGE_EJD = BE317.EVS_SLUT_ÆGTF.ETAGE_EJD;               
+    EVS.EVSSÆG_SDØR_EJD  = BE317.EVS_SLUT_ÆGTF.SDØR_EJD;                
+    EVS.EVSSÆG_ENHEDBELIG = BE317.EVS_SLUT_ÆGTF.ENHEDBELIG;             
+    EVS.EVSSÆG_VEJK_ENHED = BE317.EVS_SLUT_ÆGTF.VEJK_ENHED;             
+    EVS.EVSSÆG_HUSNR_ENHED = BE317.EVS_SLUT_ÆGTF.HUSNR_ENHED;           
+    EVS.EVSSÆG_ETAGE_ENHED = BE317.EVS_SLUT_ÆGTF.ETAGE_ENHED;           
+    EVS.EVSSÆG_SDØR_ENHED = BE317.EVS_SLUT_ÆGTF.SDØR_ENHED;             
+    EVS.EVSSÆG_CLANDEKODE = BE317.EVS_SLUT_ÆGTF.CLANDEKODE;             
+    EVS.EVSSÆG_CBENYT = BE317.EVS_SLUT_ÆGTF.CBENYT;                     
+    EVS.EVSSÆG_CEJBOLTYP1 = BE317.EVS_SLUT_ÆGTF.CEJBOLTYP1;             
+    EVS.EVSSÆG_CEJBOLTYP2 = BE317.EVS_SLUT_ÆGTF.CEJBOLTYP2;             
+    EVS.EVSSÆG_FST_ELBNR = BE317.EVS_SLUT_ÆGTF.FØRSTE.ELBNR;            
+    EVS.EVSSÆG_FST_EGENNR = BE317.EVS_SLUT_ÆGTF.FØRSTE.EGENNR;          
+    EVS.EVSSÆG_FST_DFRAGLD = BE317.EVS_SLUT_ÆGTF.FØRSTE.DFRAGLD;        
+    EVS.EVSSÆG_FST_DTILGLD = BE317.EVS_SLUT_ÆGTF.FØRSTE.DTILGLD;        
+    EVS.EVSSÆG_FST_CDATAFRA = BE317.EVS_SLUT_ÆGTF.FØRSTE.CDATAFRA;      
+    EVS.EVSSÆG_FST_CAJOUR = BE317.EVS_SLUT_ÆGTF.FØRSTE.CAJOUR;          
+    EVS.EVSSÆG_FST_CSUPPL = BE317.EVS_SLUT_ÆGTF.FØRSTE.CSUPPL;          
+    EVS.EVSSÆG_FST_DHENVN = BE317.EVS_SLUT_ÆGTF.FØRSTE.DHENVN;          
+    EVS.EVSSÆG_FST_FEJLNR = BE317.EVS_SLUT_ÆGTF.FØRSTE.FEJLNR;          
+    EVS.EVSSÆG_FST_CÆGTOPR = BE317.EVS_SLUT_ÆGTF.FØRSTE.CÆGTOPR;        
+    EVS.EVSSÆG_FST_CSKPLOMF = BE317.EVS_SLUT_ÆGTF.FØRSTE.CSKPLOMF;      
+    EVS.EVSSÆG_FST_CEJBEVS = BE317.EVS_SLUT_ÆGTF.FØRSTE.CEJBEVS;        
+    EVS.EVSSÆG_FST_CEJDTYPE = BE317.EVS_SLUT_ÆGTF.FØRSTE.CEJDTYPE;      
+    EVS.EVSSÆG_FST_FELT760 = BE317.EVS_SLUT_ÆGTF.FØRSTE.FELT760;        
+    EVS.EVSSÆG_FST_CNEDSL1 = BE317.EVS_SLUT_ÆGTF.FØRSTE.CNEDSL1;        
+    EVS.EVSSÆG_FST_DATO0107 = BE317.EVS_SLUT_ÆGTF.FØRSTE.DATO0107;      
+    EVS.EVSSÆG_FST_DOVTG = BE317.EVS_SLUT_ÆGTF.FØRSTE.DOVTG;            
+    EVS.EVSSÆG_FST_DAFSTAA = BE317.EVS_SLUT_ÆGTF.FØRSTE.DAFSTAA;        
+    EVS.EVSSÆG_FST_DINDFLYT = BE317.EVS_SLUT_ÆGTF.FØRSTE.DINDFLYT;      
+    EVS.EVSSÆG_FST_DFRAFLYT = BE317.EVS_SLUT_ÆGTF.FØRSTE.DFRAFLYT;      
+    EVS.EVSSÆG_FST_CINDFLYT = BE317.EVS_SLUT_ÆGTF.FØRSTE.CINDFLYT;      
+    EVS.EVSSÆG_FST_GPCTEJER = BE317.EVS_SLUT_ÆGTF.FØRSTE.GPCTEJER;      
+    EVS.EVSSÆG_FST_GPCTEJER_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.GPCTEJER_SW;
+    EVS.EVSSÆG_FST_FDAGUDLE = BE317.EVS_SLUT_ÆGTF.FØRSTE.FDAGUDLE;      
+    EVS.EVSSÆG_FST_GPCTUDLE = BE317.EVS_SLUT_ÆGTF.FØRSTE.GPCTUDLE;      
+    EVS.EVSSÆG_FST_FUDL100 = BE317.EVS_SLUT_ÆGTF.FØRSTE.FUDL100;        
+    EVS.EVSSÆG_FST_FDAGERHV = BE317.EVS_SLUT_ÆGTF.FØRSTE.FDAGERHV;      
+    EVS.EVSSÆG_FST_GPCTERHV = BE317.EVS_SLUT_ÆGTF.FØRSTE.GPCTERHV;      
+    EVS.EVSSÆG_FST_FERHVFLER = BE317.EVS_SLUT_ÆGTF.FØRSTE.FERHVFLER;    
+    EVS.EVSSÆG_FST_CBERGROP = BE317.EVS_SLUT_ÆGTF.FØRSTE.CBERGROP;      
+ /* EVS.EVSSÆG_FST_CBERGRGLOP = BE317.EVS_SLUT_ÆGTF.FØRSTE.CBERGRGLOP*/ 
+    EVS.EVSSÆG_FST_BBERGRL = BE317.EVS_SLUT_ÆGTF.FØRSTE.BBERGRL;        
+    EVS.EVSSÆG_FST_BBERGRL_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BBERGRL_SW;  
+    EVS.EVSSÆG_FST_BBER2FAM = BE317.EVS_SLUT_ÆGTF.FØRSTE.BBER2FAM;      
+    EVS.EVSSÆG_FST_BBER2FAM_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BBER2FAM_SW;
+    EVS.EVSSÆG_FST_BBERGRL_AKT = BE317.EVS_SLUT_ÆGTF.FØRSTE.BBERGRL_AKT;
+    EVS.EVSSÆG_FST_BBERGRL_AKT_SW =                                     
+    BE317.EVS_SLUT_ÆGTF.FØRSTE.BBERGRL_AKT_SW;                          
+    EVS.EVSSÆG_FST_BBER2FAM_AKT =                                       
+    BE317.EVS_SLUT_ÆGTF.FØRSTE.BBER2FAM_AKT;                            
+    EVS.EVSSÆG_FST_BBER2FAM_AKT_SW =                                    
+    BE317.EVS_SLUT_ÆGTF.FØRSTE.BBER2FAM_AKT_SW;                         
+    EVS.EVSSÆG_FST_VURMARK_AKT        =                                 
+    BE317.EVS_SLUT_ÆGTF.FØRSTE.VURMARK_AKT_PER    ;                     
+    EVS.EVSSÆG_FST_VURMARK            =                                 
+    BE317.EVS_SLUT_ÆGTF.FØRSTE.VURMARK_PER        ;                     
+    EVS.EVSSÆG_FST_BPROM1 = BE317.EVS_SLUT_ÆGTF.FØRSTE.BPROM1;          
+    EVS.EVSSÆG_FST_BPENSNED = BE317.EVS_SLUT_ÆGTF.FØRSTE.BPENSNED;      
+    EVS.EVSSÆG_FST_BPENSNÆ = BE317.EVS_SLUT_ÆGTF.FØRSTE.BPENSNÆ;        
+    EVS.EVSSÆG_FST_BSUM1 = BE317.EVS_SLUT_ÆGTF.FØRSTE.BSUM1;            
+    EVS.EVSSÆG_FST_BSUM1_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BSUM1_SW;      
+    EVS.EVSSÆG_FST_BSUM3 = BE317.EVS_SLUT_ÆGTF.FØRSTE.BSUM3;            
+    EVS.EVSSÆG_FST_BSUM3_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BSUM3_SW;      
+    EVS.EVSSÆG_FST_BNETTO = BE317.EVS_SLUT_ÆGTF.FØRSTE.BNETTO;          
+    EVS.EVSSÆG_FST_BNETTO_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BNETTO_SW;    
+    EVS.EVSSÆG_FST_BEJERAN = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJERAN;        
+    EVS.EVSSÆG_FST_BEJERAN_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJERAN_SW;  
+    EVS.EVSSÆG_FST_BEVSMAN = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEVSMAN;        
+    EVS.EVSSÆG_FST_BEVSMAN_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEVSMAN_SW;  
+    EVS.EVSSÆG_FST_BMANNEDSL = BE317.EVS_SLUT_ÆGTF.FØRSTE.BMANNEDSL;    
+    EVS.EVSSÆG_FST_CENKE = BE317.EVS_SLUT_ÆGTF.FØRSTE.CENKE;            
+    EVS.EVSSÆG_FST_CENKEBOH = BE317.EVS_SLUT_ÆGTF.FØRSTE.CENKEBOH;      
+    EVS.EVSSÆG_FST_BOBEHAKOD = BE317.EVS_SLUT_ÆGTF.FØRSTE.BOBEHAKOD;    
+    EVS.EVSSÆG_FST_CIVILSTAND = BE317.EVS_SLUT_ÆGTF.FØRSTE.CIVILSTAND;  
+    EVS.EVSSÆG_FST_CSLET = BE317.EVS_SLUT_ÆGTF.FØRSTE.CSLET;            
+    EVS.EVSSÆG_FST_BEJBOL1 = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJBOL1;        
+    EVS.EVSSÆG_FST_BEJBOL1_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJBOL1_SW;  
+    EVS.EVSSÆG_FST_BEJBOL2 = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJBOL2;        
+    EVS.EVSSÆG_FST_BEJBOL2_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BEJBOL2_SW;  
+    EVS.EVSSÆG_FST_CANVEBOL = BE317.EVS_SLUT_ÆGTF.FØRSTE.CANVEBOL;      
+    EVS.EVSSÆG_FST_CPTYPSLUT = BE317.EVS_SLUT_ÆGTF.FØRSTE.CPTYPSLUT;    
+    EVS.EVSSÆG_FST_FELT759 = BE317.EVS_SLUT_ÆGTF.FØRSTE.FELT759;        
+    EVS.EVSSÆG_FST_CEKSEMP = BE317.EVS_SLUT_ÆGTF.FØRSTE.CEKSEMP;        
+    EVS.EVSSÆG_FST_CFRÅR = BE317.EVS_SLUT_ÆGTF.FØRSTE.CFRÅR;            
+    EVS.EVSSÆG_FST_DRGNÅRFRA = BE317.EVS_SLUT_ÆGTF.FØRSTE.DRGNÅRFRA;    
+    EVS.EVSSÆG_FST_DRGNÅRTIL = BE317.EVS_SLUT_ÆGTF.FØRSTE.DRGNÅRTIL;    
+    EVS.EVSSÆG_FST_COMPLA = BE317.EVS_SLUT_ÆGTF.FØRSTE.COMPLA;          
+    EVS.EVSSÆG_FST_DOMPLACPR = BE317.EVS_SLUT_ÆGTF.FØRSTE.DOMPLACPR;    
+    EVS.EVSSÆG_FST_BUDLSKC = BE317.EVS_SLUT_ÆGTF.FØRSTE.BUDLSKC;        
+    EVS.EVSSÆG_FST_BUDLSKC_SW = BE317.EVS_SLUT_ÆGTF.FØRSTE.BUDLSKC_SW;  
+    EVS.EVSSÆG_SID_ELBNR = BE317.EVS_SLUT_ÆGTF.SIDSTE.ELBNR;            
+    EVS.EVSSÆG_SID_EGENNR = BE317.EVS_SLUT_ÆGTF.SIDSTE.EGENNR;          
+    EVS.EVSSÆG_SID_DFRAGLD = BE317.EVS_SLUT_ÆGTF.SIDSTE.DFRAGLD;        
+    EVS.EVSSÆG_SID_DTILGLD = BE317.EVS_SLUT_ÆGTF.SIDSTE.DTILGLD;        
+    EVS.EVSSÆG_SID_CDATAFRA = BE317.EVS_SLUT_ÆGTF.SIDSTE.CDATAFRA;      
+    EVS.EVSSÆG_SID_CAJOUR = BE317.EVS_SLUT_ÆGTF.SIDSTE.CAJOUR;          
+    EVS.EVSSÆG_SID_CSUPPL = BE317.EVS_SLUT_ÆGTF.SIDSTE.CSUPPL;          
+    EVS.EVSSÆG_SID_DHENVN = BE317.EVS_SLUT_ÆGTF.SIDSTE.DHENVN;          
+    EVS.EVSSÆG_SID_FEJLNR = BE317.EVS_SLUT_ÆGTF.SIDSTE.FEJLNR;          
+    EVS.EVSSÆG_SID_CÆGTOPR = BE317.EVS_SLUT_ÆGTF.SIDSTE.CÆGTOPR;        
+    EVS.EVSSÆG_SID_CSKPLOMF = BE317.EVS_SLUT_ÆGTF.SIDSTE.CSKPLOMF;      
+    EVS.EVSSÆG_SID_CEJBEVS = BE317.EVS_SLUT_ÆGTF.SIDSTE.CEJBEVS;        
+    EVS.EVSSÆG_SID_CEJDTYPE = BE317.EVS_SLUT_ÆGTF.SIDSTE.CEJDTYPE;      
+    EVS.EVSSÆG_SID_FELT760 = BE317.EVS_SLUT_ÆGTF.SIDSTE.FELT760;        
+    EVS.EVSSÆG_SID_CNEDSL1 = BE317.EVS_SLUT_ÆGTF.SIDSTE.CNEDSL1;        
+    EVS.EVSSÆG_SID_DATO0107 = BE317.EVS_SLUT_ÆGTF.SIDSTE.DATO0107;      
+    EVS.EVSSÆG_SID_DOVTG = BE317.EVS_SLUT_ÆGTF.SIDSTE.DOVTG;            
+    EVS.EVSSÆG_SID_DAFSTAA = BE317.EVS_SLUT_ÆGTF.SIDSTE.DAFSTAA;        
+    EVS.EVSSÆG_SID_DINDFLYT = BE317.EVS_SLUT_ÆGTF.SIDSTE.DINDFLYT;      
+    EVS.EVSSÆG_SID_DFRAFLYT = BE317.EVS_SLUT_ÆGTF.SIDSTE.DFRAFLYT;      
+    EVS.EVSSÆG_SID_CINDFLYT = BE317.EVS_SLUT_ÆGTF.SIDSTE.CINDFLYT;      
+    EVS.EVSSÆG_SID_GPCTEJER = BE317.EVS_SLUT_ÆGTF.SIDSTE.GPCTEJER;      
+    EVS.EVSSÆG_SID_GPCTEJER_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.GPCTEJER_SW;
+    EVS.EVSSÆG_SID_FDAGUDLE = BE317.EVS_SLUT_ÆGTF.SIDSTE.FDAGUDLE;      
+    EVS.EVSSÆG_SID_GPCTUDLE = BE317.EVS_SLUT_ÆGTF.SIDSTE.GPCTUDLE;      
+    EVS.EVSSÆG_SID_FUDL100 = BE317.EVS_SLUT_ÆGTF.SIDSTE.FUDL100;        
+    EVS.EVSSÆG_SID_FDAGERHV = BE317.EVS_SLUT_ÆGTF.SIDSTE.FDAGERHV;      
+    EVS.EVSSÆG_SID_GPCTERHV = BE317.EVS_SLUT_ÆGTF.SIDSTE.GPCTERHV;      
+    EVS.EVSSÆG_SID_FERHVFLER = BE317.EVS_SLUT_ÆGTF.SIDSTE.FERHVFLER;    
+    EVS.EVSSÆG_SID_CBERGROP = BE317.EVS_SLUT_ÆGTF.SIDSTE.CBERGROP;      
+  /*EVS.EVSSÆG_SID_CBERGRGLOP = BE317.EVS_SLUT_ÆGTF.SIDSTE.CBERGRGLOP*/ 
+    EVS.EVSSÆG_SID_BBERGRL = BE317.EVS_SLUT_ÆGTF.SIDSTE.BBERGRL;        
+    EVS.EVSSÆG_SID_BBERGRL_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BBERGRL_SW;  
+    EVS.EVSSÆG_SID_BBER2FAM = BE317.EVS_SLUT_ÆGTF.SIDSTE.BBER2FAM;      
+    EVS.EVSSÆG_SID_BBER2FAM_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BBER2FAM_SW;
+    EVS.EVSSÆG_SID_BBERGRL_AKT = BE317.EVS_SLUT_ÆGTF.SIDSTE.BBERGRL_AKT;
+    EVS.EVSSÆG_SID_BBERGRL_AKT_SW =                                     
+    BE317.EVS_SLUT_ÆGTF.SIDSTE.BBERGRL_AKT_SW;                          
+    EVS.EVSSÆG_SID_BBER2FAM_AKT =                                       
+    BE317.EVS_SLUT_ÆGTF.SIDSTE.BBER2FAM_AKT;                            
+    EVS.EVSSÆG_SID_BBER2FAM_AKT_SW =                                    
+    BE317.EVS_SLUT_ÆGTF.SIDSTE.BBER2FAM_AKT_SW;                         
+    EVS.EVSSÆG_SID_VURMARK_AKT        =                                 
+    BE317.EVS_SLUT_ÆGTF.SIDSTE.VURMARK_AKT_PER    ;                     
+    EVS.EVSSÆG_SID_VURMARK            =                                 
+    EVS.EVSSÆG_SID_BPROM1 = BE317.EVS_SLUT_ÆGTF.SIDSTE.BPROM1;          
+    EVS.EVSSÆG_SID_BPENSNED = BE317.EVS_SLUT_ÆGTF.SIDSTE.BPENSNED;      
+    EVS.EVSSÆG_SID_BPENSNÆ = BE317.EVS_SLUT_ÆGTF.SIDSTE.BPENSNÆ;        
+    EVS.EVSSÆG_SID_BSUM1 = BE317.EVS_SLUT_ÆGTF.SIDSTE.BSUM1;            
+    EVS.EVSSÆG_SID_BSUM1_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BSUM1_SW;      
+    EVS.EVSSÆG_SID_BSUM3 = BE317.EVS_SLUT_ÆGTF.SIDSTE.BSUM3;            
+    EVS.EVSSÆG_SID_BSUM3_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BSUM3_SW;      
+    EVS.EVSSÆG_SID_BNETTO = BE317.EVS_SLUT_ÆGTF.SIDSTE.BNETTO;          
+    EVS.EVSSÆG_SID_BNETTO_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BNETTO_SW;    
+    EVS.EVSSÆG_SID_BEJERAN = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJERAN;        
+    EVS.EVSSÆG_SID_BEJERAN_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJERAN_SW;  
+    EVS.EVSSÆG_SID_BEVSMAN = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEVSMAN;        
+    EVS.EVSSÆG_SID_BEVSMAN_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEVSMAN_SW;  
+    EVS.EVSSÆG_SID_BMANNEDSL = BE317.EVS_SLUT_ÆGTF.SIDSTE.BMANNEDSL;    
+    EVS.EVSSÆG_SID_CENKE = BE317.EVS_SLUT_ÆGTF.SIDSTE.CENKE;            
+    EVS.EVSSÆG_SID_CENKEBOH = BE317.EVS_SLUT_ÆGTF.SIDSTE.CENKEBOH;      
+    EVS.EVSSÆG_SID_BOBEHAKOD = BE317.EVS_SLUT_ÆGTF.SIDSTE.BOBEHAKOD;    
+    EVS.EVSSÆG_SID_CIVILSTAND = BE317.EVS_SLUT_ÆGTF.SIDSTE.CIVILSTAND;  
+    EVS.EVSSÆG_SID_CSLET = BE317.EVS_SLUT_ÆGTF.SIDSTE.CSLET;            
+    EVS.EVSSÆG_SID_BEJBOL1 = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJBOL1;        
+    EVS.EVSSÆG_SID_BEJBOL1_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJBOL1_SW;  
+    EVS.EVSSÆG_SID_BEJBOL2 = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJBOL2;        
+    EVS.EVSSÆG_SID_BEJBOL2_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BEJBOL2_SW;  
+    EVS.EVSSÆG_SID_CANVEBOL = BE317.EVS_SLUT_ÆGTF.SIDSTE.CANVEBOL;      
+    EVS.EVSSÆG_SID_CPTYPSLUT = BE317.EVS_SLUT_ÆGTF.SIDSTE.CPTYPSLUT;    
+    EVS.EVSSÆG_SID_FELT759 = BE317.EVS_SLUT_ÆGTF.SIDSTE.FELT759;        
+    EVS.EVSSÆG_SID_CEKSEMP = BE317.EVS_SLUT_ÆGTF.SIDSTE.CEKSEMP;        
+    EVS.EVSSÆG_SID_CFRÅR = BE317.EVS_SLUT_ÆGTF.SIDSTE.CFRÅR;            
+    EVS.EVSSÆG_SID_DRGNÅRFRA = BE317.EVS_SLUT_ÆGTF.SIDSTE.DRGNÅRFRA;    
+    EVS.EVSSÆG_SID_DRGNÅRTIL = BE317.EVS_SLUT_ÆGTF.SIDSTE.DRGNÅRTIL;    
+    EVS.EVSSÆG_SID_COMPLA = BE317.EVS_SLUT_ÆGTF.SIDSTE.COMPLA;          
+    EVS.EVSSÆG_SID_DOMPLACPR = BE317.EVS_SLUT_ÆGTF.SIDSTE.DOMPLACPR;    
+    EVS.EVSSÆG_SID_BUDLSKC = BE317.EVS_SLUT_ÆGTF.SIDSTE.BUDLSKC;        
+    EVS.EVSSÆG_SID_BUDLSKC_SW = BE317.EVS_SLUT_ÆGTF.SIDSTE.BUDLSKC_SW;  
+    EVS.EVSFEJ_DCPRN = BE317.EVS_FORSK_EJER.DCPRN;                      
+    EVS.EVSFEJ_EKOMNR = BE317.EVS_FORSK_EJER.EKOMNR;                    
+    EVS.EVSFEJ_EEJDNR = BE317.EVS_FORSK_EJER.EEJDNR;                    
+    EVS.EVSFEJ_EENHEDLBNR = BE317.EVS_FORSK_EJER.EENHEDLBNR;            
+    EVS.EVSFEJ_CFRATYPE = BE317.EVS_FORSK_EJER.CFRATYPE;                
+    EVS.EVSFEJ_DSORTDAT1 = BE317.EVS_FORSK_EJER.DSORTDAT1;              
+    EVS.EVSFEJ_DSORTDAT2 = BE317.EVS_FORSK_EJER.DSORTDAT2;              
+    EVS.EVSFEJ_ELBNR = BE317.EVS_FORSK_EJER.EPLBNR;                     
+    EVS.EVSFEJ_DFRAGLD = BE317.EVS_FORSK_EJER.DFRAGLD;                  
+    EVS.EVSFEJ_DTILGLD = BE317.EVS_FORSK_EJER.DTILGLD;                  
+    EVS.EVSFEJ_CEVSBENY = BE317.EVS_FORSK_EJER.CEVSBENY;                
+    EVS.EVSFEJ_CEJBEVS = BE317.EVS_FORSK_EJER.CEJBEVS;                  
+    EVS.EVSFEJ_COPR_CEJBEVS = BE317.EVS_FORSK_EJER.COPR_CEJBEVS;        
+    EVS.EVSFEJ_CEJDTYPE = BE317.EVS_FORSK_EJER.CEJDTYPE;                
+    EVS.EVSFEJ_CFRED = BE317.EVS_FORSK_EJER.CFRED;                      
+    EVS.EVSFEJ_CNEDSL1 = BE317.EVS_FORSK_EJER.CNEDSL1;                  
+    EVS.EVSFEJ_DATO0107 = BE317.EVS_FORSK_EJER.DATO0107;                
+    EVS.EVSFEJ_DOVTG = BE317.EVS_FORSK_EJER.DOVTG;                      
+    EVS.EVSFEJ_COPR_DOVTG = BE317.EVS_FORSK_EJER.COPR_DOVTG;            
+    EVS.EVSFEJ_DOVTG_GL = BE317.EVS_FORSK_EJER.DOVTG_GL;                
+    EVS.EVSFEJ_DAFSTAA = BE317.EVS_FORSK_EJER.DAFSTAA;                  
+    EVS.EVSFEJ_DINDFLYT = BE317.EVS_FORSK_EJER.DINDFLYT;                
+    EVS.EVSFEJ_DFRAFLYT = BE317.EVS_FORSK_EJER.DFRAFLYT;                
+    EVS.EVSFEJ_FDAGEJ = BE317.EVS_FORSK_EJER.FDAGEJ;                    
+    EVS.EVSFEJ_GPCTEJER = BE317.EVS_FORSK_EJER.GPCTEJER;                
+    EVS.EVSFEJ_FDAGUDLE = BE317.EVS_FORSK_EJER.FDAGUDLE;                
+    EVS.EVSFEJ_GPCTUDLE = BE317.EVS_FORSK_EJER.GPCTUDLE;                
+    EVS.EVSFEJ_FDAGERHV = BE317.EVS_FORSK_EJER.FDAGERHV;                
+    EVS.EVSFEJ_GPCTERHV = BE317.EVS_FORSK_EJER.GPCTERHV;                
+    EVS.EVSFEJ_BPROM1 = BE317.EVS_FORSK_EJER.BPROM1;                    
+    EVS.EVSFEJ_B100 = BE317.EVS_FORSK_EJER.B100;                        
+    EVS.EVSFEJ_B100_SW = BE317.EVS_FORSK_EJER.B100_SW;                  
+    EVS.EVSFEJ_BBRUTTO = BE317.EVS_FORSK_EJER.BBRUTTO;                  
+    EVS.EVSFEJ_BBRUTTO_SW = BE317.EVS_FORSK_EJER.BBRUTTO_SW;            
+    EVS.EVSFEJ_BEJERAN = BE317.EVS_FORSK_EJER.BEJERAN;                  
+    EVS.EVSFEJ_BEJERAN_SW = BE317.EVS_FORSK_EJER.BEJERAN_SW;            
+    EVS.EVSFEJ_BNYMAN = BE317.EVS_FORSK_EJER.BNYMAN;                    
+    EVS.EVSFEJ_BNYMAN_SW = BE317.EVS_FORSK_EJER.BNYMAN_SW;              
+    EVS.EVSFEJ_BFORSKAT = BE317.EVS_FORSK_EJER.BFORSKAT;                
+    EVS.EVSFEJ_BFORSKAT_SW = BE317.EVS_FORSK_EJER.BFORSKAT_SW;          
+    EVS.EVSFEJ_FDAGIALT = BE317.EVS_FORSK_EJER.FDAGIALT;                
+    EVS.EVSFEJ_CEVSSUM = BE317.EVS_FORSK_EJER.CEVSSUM;                  
+    EVS.EVSFEJ_CENKE = BE317.EVS_FORSK_EJER.CENKE;                      
+    EVS.EVSFEJ_EJDBELIG = BE317.EVS_FORSK_EJER.EJDBELIG;                
+    EVS.EVSFEJ_VEJK_EJD = BE317.EVS_FORSK_EJER.VEJK_EJD;                
+    EVS.EVSFEJ_HUSNR_EJD = BE317.EVS_FORSK_EJER.HUSNR_EJD;              
+    EVS.EVSFEJ_ETAGE_EJD = BE317.EVS_FORSK_EJER.ETAGE_EJD;              
+    EVS.EVSFEJ_SDØR_EJD  = BE317.EVS_FORSK_EJER.SDØR_EJD;               
+    EVS.EVSFEJ_ENHEDBELIG = BE317.EVS_FORSK_EJER.ENHEDBELIG;            
+    EVS.EVSFEJ_VEJK_ENHED = BE317.EVS_FORSK_EJER.VEJK_ENHED;            
+    EVS.EVSFEJ_HUSNR_ENHED = BE317.EVS_FORSK_EJER.HUSNR_ENHED;          
+    EVS.EVSFEJ_ETAGE_ENHED = BE317.EVS_FORSK_EJER.ETAGE_ENHED;          
+    EVS.EVSFEJ_SDØR_ENHED = BE317.EVS_FORSK_EJER.SDØR_ENHED;            
+    EVS.EVSFEJ_CLANDEKODE = BE317.EVS_FORSK_EJER.CLANDEKODE;            
+    EVS.EVSFEJ_BBERGRL = BE317.EVS_FORSK_EJER.BBERGRL;                  
+    EVS.EVSFEJ_BBER2FAM = BE317.EVS_FORSK_EJER.BBER2FAM;                
+    EVS.EVSFEJ_CEKSEMP = BE317.EVS_FORSK_EJER.CEKSEMP;                  
+    EVS.EVSFEJ_COPR_EKSEMP = BE317.EVS_FORSK_EJER.COPR_EKSEMP;          
+    EVS.EVSFEJ_BUDLSKC = BE317.EVS_FORSK_EJER.BUDLSKC;                  
+    EVS.EVSFEJ_CRTEKORNS = BE317.EVS_FORSK_EJER.CRTEKORNS;              
+    EVS.EVSFEJ_COPR_CRTEKORNS = BE317.EVS_FORSK_EJER.COPR_CRTEKORNS;    
+                                                                        
+    EVS.EVSFEJ_EJET20240101         = BE317.EVS_FORSK_EJER.EJET20240101;
+    EVS.EVSFEJ_EVSEFTERRABAT        = BE317.EVS_FORSK_EJER.BEVSEFTRAB;  
+    DB2_SW.EVSFEJ_EVSEFTERRABAT_SW  =                                   
+                                  BE317.EVS_FORSK_EJER.BEVSEFTRAB_SW;   
+    EVS.EVSFEJ_OVERFØRT_ÆGTEF    = BE317.EVS_FORSK_EJER.OVERFØRT_ÆGTEF; 
+    EVS.EVSFEJ_RABATBER_DFRAGLD     = BE317.EVS_FORSK_EJER.RBDFRAGLD;   
+    EVS.EVSFEJ_RABATBER_DTILGLD     = BE317.EVS_FORSK_EJER.RBDTILGLD;   
+    EVS.EVSFEJ_RABATBER_EJERANDEL   = BE317.EVS_FORSK_EJER.RBEJERAND;   
+    DB2_SW.EVSFEJ_RABATBER_EJERANDEL_SW =                               
+                                  BE317.EVS_FORSK_EJER.RBEJERAND_SW;    
+    EVS.EVSFEJ_RABAT_DFRAGLD        = BE317.EVS_FORSK_EJER.BSRDFRAGLD;  
+    EVS.EVSFEJ_RABAT_DTILGLD        = BE317.EVS_FORSK_EJER.BSRDTILGLD;  
+    EVS.EVSFEJ_SIMPELBASISRABAT     = BE317.EVS_FORSK_EJER.BSIMPRABAT;  
+    EVS.EVSFEJ_SIMPELBASISRABAT_NEG =                                   
+                                  BE317.EVS_FORSK_EJER.BSIMPRABAT_NEG;  
+    EVS.EVSFEJ_BASISRABAT_REGUL      = BE317.EVS_FORSK_EJER.BBASISREGUL;
+    EVS.EVSFEJ_COPR_BASISRABAT_REGUL =                                  
+                                  BE317.EVS_FORSK_EJER.COPR_BBASISREGUL;
+    EVS.EVSFEJ_BASISRABAT          = BE317.EVS_FORSK_EJER.BBASISRABAT;  
+    EVS.EVSFEJ_EJERANDEL           = BE317.EVS_FORSK_EJER.EJERANDEL;    
+    DB2_SW.EVSFEJ_EJERANDEL_SW     = BE317.EVS_FORSK_EJER.EJERANDEL_SW; 
+                                                                        
+    EVS.EVSFÆG_DCPRN = BE317.EVS_FORSK_ÆGTF.DCPRN;                      
+    EVS.EVSFÆG_EKOMNR = BE317.EVS_FORSK_ÆGTF.EKOMNR;                    
+    EVS.EVSFÆG_EEJDNR = BE317.EVS_FORSK_ÆGTF.EEJDNR;                    
+    EVS.EVSFÆG_EENHEDLBNR = BE317.EVS_FORSK_ÆGTF.EENHEDLBNR;            
+    EVS.EVSFÆG_CFRATYPE = BE317.EVS_FORSK_ÆGTF.CFRATYPE;                
+    EVS.EVSFÆG_DSORTDAT1 = BE317.EVS_FORSK_ÆGTF.DSORTDAT1;              
+    EVS.EVSFÆG_DSORTDAT2 = BE317.EVS_FORSK_ÆGTF.DSORTDAT2;              
+    EVS.EVSFÆG_ELBNR = BE317.EVS_FORSK_ÆGTF.EPLBNR;                     
+    EVS.EVSFÆG_DFRAGLD = BE317.EVS_FORSK_ÆGTF.DFRAGLD;                  
+    EVS.EVSFÆG_DTILGLD = BE317.EVS_FORSK_ÆGTF.DTILGLD;                  
+    EVS.EVSFÆG_CEVSBENY = BE317.EVS_FORSK_ÆGTF.CEVSBENY;                
+    EVS.EVSFÆG_CEJBEVS = BE317.EVS_FORSK_ÆGTF.CEJBEVS;                  
+    EVS.EVSFÆG_COPR_CEJBEVS = BE317.EVS_FORSK_ÆGTF.COPR_CEJBEVS;        
+    EVS.EVSFÆG_CEJDTYPE = BE317.EVS_FORSK_ÆGTF.CEJDTYPE;                
+    EVS.EVSFÆG_CFRED = BE317.EVS_FORSK_ÆGTF.CFRED;                      
+    EVS.EVSFÆG_CNEDSL1 = BE317.EVS_FORSK_ÆGTF.CNEDSL1;                  
+    EVS.EVSFÆG_DATO0107 = BE317.EVS_FORSK_ÆGTF.DATO0107;                
+    EVS.EVSFÆG_DOVTG = BE317.EVS_FORSK_ÆGTF.DOVTG;                      
+    EVS.EVSFÆG_COPR_DOVTG = BE317.EVS_FORSK_ÆGTF.COPR_DOVTG;            
+    EVS.EVSFÆG_DOVTG_GL = BE317.EVS_FORSK_ÆGTF.DOVTG_GL;                
+    EVS.EVSFÆG_DAFSTAA = BE317.EVS_FORSK_ÆGTF.DAFSTAA;                  
+    EVS.EVSFÆG_DINDFLYT = BE317.EVS_FORSK_ÆGTF.DINDFLYT;                
+    EVS.EVSFÆG_DFRAFLYT = BE317.EVS_FORSK_ÆGTF.DFRAFLYT;                
+    EVS.EVSFÆG_FDAGEJ = BE317.EVS_FORSK_ÆGTF.FDAGEJ;                    
+    EVS.EVSFÆG_GPCTEJER = BE317.EVS_FORSK_ÆGTF.GPCTEJER;                
+    EVS.EVSFÆG_FDAGUDLE = BE317.EVS_FORSK_ÆGTF.FDAGUDLE;                
+    EVS.EVSFÆG_GPCTUDLE = BE317.EVS_FORSK_ÆGTF.GPCTUDLE;                
+    EVS.EVSFÆG_FDAGERHV = BE317.EVS_FORSK_ÆGTF.FDAGERHV;                
+    EVS.EVSFÆG_GPCTERHV = BE317.EVS_FORSK_ÆGTF.GPCTERHV;                
+    EVS.EVSFÆG_BPROM1 = BE317.EVS_FORSK_ÆGTF.BPROM1;                    
+    EVS.EVSFÆG_B100 = BE317.EVS_FORSK_ÆGTF.B100;                        
+    EVS.EVSFÆG_B100_SW = BE317.EVS_FORSK_ÆGTF.B100_SW;                  
+    EVS.EVSFÆG_BBRUTTO = BE317.EVS_FORSK_ÆGTF.BBRUTTO;                  
+    EVS.EVSFÆG_BBRUTTO_SW = BE317.EVS_FORSK_ÆGTF.BBRUTTO_SW;            
+    EVS.EVSFÆG_BEJERAN = BE317.EVS_FORSK_ÆGTF.BEJERAN;                  
+    EVS.EVSFÆG_BEJERAN_SW = BE317.EVS_FORSK_ÆGTF.BEJERAN_SW;            
+    EVS.EVSFÆG_BNYMAN = BE317.EVS_FORSK_ÆGTF.BNYMAN;                    
+    EVS.EVSFÆG_BNYMAN_SW = BE317.EVS_FORSK_ÆGTF.BNYMAN_SW;              
+    EVS.EVSFÆG_BFORSKAT = BE317.EVS_FORSK_ÆGTF.BFORSKAT;                
+    EVS.EVSFÆG_BFORSKAT_SW = BE317.EVS_FORSK_ÆGTF.BFORSKAT_SW;          
+    EVS.EVSFÆG_FDAGIALT = BE317.EVS_FORSK_ÆGTF.FDAGIALT;                
+    EVS.EVSFÆG_CEVSSUM = BE317.EVS_FORSK_ÆGTF.CEVSSUM;                  
+    EVS.EVSFÆG_CENKE = BE317.EVS_FORSK_ÆGTF.CENKE;                      
+    EVS.EVSFÆG_EJDBELIG = BE317.EVS_FORSK_ÆGTF.EJDBELIG;                
+    EVS.EVSFÆG_VEJK_EJD = BE317.EVS_FORSK_ÆGTF.VEJK_EJD;                
+    EVS.EVSFÆG_HUSNR_EJD = BE317.EVS_FORSK_ÆGTF.HUSNR_EJD;              
+    EVS.EVSFÆG_ETAGE_EJD = BE317.EVS_FORSK_ÆGTF.ETAGE_EJD;              
+    EVS.EVSFÆG_SDØR_EJD = BE317.EVS_FORSK_ÆGTF.SDØR_EJD;                
+    EVS.EVSFÆG_ENHEDBELIG = BE317.EVS_FORSK_ÆGTF.ENHEDBELIG;            
+    EVS.EVSFÆG_VEJK_ENHED = BE317.EVS_FORSK_ÆGTF.VEJK_ENHED;            
+    EVS.EVSFÆG_HUSNR_ENHED = BE317.EVS_FORSK_ÆGTF.HUSNR_ENHED;          
+    EVS.EVSFÆG_ETAGE_ENHED = BE317.EVS_FORSK_ÆGTF.ETAGE_ENHED;          
+    EVS.EVSFÆG_SDØR_ENHED = BE317.EVS_FORSK_ÆGTF.SDØR_ENHED;            
+    EVS.EVSFÆG_CLANDEKODE = BE317.EVS_FORSK_ÆGTF.CLANDEKODE;            
+    EVS.EVSFÆG_BBERGRL = BE317.EVS_FORSK_ÆGTF.BBERGRL;                  
+    EVS.EVSFÆG_BBER2FAM = BE317.EVS_FORSK_ÆGTF.BBER2FAM;                
+    EVS.EVSFÆG_CEKSEMP = BE317.EVS_FORSK_ÆGTF.CEKSEMP;                  
+    EVS.EVSFÆG_COPR_EKSEMP = BE317.EVS_FORSK_ÆGTF.COPR_EKSEMP;          
+    EVS.EVSFÆG_BUDLSKC = BE317.EVS_FORSK_ÆGTF.BUDLSKC;                  
+    EVS.EVSFÆG_CRTEKORNS = BE317.EVS_FORSK_ÆGTF.CRTEKORNS;              
+    EVS.EVSFÆG_COPR_CRTEKORNS = BE317.EVS_FORSK_ÆGTF.COPR_CRTEKORNS;    
+                                                                        
+    EVS.EVSFÆG_EJET20240101         = BE317.EVS_FORSK_ÆGTF.EJET20240101;
+    EVS.EVSFÆG_EVSEFTERRABAT        = BE317.EVS_FORSK_ÆGTF.BEVSEFTRAB;  
+    DB2_SW.EVSFÆG_EVSEFTERRABAT_SW  =                                   
+                                  BE317.EVS_FORSK_ÆGTF.BEVSEFTRAB_SW;   
+    EVS.EVSFÆG_OVERFØRT_ÆGTEF    = BE317.EVS_FORSK_ÆGTF.OVERFØRT_ÆGTEF; 
+    EVS.EVSFÆG_RABATBER_DFRAGLD     = BE317.EVS_FORSK_ÆGTF.RBDFRAGLD;   
+    EVS.EVSFÆG_RABATBER_DTILGLD     = BE317.EVS_FORSK_ÆGTF.RBDTILGLD;   
+    EVS.EVSFÆG_RABATBER_EJERANDEL   = BE317.EVS_FORSK_ÆGTF.RBEJERAND;   
+    DB2_SW.EVSFÆG_RABATBER_EJERANDEL_SW =                               
+                                  BE317.EVS_FORSK_ÆGTF.RBEJERAND_SW;    
+    EVS.EVSFÆG_RABAT_DFRAGLD        = BE317.EVS_FORSK_ÆGTF.BSRDFRAGLD;  
+    EVS.EVSFÆG_RABAT_DTILGLD        = BE317.EVS_FORSK_ÆGTF.BSRDTILGLD;  
+    EVS.EVSFÆG_SIMPELBASISRABAT     = BE317.EVS_FORSK_ÆGTF.BSIMPRABAT;  
+    EVS.EVSFÆG_SIMPELBASISRABAT_NEG =                                   
+                                  BE317.EVS_FORSK_ÆGTF.BSIMPRABAT_NEG;  
+    EVS.EVSFÆG_BASISRABAT_REGUL      = BE317.EVS_FORSK_ÆGTF.BBASISREGUL;
+    EVS.EVSFÆG_COPR_BASISRABAT_REGUL =                                  
+                                  BE317.EVS_FORSK_ÆGTF.COPR_BBASISREGUL;
+    EVS.EVSFÆG_BASISRABAT          = BE317.EVS_FORSK_ÆGTF.BBASISRABAT;  
+    EVS.EVSFÆG_EJERANDEL           = BE317.EVS_FORSK_ÆGTF.EJERANDEL;    
+    DB2_SW.EVSFÆG_EJERANDEL_SW     = BE317.EVS_FORSK_ÆGTF.EJERANDEL_SW; 
+                                                                        
+    //EVS.BEVSMANFSI                 = ''; US#1728167                   
+    //EVS.BEVSMANFSI_SW              = '';                              
+    //EVS.COPR_BEVSMANFSI            = '';                              
+                                                                        
+    /* US1641246 ÆA53 */                /* US#1728167 */                
+   //EVS.RABATEJERANDEL     = BE317.EVS_FORSK_EJER.RABATEJERANDEL;      
+   //EVS.COPR_RABATEJERANDEL= BE317.EVS_FORSK_EJER.COPR_RABATEJERANDEL; 
+                                                                        
+    /* US#1728167 */                                                    
+                                                                        
+    EVS.EVSSEJ_FST_BEVSMANFSI =                                         
+                   BE317.EVS_SLUT_EJER.FØRSTE.BEVSMANFSI;               
+    EVS.EVSSEJ_SID_BEVSMANFSI =                                         
+                   BE317.EVS_SLUT_EJER.SIDSTE.BEVSMANFSI;               
+    EVS.EVSSÆG_FST_BEVSMANFSI =                                         
+                   BE317.EVS_SLUT_ÆGTF.FØRSTE.BEVSMANFSI;               
+    EVS.EVSSÆG_SID_BEVSMANFSI =                                         
+                   BE317.EVS_SLUT_ÆGTF.SIDSTE.BEVSMANFSI;               
+                                                                        
+    EVS.EVSSEJ_FST_BEVSMANFSI_SW =                                      
+                   BE317.EVS_SLUT_EJER.FØRSTE.BEVSMANFSI_SW;            
+    EVS.EVSSEJ_SID_BEVSMANFSI_SW =                                      
+                   BE317.EVS_SLUT_EJER.SIDSTE.BEVSMANFSI_SW;            
+    EVS.EVSSÆG_FST_BEVSMANFSI_SW =                                      
+                   BE317.EVS_SLUT_ÆGTF.FØRSTE.BEVSMANFSI_SW;            
+    EVS.EVSSÆG_SID_BEVSMANFSI_SW =                                      
+                   BE317.EVS_SLUT_ÆGTF.SIDSTE.BEVSMANFSI_SW;            
+                                                                        
+    EVS.EVSFEJ_COPR_RABATEJERANDEL =                                    
+                    BE317.EVS_FORSK_EJER.COPR_RBEJERAND;                
+    EVS.EVSFÆG_COPR_RABATEJERANDEL =                                    
+                    BE317.EVS_FORSK_ÆGTF.COPR_RBEJERAND;                
+                                                                        
+    EVS.EVSFEJ_RES_FAKTISKRABAT    =                                    
+                   BE317.EVS_FORSK_EJER.RES_FAKTISKRABAT;               
+    EVS.EVSFEJ_RES_FAKTISKRABAT_SW  =                                   
+                   BE317.EVS_FORSK_EJER.RES_FAKTISKRABAT_SW;            
+    EVS.EVSFÆG_RES_FAKTISKRABAT    =                                    
+                   BE317.EVS_FORSK_ÆGTF.RES_FAKTISKRABAT;               
+    EVS.EVSFÆG_RES_FAKTISKRABAT_SW  =                                   
+                   BE317.EVS_FORSK_ÆGTF.RES_FAKTISKRABAT_SW;            
+                                                                        
+                                                                        
+ END FLYT_FELTER_BE317;                                                 
+ /*********************************************************************/
+ /* INSERT række på DB2-tabel til EVS                          RUTINE */
+ /*********************************************************************/
+ INSERT_EVSOPL: PROC;                                                   
+         /* US#1728167 - nye felter bagerst  */                         
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BE67000T                                        
+            ( TIL_EVS_AAR                                               
+             ,AFVIKLINGS_ID                                             
+             ,DATA_ID                                                   
+             ,KØRSELS_ID                                                
+             ,DCPRN                                                     
+             ,EKOMNR                                                    
+             ,EEJDNR                                                    
+             ,EENHEDLBNR                                                
+             ,PROGRAMNAVN                                               
+             ,DB2FUNKTION                                               
+             ,OPRET_TS                                                  
+             ,CITYP                                                     
+             ,CUDLAND                                                   
+             ,CSBSK                                                     
+             ,EVSSEJ_DCPRN                                              
+             ,EVSSEJ_EKOMNR                                             
+             ,EVSSEJ_EEJDNR                                             
+             ,EVSSEJ_EENHEDLBNR                                         
+             ,EVSSEJ_CFRATYPE                                           
+             ,EVSSEJ_DSORTDAT1                                          
+             ,EVSSEJ_DSORTDAT2                                          
+             ,EVSSEJ_EJDBELIG                                           
+             ,EVSSEJ_VEJK_EJD                                           
+             ,EVSSEJ_HUSNR_EJD                                          
+             ,EVSSEJ_ETAGE_EJD                                          
+             ,EVSSEJ_SDØR_EJD                                           
+             ,EVSSEJ_ENHEDBELIG                                         
+             ,EVSSEJ_VEJK_ENHED                                         
+             ,EVSSEJ_HUSNR_ENHED                                        
+             ,EVSSEJ_ETAGE_ENHED                                        
+             ,EVSSEJ_SDØR_ENHED                                         
+             ,EVSSEJ_CLANDEKODE                                         
+             ,EVSSEJ_CBENYT                                             
+             ,EVSSEJ_CEJBOLTYP1                                         
+             ,EVSSEJ_CEJBOLTYP2                                         
+             ,EVSSEJ_FST_ELBNR                                          
+             ,EVSSEJ_FST_EGENNR                                         
+             ,EVSSEJ_FST_DFRAGLD                                        
+             ,EVSSEJ_FST_DTILGLD                                        
+             ,EVSSEJ_FST_CDATAFRA                                       
+             ,EVSSEJ_FST_CAJOUR                                         
+             ,EVSSEJ_FST_CSUPPL                                         
+             ,EVSSEJ_FST_DHENVN                                         
+             ,EVSSEJ_FST_FEJLNR                                         
+             ,EVSSEJ_FST_CÆGTOPR                                        
+             ,EVSSEJ_FST_CSKPLOMF                                       
+             ,EVSSEJ_FST_CEJBEVS                                        
+             ,EVSSEJ_FST_CEJDTYPE                                       
+             ,EVSSEJ_FST_FELT760                                        
+             ,EVSSEJ_FST_CNEDSL1                                        
+             ,EVSSEJ_FST_DATO0107                                       
+             ,EVSSEJ_FST_DOVTG                                          
+             ,EVSSEJ_FST_DAFSTAA                                        
+             ,EVSSEJ_FST_DINDFLYT                                       
+             ,EVSSEJ_FST_DFRAFLYT                                       
+             ,EVSSEJ_FST_CINDFLYT                                       
+             ,EVSSEJ_FST_GPCTEJER                                       
+             ,EVSSEJ_FST_GPCTEJER_SW                                    
+             ,EVSSEJ_FST_FDAGUDLE                                       
+             ,EVSSEJ_FST_GPCTUDLE                                       
+             ,EVSSEJ_FST_FUDL100                                        
+             ,EVSSEJ_FST_FDAGERHV                                       
+             ,EVSSEJ_FST_GPCTERHV                                       
+             ,EVSSEJ_FST_FERHVFLER                                      
+             ,EVSSEJ_FST_CBERGROP                                       
+             ,EVSSEJ_FST_BBERGRL                                        
+             ,EVSSEJ_FST_BBERGRL_SW                                     
+             ,EVSSEJ_FST_BBER2FAM                                       
+             ,EVSSEJ_FST_BBER2FAM_SW                                    
+             ,EVSSEJ_FST_BBERGRL_AKT                                    
+             ,EVSSEJ_FST_BBERGRL_AKT_SW                                 
+             ,EVSSEJ_FST_BBER2FAM_AKT                                   
+             ,EVSSEJ_FST_BBER2FAM_AKT_SW                                
+             ,EVSSEJ_FST_VURMARK                                        
+             ,EVSSEJ_FST_VURMARK_AKT                                    
+             ,EVSSEJ_FST_BPROM1                                         
+             ,EVSSEJ_FST_BPENSNED                                       
+             ,EVSSEJ_FST_BPENSNÆ                                        
+             ,EVSSEJ_FST_BSUM1                                          
+             ,EVSSEJ_FST_BSUM1_SW                                       
+             ,EVSSEJ_FST_BSUM3                                          
+             ,EVSSEJ_FST_BSUM3_SW                                       
+             ,EVSSEJ_FST_BNETTO                                         
+             ,EVSSEJ_FST_BNETTO_SW                                      
+             ,EVSSEJ_FST_BEJERAN                                        
+             ,EVSSEJ_FST_BEJERAN_SW                                     
+             ,EVSSEJ_FST_BEVSMAN                                        
+             ,EVSSEJ_FST_BEVSMAN_SW                                     
+             ,EVSSEJ_FST_BMANNEDSL                                      
+             ,EVSSEJ_FST_CENKE                                          
+             ,EVSSEJ_FST_CENKEBOH                                       
+             ,EVSSEJ_FST_BOBEHAKOD                                      
+             ,EVSSEJ_FST_CIVILSTAND                                     
+             ,EVSSEJ_FST_CSLET                                          
+             ,EVSSEJ_FST_BEJBOL1                                        
+             ,EVSSEJ_FST_BEJBOL1_SW                                     
+             ,EVSSEJ_FST_BEJBOL2                                        
+             ,EVSSEJ_FST_BEJBOL2_SW                                     
+             ,EVSSEJ_FST_CANVEBOL                                       
+             ,EVSSEJ_FST_CPTYPSLUT                                      
+             ,EVSSEJ_FST_FELT759                                        
+             ,EVSSEJ_FST_CEKSEMP                                        
+             ,EVSSEJ_FST_CFRÅR                                          
+             ,EVSSEJ_FST_DRGNÅRFRA                                      
+             ,EVSSEJ_FST_DRGNÅRTIL                                      
+             ,EVSSEJ_FST_COMPLA                                         
+             ,EVSSEJ_FST_DOMPLACPR                                      
+             ,EVSSEJ_FST_BUDLSKC                                        
+             ,EVSSEJ_FST_BUDLSKC_SW                                     
+             ,EVSSEJ_SID_ELBNR                                          
+             ,EVSSEJ_SID_EGENNR                                         
+             ,EVSSEJ_SID_DFRAGLD                                        
+             ,EVSSEJ_SID_DTILGLD                                        
+             ,EVSSEJ_SID_CDATAFRA                                       
+             ,EVSSEJ_SID_CAJOUR                                         
+             ,EVSSEJ_SID_CSUPPL                                         
+             ,EVSSEJ_SID_DHENVN                                         
+             ,EVSSEJ_SID_FEJLNR                                         
+             ,EVSSEJ_SID_CÆGTOPR                                        
+             ,EVSSEJ_SID_CSKPLOMF                                       
+             ,EVSSEJ_SID_CEJBEVS                                        
+             ,EVSSEJ_SID_CEJDTYPE                                       
+             ,EVSSEJ_SID_FELT760                                        
+             ,EVSSEJ_SID_CNEDSL1                                        
+             ,EVSSEJ_SID_DATO0107                                       
+             ,EVSSEJ_SID_DOVTG                                          
+             ,EVSSEJ_SID_DAFSTAA                                        
+             ,EVSSEJ_SID_DINDFLYT                                       
+             ,EVSSEJ_SID_DFRAFLYT                                       
+             ,EVSSEJ_SID_CINDFLYT                                       
+             ,EVSSEJ_SID_GPCTEJER                                       
+             ,EVSSEJ_SID_GPCTEJER_SW                                    
+             ,EVSSEJ_SID_FDAGUDLE                                       
+             ,EVSSEJ_SID_GPCTUDLE                                       
+             ,EVSSEJ_SID_FUDL100                                        
+             ,EVSSEJ_SID_FDAGERHV                                       
+             ,EVSSEJ_SID_GPCTERHV                                       
+             ,EVSSEJ_SID_FERHVFLER                                      
+             ,EVSSEJ_SID_CBERGROP                                       
+             ,EVSSEJ_SID_BBERGRL                                        
+             ,EVSSEJ_SID_BBERGRL_SW                                     
+             ,EVSSEJ_SID_BBER2FAM                                       
+             ,EVSSEJ_SID_BBER2FAM_SW                                    
+             ,EVSSEJ_SID_BBERGRL_AKT                                    
+             ,EVSSEJ_SID_BBERGRL_AKT_SW                                 
+             ,EVSSEJ_SID_BBER2FAM_AKT                                   
+             ,EVSSEJ_SID_BBER2FAM_AKT_SW                                
+             ,EVSSEJ_SID_VURMARK                                        
+             ,EVSSEJ_SID_VURMARK_AKT                                    
+             ,EVSSEJ_SID_BPROM1                                         
+             ,EVSSEJ_SID_BPENSNED                                       
+             ,EVSSEJ_SID_BPENSNÆ                                        
+             ,EVSSEJ_SID_BSUM1                                          
+             ,EVSSEJ_SID_BSUM1_SW                                       
+             ,EVSSEJ_SID_BSUM3                                          
+             ,EVSSEJ_SID_BSUM3_SW                                       
+             ,EVSSEJ_SID_BNETTO                                         
+             ,EVSSEJ_SID_BNETTO_SW                                      
+             ,EVSSEJ_SID_BEJERAN                                        
+             ,EVSSEJ_SID_BEJERAN_SW                                     
+             ,EVSSEJ_SID_BEVSMAN                                        
+             ,EVSSEJ_SID_BEVSMAN_SW                                     
+             ,EVSSEJ_SID_BMANNEDSL                                      
+             ,EVSSEJ_SID_CENKE                                          
+             ,EVSSEJ_SID_CENKEBOH                                       
+             ,EVSSEJ_SID_BOBEHAKOD                                      
+             ,EVSSEJ_SID_CIVILSTAND                                     
+             ,EVSSEJ_SID_CSLET                                          
+             ,EVSSEJ_SID_BEJBOL1                                        
+             ,EVSSEJ_SID_BEJBOL1_SW                                     
+             ,EVSSEJ_SID_BEJBOL2                                        
+             ,EVSSEJ_SID_BEJBOL2_SW                                     
+             ,EVSSEJ_SID_CANVEBOL                                       
+             ,EVSSEJ_SID_CPTYPSLUT                                      
+             ,EVSSEJ_SID_FELT759                                        
+             ,EVSSEJ_SID_CEKSEMP                                        
+             ,EVSSEJ_SID_CFRÅR                                          
+             ,EVSSEJ_SID_DRGNÅRFRA                                      
+             ,EVSSEJ_SID_DRGNÅRTIL                                      
+             ,EVSSEJ_SID_COMPLA                                         
+             ,EVSSEJ_SID_DOMPLACPR                                      
+             ,EVSSEJ_SID_BUDLSKC                                        
+             ,EVSSEJ_SID_BUDLSKC_SW                                     
+             ,EVSSÆG_DCPRN                                              
+             ,EVSSÆG_EKOMNR                                             
+             ,EVSSÆG_EEJDNR                                             
+             ,EVSSÆG_EENHEDLBNR                                         
+             ,EVSSÆG_CFRATYPE                                           
+             ,EVSSÆG_DSORTDAT1                                          
+             ,EVSSÆG_DSORTDAT2                                          
+             ,EVSSÆG_EJDBELIG                                           
+             ,EVSSÆG_VEJK_EJD                                           
+             ,EVSSÆG_HUSNR_EJD                                          
+             ,EVSSÆG_ETAGE_EJD                                          
+             ,EVSSÆG_SDØR_EJD                                           
+             ,EVSSÆG_ENHEDBELIG                                         
+             ,EVSSÆG_VEJK_ENHED                                         
+             ,EVSSÆG_HUSNR_ENHED                                        
+             ,EVSSÆG_ETAGE_ENHED                                        
+             ,EVSSÆG_SDØR_ENHED                                         
+             ,EVSSÆG_CLANDEKODE                                         
+             ,EVSSÆG_CBENYT                                             
+             ,EVSSÆG_CEJBOLTYP1                                         
+             ,EVSSÆG_CEJBOLTYP2                                         
+             ,EVSSÆG_FST_ELBNR                                          
+             ,EVSSÆG_FST_EGENNR                                         
+             ,EVSSÆG_FST_DFRAGLD                                        
+             ,EVSSÆG_FST_DTILGLD                                        
+             ,EVSSÆG_FST_CDATAFRA                                       
+             ,EVSSÆG_FST_CAJOUR                                         
+             ,EVSSÆG_FST_CSUPPL                                         
+             ,EVSSÆG_FST_DHENVN                                         
+             ,EVSSÆG_FST_FEJLNR                                         
+             ,EVSSÆG_FST_CÆGTOPR                                        
+             ,EVSSÆG_FST_CSKPLOMF                                       
+             ,EVSSÆG_FST_CEJBEVS                                        
+             ,EVSSÆG_FST_CEJDTYPE                                       
+             ,EVSSÆG_FST_FELT760                                        
+             ,EVSSÆG_FST_CNEDSL1                                        
+             ,EVSSÆG_FST_DATO0107                                       
+             ,EVSSÆG_FST_DOVTG                                          
+             ,EVSSÆG_FST_DAFSTAA                                        
+             ,EVSSÆG_FST_DINDFLYT                                       
+             ,EVSSÆG_FST_DFRAFLYT                                       
+             ,EVSSÆG_FST_CINDFLYT                                       
+             ,EVSSÆG_FST_GPCTEJER                                       
+             ,EVSSÆG_FST_GPCTEJER_SW                                    
+             ,EVSSÆG_FST_FDAGUDLE                                       
+             ,EVSSÆG_FST_GPCTUDLE                                       
+             ,EVSSÆG_FST_FUDL100                                        
+             ,EVSSÆG_FST_FDAGERHV                                       
+             ,EVSSÆG_FST_GPCTERHV                                       
+             ,EVSSÆG_FST_FERHVFLER                                      
+             ,EVSSÆG_FST_CBERGROP                                       
+             ,EVSSÆG_FST_BBERGRL                                        
+             ,EVSSÆG_FST_BBERGRL_SW                                     
+             ,EVSSÆG_FST_BBER2FAM                                       
+             ,EVSSÆG_FST_BBER2FAM_SW                                    
+             ,EVSSÆG_FST_BBERGRL_AKT                                    
+             ,EVSSÆG_FST_BBERGRL_AKT_SW                                 
+             ,EVSSÆG_FST_BBER2FAM_AKT                                   
+             ,EVSSÆG_FST_BBER2FAM_AKT_SW                                
+             ,EVSSÆG_FST_VURMARK                                        
+             ,EVSSÆG_FST_VURMARK_AKT                                    
+             ,EVSSÆG_FST_BPROM1                                         
+             ,EVSSÆG_FST_BPENSNED                                       
+             ,EVSSÆG_FST_BPENSNÆ                                        
+             ,EVSSÆG_FST_BSUM1                                          
+             ,EVSSÆG_FST_BSUM1_SW                                       
+             ,EVSSÆG_FST_BSUM3                                          
+             ,EVSSÆG_FST_BSUM3_SW                                       
+             ,EVSSÆG_FST_BNETTO                                         
+             ,EVSSÆG_FST_BNETTO_SW                                      
+             ,EVSSÆG_FST_BEJERAN                                        
+             ,EVSSÆG_FST_BEJERAN_SW                                     
+             ,EVSSÆG_FST_BEVSMAN                                        
+             ,EVSSÆG_FST_BEVSMAN_SW                                     
+             ,EVSSÆG_FST_BMANNEDSL                                      
+             ,EVSSÆG_FST_CENKE                                          
+             ,EVSSÆG_FST_CENKEBOH                                       
+             ,EVSSÆG_FST_BOBEHAKOD                                      
+             ,EVSSÆG_FST_CIVILSTAND                                     
+             ,EVSSÆG_FST_CSLET                                          
+             ,EVSSÆG_FST_BEJBOL1                                        
+             ,EVSSÆG_FST_BEJBOL1_SW                                     
+             ,EVSSÆG_FST_BEJBOL2                                        
+             ,EVSSÆG_FST_BEJBOL2_SW                                     
+             ,EVSSÆG_FST_CANVEBOL                                       
+             ,EVSSÆG_FST_CPTYPSLUT                                      
+             ,EVSSÆG_FST_FELT759                                        
+             ,EVSSÆG_FST_CEKSEMP                                        
+             ,EVSSÆG_FST_CFRÅR                                          
+             ,EVSSÆG_FST_DRGNÅRFRA                                      
+             ,EVSSÆG_FST_DRGNÅRTIL                                      
+             ,EVSSÆG_FST_COMPLA                                         
+             ,EVSSÆG_FST_DOMPLACPR                                      
+             ,EVSSÆG_FST_BUDLSKC                                        
+             ,EVSSÆG_FST_BUDLSKC_SW                                     
+             ,EVSSÆG_SID_ELBNR                                          
+             ,EVSSÆG_SID_EGENNR                                         
+             ,EVSSÆG_SID_DFRAGLD                                        
+             ,EVSSÆG_SID_DTILGLD                                        
+             ,EVSSÆG_SID_CDATAFRA                                       
+             ,EVSSÆG_SID_CAJOUR                                         
+             ,EVSSÆG_SID_CSUPPL                                         
+             ,EVSSÆG_SID_DHENVN                                         
+             ,EVSSÆG_SID_FEJLNR                                         
+             ,EVSSÆG_SID_CÆGTOPR                                        
+             ,EVSSÆG_SID_CSKPLOMF                                       
+             ,EVSSÆG_SID_CEJBEVS                                        
+             ,EVSSÆG_SID_CEJDTYPE                                       
+             ,EVSSÆG_SID_FELT760                                        
+             ,EVSSÆG_SID_CNEDSL1                                        
+             ,EVSSÆG_SID_DATO0107                                       
+             ,EVSSÆG_SID_DOVTG                                          
+             ,EVSSÆG_SID_DAFSTAA                                        
+             ,EVSSÆG_SID_DINDFLYT                                       
+             ,EVSSÆG_SID_DFRAFLYT                                       
+             ,EVSSÆG_SID_CINDFLYT                                       
+             ,EVSSÆG_SID_GPCTEJER                                       
+             ,EVSSÆG_SID_GPCTEJER_SW                                    
+             ,EVSSÆG_SID_FDAGUDLE                                       
+             ,EVSSÆG_SID_GPCTUDLE                                       
+             ,EVSSÆG_SID_FUDL100                                        
+             ,EVSSÆG_SID_FDAGERHV                                       
+             ,EVSSÆG_SID_GPCTERHV                                       
+             ,EVSSÆG_SID_FERHVFLER                                      
+             ,EVSSÆG_SID_CBERGROP                                       
+             ,EVSSÆG_SID_BBERGRL                                        
+             ,EVSSÆG_SID_BBERGRL_SW                                     
+             ,EVSSÆG_SID_BBER2FAM                                       
+             ,EVSSÆG_SID_BBER2FAM_SW                                    
+             ,EVSSÆG_SID_BBERGRL_AKT                                    
+             ,EVSSÆG_SID_BBERGRL_AKT_SW                                 
+             ,EVSSÆG_SID_BBER2FAM_AKT                                   
+             ,EVSSÆG_SID_BBER2FAM_AKT_SW                                
+             ,EVSSÆG_SID_VURMARK                                        
+             ,EVSSÆG_SID_VURMARK_AKT                                    
+             ,EVSSÆG_SID_BPROM1                                         
+             ,EVSSÆG_SID_BPENSNED                                       
+             ,EVSSÆG_SID_BPENSNÆ                                        
+             ,EVSSÆG_SID_BSUM1                                          
+             ,EVSSÆG_SID_BSUM1_SW                                       
+             ,EVSSÆG_SID_BSUM3                                          
+             ,EVSSÆG_SID_BSUM3_SW                                       
+             ,EVSSÆG_SID_BNETTO                                         
+             ,EVSSÆG_SID_BNETTO_SW                                      
+             ,EVSSÆG_SID_BEJERAN                                        
+             ,EVSSÆG_SID_BEJERAN_SW                                     
+             ,EVSSÆG_SID_BEVSMAN                                        
+             ,EVSSÆG_SID_BEVSMAN_SW                                     
+             ,EVSSÆG_SID_BMANNEDSL                                      
+             ,EVSSÆG_SID_CENKE                                          
+             ,EVSSÆG_SID_CENKEBOH                                       
+             ,EVSSÆG_SID_BOBEHAKOD                                      
+             ,EVSSÆG_SID_CIVILSTAND                                     
+             ,EVSSÆG_SID_CSLET                                          
+             ,EVSSÆG_SID_BEJBOL1                                        
+             ,EVSSÆG_SID_BEJBOL1_SW                                     
+             ,EVSSÆG_SID_BEJBOL2                                        
+             ,EVSSÆG_SID_BEJBOL2_SW                                     
+             ,EVSSÆG_SID_CANVEBOL                                       
+             ,EVSSÆG_SID_CPTYPSLUT                                      
+             ,EVSSÆG_SID_FELT759                                        
+             ,EVSSÆG_SID_CEKSEMP                                        
+             ,EVSSÆG_SID_CFRÅR                                          
+             ,EVSSÆG_SID_DRGNÅRFRA                                      
+             ,EVSSÆG_SID_DRGNÅRTIL                                      
+             ,EVSSÆG_SID_COMPLA                                         
+             ,EVSSÆG_SID_DOMPLACPR                                      
+             ,EVSSÆG_SID_BUDLSKC                                        
+             ,EVSSÆG_SID_BUDLSKC_SW                                     
+             ,EVSFEJ_DCPRN                                              
+             ,EVSFEJ_EKOMNR                                             
+             ,EVSFEJ_EEJDNR                                             
+             ,EVSFEJ_EENHEDLBNR                                         
+             ,EVSFEJ_CFRATYPE                                           
+             ,EVSFEJ_DSORTDAT1                                          
+             ,EVSFEJ_DSORTDAT2                                          
+             ,EVSFEJ_ELBNR                                              
+             ,EVSFEJ_DFRAGLD                                            
+             ,EVSFEJ_DTILGLD                                            
+             ,EVSFEJ_CEVSBENY                                           
+             ,EVSFEJ_CEJBEVS                                            
+             ,EVSFEJ_COPR_CEJBEVS                                       
+             ,EVSFEJ_CEJDTYPE                                           
+             ,EVSFEJ_CFRED                                              
+             ,EVSFEJ_CNEDSL1                                            
+             ,EVSFEJ_DATO0107                                           
+             ,EVSFEJ_DOVTG                                              
+             ,EVSFEJ_COPR_DOVTG                                         
+             ,EVSFEJ_DOVTG_GL                                           
+             ,EVSFEJ_DAFSTAA                                            
+             ,EVSFEJ_DINDFLYT                                           
+             ,EVSFEJ_DFRAFLYT                                           
+             ,EVSFEJ_FDAGEJ                                             
+             ,EVSFEJ_GPCTEJER                                           
+             ,EVSFEJ_FDAGUDLE                                           
+             ,EVSFEJ_GPCTUDLE                                           
+             ,EVSFEJ_FDAGERHV                                           
+             ,EVSFEJ_GPCTERHV                                           
+             ,EVSFEJ_BPROM1                                             
+             ,EVSFEJ_B100                                               
+             ,EVSFEJ_B100_SW                                            
+             ,EVSFEJ_BBRUTTO                                            
+             ,EVSFEJ_BBRUTTO_SW                                         
+             ,EVSFEJ_BEJERAN                                            
+             ,EVSFEJ_BEJERAN_SW                                         
+             ,EVSFEJ_BNYMAN                                             
+             ,EVSFEJ_BNYMAN_SW                                          
+             ,EVSFEJ_BFORSKAT                                           
+             ,EVSFEJ_BFORSKAT_SW                                        
+             ,EVSFEJ_FDAGIALT                                           
+             ,EVSFEJ_CEVSSUM                                            
+             ,EVSFEJ_CENKE                                              
+             ,EVSFEJ_EJDBELIG                                           
+             ,EVSFEJ_VEJK_EJD                                           
+             ,EVSFEJ_HUSNR_EJD                                          
+             ,EVSFEJ_ETAGE_EJD                                          
+             ,EVSFEJ_SDØR_EJD                                           
+             ,EVSFEJ_ENHEDBELIG                                         
+             ,EVSFEJ_VEJK_ENHED                                         
+             ,EVSFEJ_HUSNR_ENHED                                        
+             ,EVSFEJ_ETAGE_ENHED                                        
+             ,EVSFEJ_SDØR_ENHED                                         
+             ,EVSFEJ_CLANDEKODE                                         
+             ,EVSFEJ_BBERGRL                                            
+             ,EVSFEJ_BBER2FAM                                           
+             ,EVSFEJ_CEKSEMP                                            
+             ,EVSFEJ_COPR_EKSEMP                                        
+             ,EVSFEJ_BUDLSKC                                            
+             ,EVSFEJ_CRTEKORNS                                          
+             ,EVSFEJ_COPR_CRTEKORNS                                     
+             ,EVSFEJ_EJET20240101                                       
+             ,EVSFEJ_EVSEFTERRABAT                                      
+             ,EVSFEJ_OVERFØRT_ÆGTEF                                     
+             ,EVSFEJ_RABATBER_DFRAGLD                                   
+             ,EVSFEJ_RABATBER_DTILGLD                                   
+             ,EVSFEJ_RABATBER_EJERANDEL                                 
+             ,EVSFEJ_RABAT_DFRAGLD                                      
+             ,EVSFEJ_RABAT_DTILGLD                                      
+             ,EVSFEJ_SIMPELBASISRABAT                                   
+             ,EVSFEJ_SIMPELBASISRABAT_NEG                               
+             ,EVSFEJ_BASISRABAT_REGUL                                   
+             ,EVSFEJ_COPR_BASISRABAT_REGUL                              
+             ,EVSFEJ_BASISRABAT                                         
+             ,EVSFEJ_EJERANDEL                                          
+             ,EVSFÆG_DCPRN                                              
+             ,EVSFÆG_EKOMNR                                             
+             ,EVSFÆG_EEJDNR                                             
+             ,EVSFÆG_EENHEDLBNR                                         
+             ,EVSFÆG_CFRATYPE                                           
+             ,EVSFÆG_DSORTDAT1                                          
+             ,EVSFÆG_DSORTDAT2                                          
+             ,EVSFÆG_ELBNR                                              
+             ,EVSFÆG_DFRAGLD                                            
+             ,EVSFÆG_DTILGLD                                            
+             ,EVSFÆG_CEVSBENY                                           
+             ,EVSFÆG_CEJBEVS                                            
+             ,EVSFÆG_COPR_CEJBEVS                                       
+             ,EVSFÆG_CEJDTYPE                                           
+             ,EVSFÆG_CFRED                                              
+             ,EVSFÆG_CNEDSL1                                            
+             ,EVSFÆG_DATO0107                                           
+             ,EVSFÆG_DOVTG                                              
+             ,EVSFÆG_COPR_DOVTG                                         
+             ,EVSFÆG_DOVTG_GL                                           
+             ,EVSFÆG_DAFSTAA                                            
+             ,EVSFÆG_DINDFLYT                                           
+             ,EVSFÆG_DFRAFLYT                                           
+             ,EVSFÆG_FDAGEJ                                             
+             ,EVSFÆG_GPCTEJER                                           
+             ,EVSFÆG_FDAGUDLE                                           
+             ,EVSFÆG_GPCTUDLE                                           
+             ,EVSFÆG_FDAGERHV                                           
+             ,EVSFÆG_GPCTERHV                                           
+             ,EVSFÆG_BPROM1                                             
+             ,EVSFÆG_B100                                               
+             ,EVSFÆG_B100_SW                                            
+             ,EVSFÆG_BBRUTTO                                            
+             ,EVSFÆG_BBRUTTO_SW                                         
+             ,EVSFÆG_BEJERAN                                            
+             ,EVSFÆG_BEJERAN_SW                                         
+             ,EVSFÆG_BNYMAN                                             
+             ,EVSFÆG_BNYMAN_SW                                          
+             ,EVSFÆG_BFORSKAT                                           
+             ,EVSFÆG_BFORSKAT_SW                                        
+             ,EVSFÆG_FDAGIALT                                           
+             ,EVSFÆG_CEVSSUM                                            
+             ,EVSFÆG_CENKE                                              
+             ,EVSFÆG_EJDBELIG                                           
+             ,EVSFÆG_VEJK_EJD                                           
+             ,EVSFÆG_HUSNR_EJD                                          
+             ,EVSFÆG_ETAGE_EJD                                          
+             ,EVSFÆG_SDØR_EJD                                           
+             ,EVSFÆG_ENHEDBELIG                                         
+             ,EVSFÆG_VEJK_ENHED                                         
+             ,EVSFÆG_HUSNR_ENHED                                        
+             ,EVSFÆG_ETAGE_ENHED                                        
+             ,EVSFÆG_SDØR_ENHED                                         
+             ,EVSFÆG_CLANDEKODE                                         
+             ,EVSFÆG_BBERGRL                                            
+             ,EVSFÆG_BBER2FAM                                           
+             ,EVSFÆG_CEKSEMP                                            
+             ,EVSFÆG_COPR_EKSEMP                                        
+             ,EVSFÆG_BUDLSKC                                            
+             ,EVSFÆG_CRTEKORNS                                          
+             ,EVSFÆG_COPR_CRTEKORNS                                     
+             ,EVSFÆG_EJET20240101                                       
+             ,EVSFÆG_EVSEFTERRABAT                                      
+             ,EVSFÆG_OVERFØRT_ÆGTEF                                     
+             ,EVSFÆG_RABATBER_DFRAGLD                                   
+             ,EVSFÆG_RABATBER_DTILGLD                                   
+             ,EVSFÆG_RABATBER_EJERANDEL                                 
+             ,EVSFÆG_RABAT_DFRAGLD                                      
+             ,EVSFÆG_RABAT_DTILGLD                                      
+             ,EVSFÆG_SIMPELBASISRABAT                                   
+             ,EVSFÆG_SIMPELBASISRABAT_NEG                               
+             ,EVSFÆG_BASISRABAT_REGUL                                   
+             ,EVSFÆG_COPR_BASISRABAT_REGUL                              
+             ,EVSFÆG_BASISRABAT                                         
+             ,EVSFÆG_EJERANDEL                                          
+                                                                        
+             ,EVSSEJ_FST_BEVSMANFSI                                     
+             ,EVSSEJ_FST_BEVSMANFSI_SW                                  
+             ,EVSSEJ_SID_BEVSMANFSI                                     
+             ,EVSSEJ_SID_BEVSMANFSI_SW                                  
+                                                                        
+             ,EVSSÆG_FST_BEVSMANFSI                                     
+             ,EVSSÆG_FST_BEVSMANFSI_SW                                  
+             ,EVSSÆG_SID_BEVSMANFSI                                     
+             ,EVSSÆG_SID_BEVSMANFSI_SW                                  
+                                                                        
+             ,EVSFEJ_COPR_RABATEJERANDEL                                
+             ,EVSFÆG_COPR_RABATEJERANDEL                                
+                                                                        
+             ,EVSFEJ_RES_FAKTISKRABAT                                   
+             ,EVSFEJ_RES_FAKTISKRABAT_SW                                
+             ,EVSFÆG_RES_FAKTISKRABAT                                   
+             ,EVSFÆG_RES_FAKTISKRABAT_SW                                
+                                                                        
+            )                                                           
+            VALUES                                                      
+            ( :EVS.TIL_EVS_AAR                                          
+             ,:EVS.AFVIKLINGS_ID                                        
+             ,:EVS.DATA_ID                                              
+             ,:EVS.KØRSELS_ID                                           
+             ,:EVS.DCPRN                                                
+             ,:EVS.EKOMNR                                               
+             ,:EVS.EEJDNR                                               
+             ,:EVS.EENHEDLBNR                                           
+             ,:EVS.PROGRAMNAVN                                          
+             ,:EVS.DB2FUNKTION                                          
+             ,CURRENT TIMESTAMP                                         
+             ,:EVS.CITYP                                                
+             ,:EVS.CUDLAND                                              
+             ,:EVS.CSBSK                                                
+             ,:EVS.EVSSEJ_DCPRN                                         
+             ,:EVS.EVSSEJ_EKOMNR                                        
+             ,:EVS.EVSSEJ_EEJDNR                                        
+             ,:EVS.EVSSEJ_EENHEDLBNR                                    
+             ,:EVS.EVSSEJ_CFRATYPE                                      
+             ,:EVS.EVSSEJ_DSORTDAT1                                     
+             ,:EVS.EVSSEJ_DSORTDAT2                                     
+             ,:EVS.EVSSEJ_EJDBELIG                                      
+             ,:EVS.EVSSEJ_VEJK_EJD                                      
+             ,:EVS.EVSSEJ_HUSNR_EJD                                     
+             ,:EVS.EVSSEJ_ETAGE_EJD                                     
+             ,:EVS.EVSSEJ_SDØR_EJD                                      
+             ,:EVS.EVSSEJ_ENHEDBELIG                                    
+             ,:EVS.EVSSEJ_VEJK_ENHED                                    
+             ,:EVS.EVSSEJ_HUSNR_ENHED                                   
+             ,:EVS.EVSSEJ_ETAGE_ENHED                                   
+             ,:EVS.EVSSEJ_SDØR_ENHED                                    
+             ,:EVS.EVSSEJ_CLANDEKODE                                    
+             ,:EVS.EVSSEJ_CBENYT                                        
+             ,:EVS.EVSSEJ_CEJBOLTYP1                                    
+             ,:EVS.EVSSEJ_CEJBOLTYP2                                    
+             ,:EVS.EVSSEJ_FST_ELBNR                                     
+             ,:EVS.EVSSEJ_FST_EGENNR                                    
+             ,:EVS.EVSSEJ_FST_DFRAGLD                                   
+             ,:EVS.EVSSEJ_FST_DTILGLD                                   
+             ,:EVS.EVSSEJ_FST_CDATAFRA                                  
+             ,:EVS.EVSSEJ_FST_CAJOUR                                    
+             ,:EVS.EVSSEJ_FST_CSUPPL                                    
+             ,:EVS.EVSSEJ_FST_DHENVN                                    
+             ,:EVS.EVSSEJ_FST_FEJLNR                                    
+             ,:EVS.EVSSEJ_FST_CÆGTOPR                                   
+             ,:EVS.EVSSEJ_FST_CSKPLOMF                                  
+             ,:EVS.EVSSEJ_FST_CEJBEVS                                   
+             ,:EVS.EVSSEJ_FST_CEJDTYPE                                  
+             ,:EVS.EVSSEJ_FST_FELT760                                   
+             ,:EVS.EVSSEJ_FST_CNEDSL1                                   
+             ,:EVS.EVSSEJ_FST_DATO0107                                  
+             ,:EVS.EVSSEJ_FST_DOVTG                                     
+             ,:EVS.EVSSEJ_FST_DAFSTAA                                   
+             ,:EVS.EVSSEJ_FST_DINDFLYT                                  
+             ,:EVS.EVSSEJ_FST_DFRAFLYT                                  
+             ,:EVS.EVSSEJ_FST_CINDFLYT                                  
+             ,:EVS.EVSSEJ_FST_GPCTEJER                                  
+             ,:EVS.EVSSEJ_FST_GPCTEJER_SW                               
+             ,:EVS.EVSSEJ_FST_FDAGUDLE                                  
+             ,:EVS.EVSSEJ_FST_GPCTUDLE                                  
+             ,:EVS.EVSSEJ_FST_FUDL100                                   
+             ,:EVS.EVSSEJ_FST_FDAGERHV                                  
+             ,:EVS.EVSSEJ_FST_GPCTERHV                                  
+             ,:EVS.EVSSEJ_FST_FERHVFLER                                 
+             ,:EVS.EVSSEJ_FST_CBERGROP                                  
+             ,:EVS.EVSSEJ_FST_BBERGRL                                   
+             ,:EVS.EVSSEJ_FST_BBERGRL_SW                                
+             ,:EVS.EVSSEJ_FST_BBER2FAM                                  
+             ,:EVS.EVSSEJ_FST_BBER2FAM_SW                               
+             ,:EVS.EVSSEJ_FST_BBERGRL_AKT                               
+             ,:EVS.EVSSEJ_FST_BBERGRL_AKT_SW                            
+             ,:EVS.EVSSEJ_FST_BBER2FAM_AKT                              
+             ,:EVS.EVSSEJ_FST_BBER2FAM_AKT_SW                           
+             ,:EVS.EVSSEJ_FST_VURMARK                                   
+             ,:EVS.EVSSEJ_FST_VURMARK_AKT                               
+             ,:EVS.EVSSEJ_FST_BPROM1                                    
+             ,:EVS.EVSSEJ_FST_BPENSNED                                  
+             ,:EVS.EVSSEJ_FST_BPENSNÆ                                   
+             ,:EVS.EVSSEJ_FST_BSUM1                                     
+             ,:EVS.EVSSEJ_FST_BSUM1_SW                                  
+             ,:EVS.EVSSEJ_FST_BSUM3                                     
+             ,:EVS.EVSSEJ_FST_BSUM3_SW                                  
+             ,:EVS.EVSSEJ_FST_BNETTO                                    
+             ,:EVS.EVSSEJ_FST_BNETTO_SW                                 
+             ,:EVS.EVSSEJ_FST_BEJERAN                                   
+             ,:EVS.EVSSEJ_FST_BEJERAN_SW                                
+             ,:EVS.EVSSEJ_FST_BEVSMAN                                   
+             ,:EVS.EVSSEJ_FST_BEVSMAN_SW                                
+             ,:EVS.EVSSEJ_FST_BMANNEDSL                                 
+             ,:EVS.EVSSEJ_FST_CENKE                                     
+             ,:EVS.EVSSEJ_FST_CENKEBOH                                  
+             ,:EVS.EVSSEJ_FST_BOBEHAKOD                                 
+             ,:EVS.EVSSEJ_FST_CIVILSTAND                                
+             ,:EVS.EVSSEJ_FST_CSLET                                     
+             ,:EVS.EVSSEJ_FST_BEJBOL1                                   
+             ,:EVS.EVSSEJ_FST_BEJBOL1_SW                                
+             ,:EVS.EVSSEJ_FST_BEJBOL2                                   
+             ,:EVS.EVSSEJ_FST_BEJBOL2_SW                                
+             ,:EVS.EVSSEJ_FST_CANVEBOL                                  
+             ,:EVS.EVSSEJ_FST_CPTYPSLUT                                 
+             ,:EVS.EVSSEJ_FST_FELT759                                   
+             ,:EVS.EVSSEJ_FST_CEKSEMP                                   
+             ,:EVS.EVSSEJ_FST_CFRÅR                                     
+             ,:EVS.EVSSEJ_FST_DRGNÅRFRA                                 
+             ,:EVS.EVSSEJ_FST_DRGNÅRTIL                                 
+             ,:EVS.EVSSEJ_FST_COMPLA                                    
+             ,:EVS.EVSSEJ_FST_DOMPLACPR                                 
+             ,:EVS.EVSSEJ_FST_BUDLSKC                                   
+             ,:EVS.EVSSEJ_FST_BUDLSKC_SW                                
+             ,:EVS.EVSSEJ_SID_ELBNR                                     
+             ,:EVS.EVSSEJ_SID_EGENNR                                    
+             ,:EVS.EVSSEJ_SID_DFRAGLD                                   
+             ,:EVS.EVSSEJ_SID_DTILGLD                                   
+             ,:EVS.EVSSEJ_SID_CDATAFRA                                  
+             ,:EVS.EVSSEJ_SID_CAJOUR                                    
+             ,:EVS.EVSSEJ_SID_CSUPPL                                    
+             ,:EVS.EVSSEJ_SID_DHENVN                                    
+             ,:EVS.EVSSEJ_SID_FEJLNR                                    
+             ,:EVS.EVSSEJ_SID_CÆGTOPR                                   
+             ,:EVS.EVSSEJ_SID_CSKPLOMF                                  
+             ,:EVS.EVSSEJ_SID_CEJBEVS                                   
+             ,:EVS.EVSSEJ_SID_CEJDTYPE                                  
+             ,:EVS.EVSSEJ_SID_FELT760                                   
+             ,:EVS.EVSSEJ_SID_CNEDSL1                                   
+             ,:EVS.EVSSEJ_SID_DATO0107                                  
+             ,:EVS.EVSSEJ_SID_DOVTG                                     
+             ,:EVS.EVSSEJ_SID_DAFSTAA                                   
+             ,:EVS.EVSSEJ_SID_DINDFLYT                                  
+             ,:EVS.EVSSEJ_SID_DFRAFLYT                                  
+             ,:EVS.EVSSEJ_SID_CINDFLYT                                  
+             ,:EVS.EVSSEJ_SID_GPCTEJER                                  
+             ,:EVS.EVSSEJ_SID_GPCTEJER_SW                               
+             ,:EVS.EVSSEJ_SID_FDAGUDLE                                  
+             ,:EVS.EVSSEJ_SID_GPCTUDLE                                  
+             ,:EVS.EVSSEJ_SID_FUDL100                                   
+             ,:EVS.EVSSEJ_SID_FDAGERHV                                  
+             ,:EVS.EVSSEJ_SID_GPCTERHV                                  
+             ,:EVS.EVSSEJ_SID_FERHVFLER                                 
+             ,:EVS.EVSSEJ_SID_CBERGROP                                  
+             ,:EVS.EVSSEJ_SID_BBERGRL                                   
+             ,:EVS.EVSSEJ_SID_BBERGRL_SW                                
+             ,:EVS.EVSSEJ_SID_BBER2FAM                                  
+             ,:EVS.EVSSEJ_SID_BBER2FAM_SW                               
+             ,:EVS.EVSSEJ_SID_BBERGRL_AKT                               
+             ,:EVS.EVSSEJ_SID_BBERGRL_AKT_SW                            
+             ,:EVS.EVSSEJ_SID_BBER2FAM_AKT                              
+             ,:EVS.EVSSEJ_SID_BBER2FAM_AKT_SW                           
+             ,:EVS.EVSSEJ_SID_VURMARK                                   
+             ,:EVS.EVSSEJ_SID_VURMARK_AKT                               
+             ,:EVS.EVSSEJ_SID_BPROM1                                    
+             ,:EVS.EVSSEJ_SID_BPENSNED                                  
+             ,:EVS.EVSSEJ_SID_BPENSNÆ                                   
+             ,:EVS.EVSSEJ_SID_BSUM1                                     
+             ,:EVS.EVSSEJ_SID_BSUM1_SW                                  
+             ,:EVS.EVSSEJ_SID_BSUM3                                     
+             ,:EVS.EVSSEJ_SID_BSUM3_SW                                  
+             ,:EVS.EVSSEJ_SID_BNETTO                                    
+             ,:EVS.EVSSEJ_SID_BNETTO_SW                                 
+             ,:EVS.EVSSEJ_SID_BEJERAN                                   
+             ,:EVS.EVSSEJ_SID_BEJERAN_SW                                
+             ,:EVS.EVSSEJ_SID_BEVSMAN                                   
+             ,:EVS.EVSSEJ_SID_BEVSMAN_SW                                
+             ,:EVS.EVSSEJ_SID_BMANNEDSL                                 
+             ,:EVS.EVSSEJ_SID_CENKE                                     
+             ,:EVS.EVSSEJ_SID_CENKEBOH                                  
+             ,:EVS.EVSSEJ_SID_BOBEHAKOD                                 
+             ,:EVS.EVSSEJ_SID_CIVILSTAND                                
+             ,:EVS.EVSSEJ_SID_CSLET                                     
+             ,:EVS.EVSSEJ_SID_BEJBOL1                                   
+             ,:EVS.EVSSEJ_SID_BEJBOL1_SW                                
+             ,:EVS.EVSSEJ_SID_BEJBOL2                                   
+             ,:EVS.EVSSEJ_SID_BEJBOL2_SW                                
+             ,:EVS.EVSSEJ_SID_CANVEBOL                                  
+             ,:EVS.EVSSEJ_SID_CPTYPSLUT                                 
+             ,:EVS.EVSSEJ_SID_FELT759                                   
+             ,:EVS.EVSSEJ_SID_CEKSEMP                                   
+             ,:EVS.EVSSEJ_SID_CFRÅR                                     
+             ,:EVS.EVSSEJ_SID_DRGNÅRFRA                                 
+             ,:EVS.EVSSEJ_SID_DRGNÅRTIL                                 
+             ,:EVS.EVSSEJ_SID_COMPLA                                    
+             ,:EVS.EVSSEJ_SID_DOMPLACPR                                 
+             ,:EVS.EVSSEJ_SID_BUDLSKC                                   
+             ,:EVS.EVSSEJ_SID_BUDLSKC_SW                                
+             ,:EVS.EVSSÆG_DCPRN                                         
+             ,:EVS.EVSSÆG_EKOMNR                                        
+             ,:EVS.EVSSÆG_EEJDNR                                        
+             ,:EVS.EVSSÆG_EENHEDLBNR                                    
+             ,:EVS.EVSSÆG_CFRATYPE                                      
+             ,:EVS.EVSSÆG_DSORTDAT1                                     
+             ,:EVS.EVSSÆG_DSORTDAT2                                     
+             ,:EVS.EVSSÆG_EJDBELIG                                      
+             ,:EVS.EVSSÆG_VEJK_EJD                                      
+             ,:EVS.EVSSÆG_HUSNR_EJD                                     
+             ,:EVS.EVSSÆG_ETAGE_EJD                                     
+             ,:EVS.EVSSÆG_SDØR_EJD                                      
+             ,:EVS.EVSSÆG_ENHEDBELIG                                    
+             ,:EVS.EVSSÆG_VEJK_ENHED                                    
+             ,:EVS.EVSSÆG_HUSNR_ENHED                                   
+             ,:EVS.EVSSÆG_ETAGE_ENHED                                   
+             ,:EVS.EVSSÆG_SDØR_ENHED                                    
+             ,:EVS.EVSSÆG_CLANDEKODE                                    
+             ,:EVS.EVSSÆG_CBENYT                                        
+             ,:EVS.EVSSÆG_CEJBOLTYP1                                    
+             ,:EVS.EVSSÆG_CEJBOLTYP2                                    
+             ,:EVS.EVSSÆG_FST_ELBNR                                     
+             ,:EVS.EVSSÆG_FST_EGENNR                                    
+             ,:EVS.EVSSÆG_FST_DFRAGLD                                   
+             ,:EVS.EVSSÆG_FST_DTILGLD                                   
+             ,:EVS.EVSSÆG_FST_CDATAFRA                                  
+             ,:EVS.EVSSÆG_FST_CAJOUR                                    
+             ,:EVS.EVSSÆG_FST_CSUPPL                                    
+             ,:EVS.EVSSÆG_FST_DHENVN                                    
+             ,:EVS.EVSSÆG_FST_FEJLNR                                    
+             ,:EVS.EVSSÆG_FST_CÆGTOPR                                   
+             ,:EVS.EVSSÆG_FST_CSKPLOMF                                  
+             ,:EVS.EVSSÆG_FST_CEJBEVS                                   
+             ,:EVS.EVSSÆG_FST_CEJDTYPE                                  
+             ,:EVS.EVSSÆG_FST_FELT760                                   
+             ,:EVS.EVSSÆG_FST_CNEDSL1                                   
+             ,:EVS.EVSSÆG_FST_DATO0107                                  
+             ,:EVS.EVSSÆG_FST_DOVTG                                     
+             ,:EVS.EVSSÆG_FST_DAFSTAA                                   
+             ,:EVS.EVSSÆG_FST_DINDFLYT                                  
+             ,:EVS.EVSSÆG_FST_DFRAFLYT                                  
+             ,:EVS.EVSSÆG_FST_CINDFLYT                                  
+             ,:EVS.EVSSÆG_FST_GPCTEJER                                  
+             ,:EVS.EVSSÆG_FST_GPCTEJER_SW                               
+             ,:EVS.EVSSÆG_FST_FDAGUDLE                                  
+             ,:EVS.EVSSÆG_FST_GPCTUDLE                                  
+             ,:EVS.EVSSÆG_FST_FUDL100                                   
+             ,:EVS.EVSSÆG_FST_FDAGERHV                                  
+             ,:EVS.EVSSÆG_FST_GPCTERHV                                  
+             ,:EVS.EVSSÆG_FST_FERHVFLER                                 
+             ,:EVS.EVSSÆG_FST_CBERGROP                                  
+             ,:EVS.EVSSÆG_FST_BBERGRL                                   
+             ,:EVS.EVSSÆG_FST_BBERGRL_SW                                
+             ,:EVS.EVSSÆG_FST_BBER2FAM                                  
+             ,:EVS.EVSSÆG_FST_BBER2FAM_SW                               
+             ,:EVS.EVSSÆG_FST_BBERGRL_AKT                               
+             ,:EVS.EVSSÆG_FST_BBERGRL_AKT_SW                            
+             ,:EVS.EVSSÆG_FST_BBER2FAM_AKT                              
+             ,:EVS.EVSSÆG_FST_BBER2FAM_AKT_SW                           
+             ,:EVS.EVSSÆG_FST_VURMARK                                   
+             ,:EVS.EVSSÆG_FST_VURMARK_AKT                               
+             ,:EVS.EVSSÆG_FST_BPROM1                                    
+             ,:EVS.EVSSÆG_FST_BPENSNED                                  
+             ,:EVS.EVSSÆG_FST_BPENSNÆ                                   
+             ,:EVS.EVSSÆG_FST_BSUM1                                     
+             ,:EVS.EVSSÆG_FST_BSUM1_SW                                  
+             ,:EVS.EVSSÆG_FST_BSUM3                                     
+             ,:EVS.EVSSÆG_FST_BSUM3_SW                                  
+             ,:EVS.EVSSÆG_FST_BNETTO                                    
+             ,:EVS.EVSSÆG_FST_BNETTO_SW                                 
+             ,:EVS.EVSSÆG_FST_BEJERAN                                   
+             ,:EVS.EVSSÆG_FST_BEJERAN_SW                                
+             ,:EVS.EVSSÆG_FST_BEVSMAN                                   
+             ,:EVS.EVSSÆG_FST_BEVSMAN_SW                                
+             ,:EVS.EVSSÆG_FST_BMANNEDSL                                 
+             ,:EVS.EVSSÆG_FST_CENKE                                     
+             ,:EVS.EVSSÆG_FST_CENKEBOH                                  
+             ,:EVS.EVSSÆG_FST_BOBEHAKOD                                 
+             ,:EVS.EVSSÆG_FST_CIVILSTAND                                
+             ,:EVS.EVSSÆG_FST_CSLET                                     
+             ,:EVS.EVSSÆG_FST_BEJBOL1                                   
+             ,:EVS.EVSSÆG_FST_BEJBOL1_SW                                
+             ,:EVS.EVSSÆG_FST_BEJBOL2                                   
+             ,:EVS.EVSSÆG_FST_BEJBOL2_SW                                
+             ,:EVS.EVSSÆG_FST_CANVEBOL                                  
+             ,:EVS.EVSSÆG_FST_CPTYPSLUT                                 
+             ,:EVS.EVSSÆG_FST_FELT759                                   
+             ,:EVS.EVSSÆG_FST_CEKSEMP                                   
+             ,:EVS.EVSSÆG_FST_CFRÅR                                     
+             ,:EVS.EVSSÆG_FST_DRGNÅRFRA                                 
+             ,:EVS.EVSSÆG_FST_DRGNÅRTIL                                 
+             ,:EVS.EVSSÆG_FST_COMPLA                                    
+             ,:EVS.EVSSÆG_FST_DOMPLACPR                                 
+             ,:EVS.EVSSÆG_FST_BUDLSKC                                   
+             ,:EVS.EVSSÆG_FST_BUDLSKC_SW                                
+             ,:EVS.EVSSÆG_SID_ELBNR                                     
+             ,:EVS.EVSSÆG_SID_EGENNR                                    
+             ,:EVS.EVSSÆG_SID_DFRAGLD                                   
+             ,:EVS.EVSSÆG_SID_DTILGLD                                   
+             ,:EVS.EVSSÆG_SID_CDATAFRA                                  
+             ,:EVS.EVSSÆG_SID_CAJOUR                                    
+             ,:EVS.EVSSÆG_SID_CSUPPL                                    
+             ,:EVS.EVSSÆG_SID_DHENVN                                    
+             ,:EVS.EVSSÆG_SID_FEJLNR                                    
+             ,:EVS.EVSSÆG_SID_CÆGTOPR                                   
+             ,:EVS.EVSSÆG_SID_CSKPLOMF                                  
+             ,:EVS.EVSSÆG_SID_CEJBEVS                                   
+             ,:EVS.EVSSÆG_SID_CEJDTYPE                                  
+             ,:EVS.EVSSÆG_SID_FELT760                                   
+             ,:EVS.EVSSÆG_SID_CNEDSL1                                   
+             ,:EVS.EVSSÆG_SID_DATO0107                                  
+             ,:EVS.EVSSÆG_SID_DOVTG                                     
+             ,:EVS.EVSSÆG_SID_DAFSTAA                                   
+             ,:EVS.EVSSÆG_SID_DINDFLYT                                  
+             ,:EVS.EVSSÆG_SID_DFRAFLYT                                  
+             ,:EVS.EVSSÆG_SID_CINDFLYT                                  
+             ,:EVS.EVSSÆG_SID_GPCTEJER                                  
+             ,:EVS.EVSSÆG_SID_GPCTEJER_SW                               
+             ,:EVS.EVSSÆG_SID_FDAGUDLE                                  
+             ,:EVS.EVSSÆG_SID_GPCTUDLE                                  
+             ,:EVS.EVSSÆG_SID_FUDL100                                   
+             ,:EVS.EVSSÆG_SID_FDAGERHV                                  
+             ,:EVS.EVSSÆG_SID_GPCTERHV                                  
+             ,:EVS.EVSSÆG_SID_FERHVFLER                                 
+             ,:EVS.EVSSÆG_SID_CBERGROP                                  
+             ,:EVS.EVSSÆG_SID_BBERGRL                                   
+             ,:EVS.EVSSÆG_SID_BBERGRL_SW                                
+             ,:EVS.EVSSÆG_SID_BBER2FAM                                  
+             ,:EVS.EVSSÆG_SID_BBER2FAM_SW                               
+             ,:EVS.EVSSÆG_SID_BBERGRL_AKT                               
+             ,:EVS.EVSSÆG_SID_BBERGRL_AKT_SW                            
+             ,:EVS.EVSSÆG_SID_BBER2FAM_AKT                              
+             ,:EVS.EVSSÆG_SID_BBER2FAM_AKT_SW                           
+             ,:EVS.EVSSÆG_SID_VURMARK                                   
+             ,:EVS.EVSSÆG_SID_VURMARK_AKT                               
+             ,:EVS.EVSSÆG_SID_BPROM1                                    
+             ,:EVS.EVSSÆG_SID_BPENSNED                                  
+             ,:EVS.EVSSÆG_SID_BPENSNÆ                                   
+             ,:EVS.EVSSÆG_SID_BSUM1                                     
+             ,:EVS.EVSSÆG_SID_BSUM1_SW                                  
+             ,:EVS.EVSSÆG_SID_BSUM3                                     
+             ,:EVS.EVSSÆG_SID_BSUM3_SW                                  
+             ,:EVS.EVSSÆG_SID_BNETTO                                    
+             ,:EVS.EVSSÆG_SID_BNETTO_SW                                 
+             ,:EVS.EVSSÆG_SID_BEJERAN                                   
+             ,:EVS.EVSSÆG_SID_BEJERAN_SW                                
+             ,:EVS.EVSSÆG_SID_BEVSMAN                                   
+             ,:EVS.EVSSÆG_SID_BEVSMAN_SW                                
+             ,:EVS.EVSSÆG_SID_BMANNEDSL                                 
+             ,:EVS.EVSSÆG_SID_CENKE                                     
+             ,:EVS.EVSSÆG_SID_CENKEBOH                                  
+             ,:EVS.EVSSÆG_SID_BOBEHAKOD                                 
+             ,:EVS.EVSSÆG_SID_CIVILSTAND                                
+             ,:EVS.EVSSÆG_SID_CSLET                                     
+             ,:EVS.EVSSÆG_SID_BEJBOL1                                   
+             ,:EVS.EVSSÆG_SID_BEJBOL1_SW                                
+             ,:EVS.EVSSÆG_SID_BEJBOL2                                   
+             ,:EVS.EVSSÆG_SID_BEJBOL2_SW                                
+             ,:EVS.EVSSÆG_SID_CANVEBOL                                  
+             ,:EVS.EVSSÆG_SID_CPTYPSLUT                                 
+             ,:EVS.EVSSÆG_SID_FELT759                                   
+             ,:EVS.EVSSÆG_SID_CEKSEMP                                   
+             ,:EVS.EVSSÆG_SID_CFRÅR                                     
+             ,:EVS.EVSSÆG_SID_DRGNÅRFRA                                 
+             ,:EVS.EVSSÆG_SID_DRGNÅRTIL                                 
+             ,:EVS.EVSSÆG_SID_COMPLA                                    
+             ,:EVS.EVSSÆG_SID_DOMPLACPR                                 
+             ,:EVS.EVSSÆG_SID_BUDLSKC                                   
+             ,:EVS.EVSSÆG_SID_BUDLSKC_SW                                
+             ,:EVS.EVSFEJ_DCPRN                                         
+             ,:EVS.EVSFEJ_EKOMNR                                        
+             ,:EVS.EVSFEJ_EEJDNR                                        
+             ,:EVS.EVSFEJ_EENHEDLBNR                                    
+             ,:EVS.EVSFEJ_CFRATYPE                                      
+             ,:EVS.EVSFEJ_DSORTDAT1                                     
+             ,:EVS.EVSFEJ_DSORTDAT2                                     
+             ,:EVS.EVSFEJ_ELBNR                                         
+             ,:EVS.EVSFEJ_DFRAGLD                                       
+             ,:EVS.EVSFEJ_DTILGLD                                       
+             ,:EVS.EVSFEJ_CEVSBENY                                      
+             ,:EVS.EVSFEJ_CEJBEVS                                       
+             ,:EVS.EVSFEJ_COPR_CEJBEVS                                  
+             ,:EVS.EVSFEJ_CEJDTYPE                                      
+             ,:EVS.EVSFEJ_CFRED                                         
+             ,:EVS.EVSFEJ_CNEDSL1                                       
+             ,:EVS.EVSFEJ_DATO0107                                      
+             ,:EVS.EVSFEJ_DOVTG                                         
+             ,:EVS.EVSFEJ_COPR_DOVTG                                    
+             ,:EVS.EVSFEJ_DOVTG_GL                                      
+             ,:EVS.EVSFEJ_DAFSTAA                                       
+             ,:EVS.EVSFEJ_DINDFLYT                                      
+             ,:EVS.EVSFEJ_DFRAFLYT                                      
+             ,:EVS.EVSFEJ_FDAGEJ                                        
+             ,:EVS.EVSFEJ_GPCTEJER                                      
+             ,:EVS.EVSFEJ_FDAGUDLE                                      
+             ,:EVS.EVSFEJ_GPCTUDLE                                      
+             ,:EVS.EVSFEJ_FDAGERHV                                      
+             ,:EVS.EVSFEJ_GPCTERHV                                      
+             ,:EVS.EVSFEJ_BPROM1                                        
+             ,:EVS.EVSFEJ_B100                                          
+             ,:EVS.EVSFEJ_B100_SW                                       
+             ,:EVS.EVSFEJ_BBRUTTO                                       
+             ,:EVS.EVSFEJ_BBRUTTO_SW                                    
+             ,:EVS.EVSFEJ_BEJERAN                                       
+             ,:EVS.EVSFEJ_BEJERAN_SW                                    
+             ,:EVS.EVSFEJ_BNYMAN                                        
+             ,:EVS.EVSFEJ_BNYMAN_SW                                     
+             ,:EVS.EVSFEJ_BFORSKAT                                      
+             ,:EVS.EVSFEJ_BFORSKAT_SW                                   
+             ,:EVS.EVSFEJ_FDAGIALT                                      
+             ,:EVS.EVSFEJ_CEVSSUM                                       
+             ,:EVS.EVSFEJ_CENKE                                         
+             ,:EVS.EVSFEJ_EJDBELIG                                      
+             ,:EVS.EVSFEJ_VEJK_EJD                                      
+             ,:EVS.EVSFEJ_HUSNR_EJD                                     
+             ,:EVS.EVSFEJ_ETAGE_EJD                                     
+             ,:EVS.EVSFEJ_SDØR_EJD                                      
+             ,:EVS.EVSFEJ_ENHEDBELIG                                    
+             ,:EVS.EVSFEJ_VEJK_ENHED                                    
+             ,:EVS.EVSFEJ_HUSNR_ENHED                                   
+             ,:EVS.EVSFEJ_ETAGE_ENHED                                   
+             ,:EVS.EVSFEJ_SDØR_ENHED                                    
+             ,:EVS.EVSFEJ_CLANDEKODE                                    
+             ,:EVS.EVSFEJ_BBERGRL                                       
+             ,:EVS.EVSFEJ_BBER2FAM                                      
+             ,:EVS.EVSFEJ_CEKSEMP                                       
+             ,:EVS.EVSFEJ_COPR_EKSEMP                                   
+             ,:EVS.EVSFEJ_BUDLSKC                                       
+             ,:EVS.EVSFEJ_CRTEKORNS                                     
+             ,:EVS.EVSFEJ_COPR_CRTEKORNS                                
+             ,:EVS.EVSFEJ_EJET20240101                                  
+             ,:EVS.EVSFEJ_EVSEFTERRABAT                                 
+                                 :DB2_SW.EVSFEJ_EVSEFTERRABAT_SW        
+             ,:EVS.EVSFEJ_OVERFØRT_ÆGTEF                                
+             ,:EVS.EVSFEJ_RABATBER_DFRAGLD                              
+             ,:EVS.EVSFEJ_RABATBER_DTILGLD                              
+             ,:EVS.EVSFEJ_RABATBER_EJERANDEL                            
+                                 :DB2_SW.EVSFEJ_RABATBER_EJERANDEL_SW   
+             ,:EVS.EVSFEJ_RABAT_DFRAGLD                                 
+             ,:EVS.EVSFEJ_RABAT_DTILGLD                                 
+             ,:EVS.EVSFEJ_SIMPELBASISRABAT                              
+             ,:EVS.EVSFEJ_SIMPELBASISRABAT_NEG                          
+             ,:EVS.EVSFEJ_BASISRABAT_REGUL                              
+             ,:EVS.EVSFEJ_COPR_BASISRABAT_REGUL                         
+             ,:EVS.EVSFEJ_BASISRABAT                                    
+             ,:EVS.EVSFEJ_EJERANDEL                                     
+                                 :DB2_SW.EVSFEJ_EJERANDEL_SW            
+             ,:EVS.EVSFÆG_DCPRN                                         
+             ,:EVS.EVSFÆG_EKOMNR                                        
+             ,:EVS.EVSFÆG_EEJDNR                                        
+             ,:EVS.EVSFÆG_EENHEDLBNR                                    
+             ,:EVS.EVSFÆG_CFRATYPE                                      
+             ,:EVS.EVSFÆG_DSORTDAT1                                     
+             ,:EVS.EVSFÆG_DSORTDAT2                                     
+             ,:EVS.EVSFÆG_ELBNR                                         
+             ,:EVS.EVSFÆG_DFRAGLD                                       
+             ,:EVS.EVSFÆG_DTILGLD                                       
+             ,:EVS.EVSFÆG_CEVSBENY                                      
+             ,:EVS.EVSFÆG_CEJBEVS                                       
+             ,:EVS.EVSFÆG_COPR_CEJBEVS                                  
+             ,:EVS.EVSFÆG_CEJDTYPE                                      
+             ,:EVS.EVSFÆG_CFRED                                         
+             ,:EVS.EVSFÆG_CNEDSL1                                       
+             ,:EVS.EVSFÆG_DATO0107                                      
+             ,:EVS.EVSFÆG_DOVTG                                         
+             ,:EVS.EVSFÆG_COPR_DOVTG                                    
+             ,:EVS.EVSFÆG_DOVTG_GL                                      
+             ,:EVS.EVSFÆG_DAFSTAA                                       
+             ,:EVS.EVSFÆG_DINDFLYT                                      
+             ,:EVS.EVSFÆG_DFRAFLYT                                      
+             ,:EVS.EVSFÆG_FDAGEJ                                        
+             ,:EVS.EVSFÆG_GPCTEJER                                      
+             ,:EVS.EVSFÆG_FDAGUDLE                                      
+             ,:EVS.EVSFÆG_GPCTUDLE                                      
+             ,:EVS.EVSFÆG_FDAGERHV                                      
+             ,:EVS.EVSFÆG_GPCTERHV                                      
+             ,:EVS.EVSFÆG_BPROM1                                        
+             ,:EVS.EVSFÆG_B100                                          
+             ,:EVS.EVSFÆG_B100_SW                                       
+             ,:EVS.EVSFÆG_BBRUTTO                                       
+             ,:EVS.EVSFÆG_BBRUTTO_SW                                    
+             ,:EVS.EVSFÆG_BEJERAN                                       
+             ,:EVS.EVSFÆG_BEJERAN_SW                                    
+             ,:EVS.EVSFÆG_BNYMAN                                        
+             ,:EVS.EVSFÆG_BNYMAN_SW                                     
+             ,:EVS.EVSFÆG_BFORSKAT                                      
+             ,:EVS.EVSFÆG_BFORSKAT_SW                                   
+             ,:EVS.EVSFÆG_FDAGIALT                                      
+             ,:EVS.EVSFÆG_CEVSSUM                                       
+             ,:EVS.EVSFÆG_CENKE                                         
+             ,:EVS.EVSFÆG_EJDBELIG                                      
+             ,:EVS.EVSFÆG_VEJK_EJD                                      
+             ,:EVS.EVSFÆG_HUSNR_EJD                                     
+             ,:EVS.EVSFÆG_ETAGE_EJD                                     
+             ,:EVS.EVSFÆG_SDØR_EJD                                      
+             ,:EVS.EVSFÆG_ENHEDBELIG                                    
+             ,:EVS.EVSFÆG_VEJK_ENHED                                    
+             ,:EVS.EVSFÆG_HUSNR_ENHED                                   
+             ,:EVS.EVSFÆG_ETAGE_ENHED                                   
+             ,:EVS.EVSFÆG_SDØR_ENHED                                    
+             ,:EVS.EVSFÆG_CLANDEKODE                                    
+             ,:EVS.EVSFÆG_BBERGRL                                       
+             ,:EVS.EVSFÆG_BBER2FAM                                      
+             ,:EVS.EVSFÆG_CEKSEMP                                       
+             ,:EVS.EVSFÆG_COPR_EKSEMP                                   
+             ,:EVS.EVSFÆG_BUDLSKC                                       
+             ,:EVS.EVSFÆG_CRTEKORNS                                     
+             ,:EVS.EVSFÆG_COPR_CRTEKORNS                                
+             ,:EVS.EVSFÆG_EJET20240101                                  
+             ,:EVS.EVSFÆG_EVSEFTERRABAT                                 
+                                 :DB2_SW.EVSFÆG_EVSEFTERRABAT_SW        
+             ,:EVS.EVSFÆG_OVERFØRT_ÆGTEF                                
+             ,:EVS.EVSFÆG_RABATBER_DFRAGLD                              
+             ,:EVS.EVSFÆG_RABATBER_DTILGLD                              
+             ,:EVS.EVSFÆG_RABATBER_EJERANDEL                            
+                                 :DB2_SW.EVSFÆG_RABATBER_EJERANDEL_SW   
+             ,:EVS.EVSFÆG_RABAT_DFRAGLD                                 
+             ,:EVS.EVSFÆG_RABAT_DTILGLD                                 
+             ,:EVS.EVSFÆG_SIMPELBASISRABAT                              
+             ,:EVS.EVSFÆG_SIMPELBASISRABAT_NEG                          
+             ,:EVS.EVSFÆG_BASISRABAT_REGUL                              
+             ,:EVS.EVSFÆG_COPR_BASISRABAT_REGUL                         
+             ,:EVS.EVSFÆG_BASISRABAT                                    
+             ,:EVS.EVSFÆG_EJERANDEL                                     
+                                 :DB2_SW.EVSFÆG_EJERANDEL_SW            
+                                                                        
+             ,:EVS.EVSSEJ_FST_BEVSMANFSI                                
+             ,:EVS.EVSSEJ_FST_BEVSMANFSI_SW                             
+             ,:EVS.EVSSEJ_SID_BEVSMANFSI                                
+             ,:EVS.EVSSEJ_SID_BEVSMANFSI_SW                             
+                                                                        
+             ,:EVS.EVSSÆG_FST_BEVSMANFSI                                
+             ,:EVS.EVSSÆG_FST_BEVSMANFSI_SW                             
+             ,:EVS.EVSSÆG_SID_BEVSMANFSI                                
+             ,:EVS.EVSSÆG_SID_BEVSMANFSI_SW                             
+                                                                        
+             ,:EVS.EVSFEJ_COPR_RABATEJERANDEL                           
+             ,:EVS.EVSFÆG_COPR_RABATEJERANDEL                           
+                                                                        
+             ,:EVS.EVSFEJ_RES_FAKTISKRABAT                              
+             ,:EVS.EVSFEJ_RES_FAKTISKRABAT_SW                           
+             ,:EVS.EVSFÆG_RES_FAKTISKRABAT                              
+             ,:EVS.EVSFÆG_RES_FAKTISKRABAT_SW                           
+                                                                        
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_INS_EVS = ANT_INS_EVS + 1;                           
+               END;                                                     
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 INSERT BE67000T';                       
+                                                                        
+               PUT SKIP LIST(' ');                                      
+               PUT SKIP LIST('BE86100 Fejl ved indsæt på BE67000T: ');  
+               PUT SKIP LIST(' EVS.TIL_EVS_AAR  : ',EVS.TIL_EVS_AAR);   
+               PUT SKIP LIST(' EVS.AFVIKLINGS_ID: ',EVS.AFVIKLINGS_ID); 
+               PUT SKIP LIST(' EVS.DCPRN        : ',EVS.DCPRN);         
+               PUT SKIP LIST(' EVS.EKOMNR       : ',EVS.EKOMNR);        
+               PUT SKIP LIST(' EVS.EEJDNR       : ',EVS.EEJDNR);        
+               PUT SKIP LIST(' EVS.EENHEDLBNR   : ',EVS.EENHEDLBNR);    
+               PUT SKIP LIST(' ');                                      
+                                                                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END INSERT_EVSOPL;                                                     
+                                                                        
+ /*********************************************************************/
+ /* Ryd db2-tabeller før start                                 RUTINE */
+ /*********************************************************************/
+ RYD_DB2_TABELLER: PROC;                                                
+                                                                        
+         EXEC SQL                                                       
+            Delete from BE67000T                                        
+            where til_evs_aar = :WS_TIL_EVS_AAR                         
+            and   afviklings_id = :WS_FORSKUD_SLUT_TXT                  
+            and   DATA_ID = :BE55600M.DATA_ID                           
+            and   kØrsels_id = :WS_KØRSELS_ID;                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+            END;                                                        
+            WHEN(100) DO;                                               
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 DELETE BE67000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END RYD_DB2_TABELLER;                                                  
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+                                                                        
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.TEKST =                                                
+         'ANTAL LÆSTE RECORDS PÅ EVS DATASET';                          
+         DETLIN1.ANTAL = ANT_LÆS;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DETLIN1.TEKST =                                                
+         'ANTAL SKREVNE RÆKKER PÅ BE67000T EVS     ';                   
+         DETLIN1.ANTAL = ANT_INS_EVS;                                   
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL KONTROLLISTE;                                             
+         CLOSE FILE (BE86PI);                                           
+         CLOSE FILE (BEEVSI);                                           
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+ END AFSLUT;                                                            
+ END BE86700;                                                           

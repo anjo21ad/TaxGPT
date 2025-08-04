@@ -1,0 +1,578 @@
+ BE89000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2020                                       *
+ * PROGRAMNAVN: BE89000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET SLETTE MARKER PÅ BS01700T UDFRA             *
+ *              HISTORISKE ESR OPLYSNINGER                             *
+ *              DEFECT 193 OG DEFECT 264                               *
+ *                                                                     *
+ *              BS01700T - EVS EJERSKABSTABEL                          *
+ *              BE89000T - ESR UDTRÆK MED HISTORIK                     *
+ *              BE89100T - LOGNINGSTABEL                               *
+ *              BE89001Y - KONTROLLISTE.                               *
+ *                                                                     *
+ * FORSKUD20   ESBEN BRODERSEN        Z6EBD                13.08.2019  *
+ * FORSKUD20   ESBEN BRODERSEN        Z6EBD                08.01.2020  *
+ *             Fejlret CEJBEVS sættes lig 1 så der ikke                *
+ *             beregnes EVS på de slettede #01                         *
+ **********************************************************************/
+ /* Slut 2020: Elena Flygenring EFL                       marts 2021  */
+ /*              - struktur BH65300M erstattes med BH55300M           */
+ /*              - Brug af FILE BH890I og BH890_PARM fjernes          */
+ /*              - BH890_PARM.FS_MRK fjernes                          */
+ /*              - BH890_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes*/
+ /*                erstattes med brug af BH55300M.AFVIKLINGS_ID       */
+ /*              - WS_TIL_EVS_AAR_GL og WS_SLUT_AFVIKLINGS_ID         */
+ /*                bruges ikke mere og kan derfor slettes             */
+ /*              - Parameter 2 fjernes i kald til OPDATER_KØRSELSTABEL*/
+ /*              - BQ89100T: nyt felt DATA_ID tilføjet                */
+ /* Forskud 2025: Jan Jensen JJJ                           Juni 2024  */
+ /*              - BE55600M erstatter BE55300M                        */
+ /*********************************************************************/
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2019');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+         EXEC SQL INCLUDE BS01700T;        /* EVS PERSONTABELLEN   */   
+         EXEC SQL INCLUDE BE89000T;                                     
+         EXEC SQL INCLUDE BE89100T;                                     
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     JA             BIT(1)           INIT ('1'B);                   
+ DCL     NEJ            BIT(1)           INIT ('0'B);                   
+                                                                        
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     HJ_DATOEN      PIC '(8)9';                                     
+ DCL     1 HJ_DATO      BASED(ADDR(HJ_DATOEN)),                         
+           2 AAR        PIC  '9999',                                    
+           2 MD         PIC  '99',                                      
+           2 DG         PIC  '99';                                      
+                                                                        
+ DCL     1 BE55600M,                             /*#01*/                
+           %INCLUDE BE55600M;                    /* DATO OG ÅR MACRO */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+                                                                        
+ DCL     ANTAL_SLET      BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_FETCH     BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_OPRET_LOG BIN FIXED (31) INIT(0);                        
+ DCL     ANTAL_OPDAT_LOG BIN FIXED (31) INIT(0);                        
+                                                                        
+                                                                        
+ DCL     ANT_COMM        BIN FIXED (31) INIT(0);                        
+ DCL     EJERSKAB_FUNDET BIT(1)     INIT ('0'B);                        
+                                                                        
+ DCL     SQLKODE         PIC '9999';                                    
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR         BIN FIXED (15);                         
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE89000');              
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ABEND-RUTINE                                      */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE89000'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BE89000');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+                                                                        
+         CALL ZZ20390('*OPEN','BE89001Y');                              
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+         DT= DATE;                                                      
+                                                                        
+         CALL OPSTART_INIT;                        /*Parmkort*/         
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+      /* CALL OPDATER_KØRSELSTABEL('START'); */                         
+                                                                        
+         CALL OPEN_SLET_CUR;                                            
+                                                                        
+         CALL FETCH_SLET_CUR;                                           
+                                                                        
+         DO WHILE (EJERSKAB_FUNDET);                                    
+                                                                        
+           /* Der tages ikke højde for forskudt regnskabsår */          
+           IF DCLBE89000T.DAFSTÅ  = 0  &                                
+              DCLBE89000T.DAFGDAT > 0 &                                 
+              DCLBE89000T.DAFGDAT < FORSKÅR0101                         
+           THEN                                                         
+             DO;                                                        
+               DCLBE89100T.BESKRIVELSE ='Skal slettes udfra DAFGDAT';   
+               CALL SLET_EJERSKAB;                                      
+             END;                                                       
+           ELSE                                                         
+             IF DCLBE89000T.DAFSTÅ > 0  &                               
+                DCLBE89000T.DAFSTÅ < FORSKÅR0101                        
+             THEN                                                       
+               DO;                                                      
+                 DCLBE89100T.BESKRIVELSE = 'Skal slettes udfra DAFSTÅ'; 
+                 CALL SLET_EJERSKAB;                                    
+               END;                                                     
+                                                                        
+           IF ANT_COMM > 5000                                           
+           THEN                                                         
+             CALL COMMIT;                                               
+           CALL FETCH_SLET_CUR;                                         
+         END;                                                           
+                                                                        
+         IF ANT_COMM > 0                                                
+         THEN                                                           
+           CALL COMMIT;                                                 
+                                                                        
+         CALL CLOSE_SLET_CUR;                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SLUT kørsel');         
+              END;                                                      
+            WHEN ('OPRET_EVS_FORSK')                                    
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS FORSKUD kørsel');      
+              END;                                                      
+            WHEN ('SUPPL_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SUPPLEMENT kørsel');   
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                 ABENDTXT = 'Afviklings_id skal være '           !!     
+                            'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!       
+                            'eller SUPPL_EVS_SLUT';                     
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+         END;                                                           
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+           WHEN ('OPRET_EVS_FORSK')                                     
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BE55600M.FORSKÅR;                     
+              END;                                                      
+           WHEN ('OPRET_EVS_SLUT')                                      
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                      
+              END;                                                      
+           WHEN ('SUPPL_EVS_SLUT')                                      
+              DO;                                                       
+                 WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;          
+                 WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                      
+              END;                                                      
+           OTHERWISE                                                    
+              DO;                                                       
+                 ABENDTXT = '101 PARAMETERFEJL';                        
+                 CALL PROGRAM_FEJL;                                     
+              END;                                                      
+            END; /* select */                                           
+                                                                        
+  END OPSTART_INIT;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+  /*     FEJLTEKST = ' SQLFEJL ';                                       
+                                                                        
+         ABENDTXT = '250 ' !! FEJLTEKST !! SQLKODE; */                  
+                                                                        
+  /*     ABENDMEDD = 'BE89000 ** 250 ' !! FEJLTEKST !! SQLKODE;*/       
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV TOTALLISTE                           */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+                                                                        
+         LINIE = ZZWS3 !! ' TOTAL FOR SLETNING UDFRA HISTORISK ESR'     
+                       !! ' BE89000 '                                   
+         /*#01*/       !! BE55600M.INDKÅR1                              
+                       !! ' DATO: '                                     
+                       !! DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BE89000 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJERFORHOLD FUNDET PÅ EJERTABEL..........'; 
+         LIN.ANT   = ANTAL_FETCH;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJERFORHOLD SLET MARKET..................'; 
+         LIN.ANT   = ANTAL_SLET;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ DECLARE_SLET_CUR: PROC;                                                
+                                                                        
+     EXEC SQL DECLARE SLETTE_CUR CURSOR WITH HOLD FOR                   
+                                                                        
+     SELECT BS01700T.DINDKAAR,                                          
+            BS01700T.PERSONNUMMER,                                      
+            BS01700T.EKOMNR,                                            
+            BS01700T.EEJDNR,                                            
+            BS01700T.EENHEDLBNR,                                        
+            BS01700T.EPLBNR,                                            
+            BS01700T.DFRAGLD,                                           
+            BS01700T.DTILGLD,                                           
+            BE89000T.DAFSTÅ,                                            
+            BE89000T.DAFGDAT                                            
+     FROM  BE89000T, BS01700T                                           
+     WHERE BS01700T.DINDKAAR      = :WS_TIL_EVS_AAR                     
+       AND BE89000T.DCPRCIR       = BS01700T.PERSONNUMMER               
+       AND BE89000T.EKOMNR        = BS01700T.EKOMNR                     
+       AND BE89000T.EEJDNR        = BS01700T.EEJDNR                     
+       AND BS01700T.DTILGLD       = '9999-12-31-23.59.59.999999'        
+       AND BS01700T.CSLET         ^= '1';                               
+                                                                        
+ END DECLARE_SLET_CUR;                                                  
+ /*********************************************************************/
+ OPEN_SLET_CUR: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN SLETTE_CUR;                                      
+                                                                        
+ END OPEN_SLET_CUR;                                                     
+ /*********************************************************************/
+ CLOSE_SLET_CUR: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE SLETTE_CUR;                                     
+                                                                        
+ END CLOSE_SLET_CUR;                                                    
+ /*********************************************************************/
+ FETCH_SLET_CUR: PROC;                                                  
+                                                                        
+         EJERSKAB_FUNDET = NEJ;                                         
+         DCLBS01700T     = '';                                          
+         DCLBE89000T     = '';                                          
+         DCLBE89100T     = '';                                          
+                                                                        
+         EXEC SQL FETCH SLETTE_CUR                                      
+         INTO                                                           
+            :DCLBS01700T.DINDKAAR,                                      
+            :DCLBS01700T.PERSONNUMMER,                                  
+            :DCLBS01700T.EKOMNR,                                        
+            :DCLBS01700T.EEJDNR,                                        
+            :DCLBS01700T.EENHEDLBNR,                                    
+            :DCLBS01700T.EPLBNR,                                        
+            :DCLBS01700T.DFRAGLD,                                       
+            :DCLBS01700T.DTILGLD,                                       
+            :DCLBE89000T.DAFSTÅ,                                        
+            :DCLBE89000T.DAFGDAT                                        
+            ;                                                           
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_FETCH = ANTAL_FETCH + 1;                           
+               EJERSKAB_FUNDET = JA;                                    
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+               EJERSKAB_FUNDET = NEJ;                                   
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH_SLET';                             
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_SLET_CUR;                                                    
+ /*********************************************************************/
+ SLET_EJERSKAB: PROC;                                                   
+                                                                        
+     EXEC SQL UPDATE BS01700T T1                                        
+     SET CSLET = '1',                                                   
+         CEJBEVS = '1'       /*#01*/                                    
+     WHERE T1.DINDKAAR     = :DCLBS01700T.DINDKAAR                      
+       AND T1.PERSONNUMMER = :DCLBS01700T.PERSONNUMMER                  
+       AND T1.EKOMNR       = :DCLBS01700T.EKOMNR                        
+       AND T1.EEJDNR       = :DCLBS01700T.EEJDNR                        
+       AND T1.EENHEDLBNR   = :DCLBS01700T.EENHEDLBNR                    
+       AND T1.EPLBNR       = :DCLBS01700T.EPLBNR                        
+       AND T1.DFRAGLD      = :DCLBS01700T.DFRAGLD                       
+       AND T1.DTILGLD      = :DCLBS01700T.DTILGLD;                      
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_SLET = ANTAL_SLET + 1;                             
+               ANT_COMM = ANT_COMM + 1;                                 
+               CALL LOG_SLETNING;                                       
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 ABEND SLET_EJERSKAB';                    
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+     END; /* SELECT*/                                                   
+                                                                        
+ END SLET_EJERSKAB;                                                     
+ /*********************************************************************/
+ /* LOG BE89000T.DAFSTÅ                                               */
+ /* LOG BS01700T.DFRAGLD                                              */
+ /* LOG TEXT FELT                                                     */
+ /*********************************************************************/
+ LOG_SLETNING: PROC;                                                    
+                                                                        
+ DCL        HJ_COUNT  BIN FIXED (31);                                   
+                                                                        
+            DCLBE89100T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                
+            DCLBE89100T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;           
+            DCLBE89100T.DATA_ID        = BE55600M.DATA_ID;              
+            DCLBE89100T.DCPRN          = DCLBS01700T.PERSONNUMMER;      
+            DCLBE89100T.EKOMNR         = DCLBS01700T.EKOMNR;            
+            DCLBE89100T.EEJDNR         = DCLBS01700T.EEJDNR;            
+            DCLBE89100T.EENHEDLBNR     = DCLBS01700T.EENHEDLBNR;        
+            DCLBE89100T.EPLBNR         = DCLBS01700T.EPLBNR;            
+            DCLBE89100T.DTILGLD        = DCLBS01700T.DTILGLD;           
+            DCLBE89100T.PROGRAM        = WS_PROGRAMNAVN;                
+            DCLBE89100T.DAFSTÅ         = DCLBE89000T.DAFSTÅ;            
+            DCLBE89100T.DAFGDAT        = DCLBE89000T.DAFGDAT;           
+                                                                        
+            EXEC SQL                                                    
+            SELECT                                                      
+              TIL_EVS_AAR                                               
+            INTO                                                        
+              :DCLBE89100T.TIL_EVS_AAR                                  
+            FROM                                                        
+              BE89100T                                                  
+            WHERE BE89100T.TIL_EVS_AAR    = :DCLBE89100T.TIL_EVS_AAR    
+              AND BE89100T.AFVIKLINGS_ID  = :DCLBE89100T.AFVIKLINGS_ID  
+              AND BE89100T.DATA_ID        = :DCLBE89100T.DATA_ID        
+              AND BE89100T.DCPRN          = :DCLBE89100T.DCPRN          
+              AND BE89100T.EKOMNR         = :DCLBE89100T.EKOMNR         
+              AND BE89100T.EEJDNR         = :DCLBE89100T.EEJDNR         
+              AND BE89100T.EENHEDLBNR     = :DCLBE89100T.EENHEDLBNR     
+              AND BE89100T.EPLBNR         = :DCLBE89100T.EPLBNR;        
+                                                                        
+            SELECT(SQLCA.SQLCODE);                                      
+              WHEN(0)                                                   
+                DO;                                                     
+                  CALL OPDAT_LOG;                                       
+                END;                                                    
+              WHEN(100)                                                 
+                DO;                                                     
+                  CALL OPRET_LOG;                                       
+                END;                                                    
+            OTHERWISE                                                   
+                DO;                                                     
+                  ABENDTXT  = '101 LOG_SLETNING';                       
+                  CALL SQL_FEJL;                                        
+                END;                                                    
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ OPDAT_LOG :PROC;                                                       
+                                                                        
+     EXEC SQL UPDATE BE89100T T1                                        
+     SET TS_OPDAT = CURRENT TIMESTAMP                                   
+     WHERE T1.TIL_EVS_AAR   = :DCLBE89100T.TIL_EVS_AAR                  
+       AND T1.AFVIKLINGS_ID = :DCLBE89100T.AFVIKLINGS_ID                
+       AND T1.DATA_ID       = :DCLBE89100T.DATA_ID                      
+       AND T1.DCPRN         = :DCLBE89100T.DCPRN                        
+       AND T1.EKOMNR        = :DCLBE89100T.EKOMNR                       
+       AND T1.EEJDNR        = :DCLBE89100T.EEJDNR                       
+       AND T1.EENHEDLBNR    = :DCLBE89100T.EENHEDLBNR                   
+       AND T1.EPLBNR        = :DCLBE89100T.EPLBNR                       
+       AND T1.DTILGLD       = :DCLBE89100T.DTILGLD;                     
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+           WHEN (0)                                                     
+             DO;                                                        
+               ANTAL_OPDAT_LOG = ANTAL_OPDAT_LOG + 1;                   
+               ANT_COMM = ANT_COMM + 1;                                 
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 ABEND SLET_EJERSKAB';                    
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+     END; /* SELECT*/                                                   
+                                                                        
+ END OPDAT_LOG;                                                         
+ /*********************************************************************/
+ OPRET_LOG :PROC;                                                       
+                                                                        
+            EXEC SQL                                                    
+            INSERT INTO BE89100T                                        
+            (                                                           
+            TIL_EVS_AAR,                                                
+            AFVIKLINGS_ID,                                              
+            DATA_ID,                                                    
+            DCPRN,                                                      
+            EKOMNR,                                                     
+            EEJDNR,                                                     
+            EENHEDLBNR,                                                 
+            EPLBNR,                                                     
+            DTILGLD,                                                    
+            DAFSTÅ,                                                     
+            DAFGDAT,                                                    
+            TS_OPDAT,                                                   
+            PROGRAM,                                                    
+            BESKRIVELSE                                                 
+            )                                                           
+            VALUES                                                      
+            (                                                           
+            :DCLBE89100T.TIL_EVS_AAR,                                   
+            :DCLBE89100T.AFVIKLINGS_ID,                                 
+            :DCLBE89100T.DATA_ID,                                       
+            :DCLBE89100T.DCPRN,                                         
+            :DCLBE89100T.EKOMNR,                                        
+            :DCLBE89100T.EEJDNR,                                        
+            :DCLBE89100T.EENHEDLBNR,                                    
+            :DCLBE89100T.EPLBNR,                                        
+            :DCLBE89100T.DTILGLD,                                       
+            :DCLBE89100T.DAFSTÅ,                                        
+            :DCLBE89100T.DAFGDAT,                                       
+            CURRENT TIMESTAMP,                                          
+            :DCLBE89100T.PROGRAM,                                       
+            :DCLBE89100T.BESKRIVELSE                                    
+            );                                                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0)                                                     
+              DO;                                                       
+                ANTAL_OPRET_LOG = ANTAL_OPRET_LOG + 1;                  
+                ANT_COMM = ANT_COMM + 1;                                
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                ABENDTXT  = '101 OPRET_LOG';                            
+                CALL SQL_FEJL;                                          
+              END;                                                      
+         END; /*SELECT*/                                                
+                                                                        
+ END OPRET_LOG;                                                         
+ END LOG_SLETNING;                                                      
+ /*********************************************************************/
+ COMMIT :PROC;                                                          
+                                                                        
+     EXEC SQL COMMIT;                                                   
+     Put skip list ('Commit efter ' !! ANTAL_FETCH !!                   
+                    ' fetch på BS01700T og ' !!                         
+                           ANTAL_SLET !!                                
+                    ' slette markeringer');                             
+     ANT_COMM = 0;                                                      
+                                                                        
+ END COMMIT;                                                            
+ /*********************************************************************/
+ /* %INCLUDE BE54998M;     * OPDATER KØRSELSTABEL              */       
+ /*********************************************************************/
+ END BE89000;                                                           

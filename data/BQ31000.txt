@@ -1,0 +1,939 @@
+ BQ31000: PROC OPTIONS (MAIN) REORDER;                                  
+ /**********************************************************************
+ **                                                                   **
+ ** PROJEKT:     EVS SLUT 2002.                                       **
+ ** PROGRAMNAVN: BQ31000.                                             **
+ ** PROGRAMTYPE: BATCH.                                               **
+ ** FUNKTION:    EVS-UDTRÆK FRA SLUT 2002 TIL DANMARKS STATISTIK      **
+ ** PGMFORLØB:   1. DECLARE CURSOR                                    **
+ **              2. ÅBEN CURSOR                                       **
+ **              3. LÆS CURSOR                                        **
+ **              4. SKRIV EVT. UDTRUKNE EVS PERSONNER                 **
+ **              5. LUK FILER/CURSOR                                  **
+ **              6. DAN OPTÆLLINGSLISTE.                              **
+ ** UDDATA:      BQ31000O - UDTRÆK TIL DANMARKS STATISTIK             **
+ ** KONSTRUKTØR: EDWARD LARYEA       EDL, LSU/T&S BRØNDBY 11.12.2001. **
+ **                                                                   **
+ ** RETTEDE AF : EDWARD LARYEA       EDL, LSU/T&S BRØNDBY 17.01.2002. **
+ ** POBNR. 36899  TILFØJET TABEL BQ00300T                             **
+ ** RETTEDE AF : ESBEN BRODERSEN     ESB, LSU/T&S BALLERUP   05.2003. **
+ ** TILRETTET TIL DE NYE TABELLER FOR EVS 2001                        **
+ ** RETTEDE AF : GGP                    , LSU/T&S BALLERUP   11.2003. **
+ ** OMLAGT TIL DE NYE TABELLER FOR EVS 2002 (BQ30000T,BQ40000T)       **
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT       CHAR  (30) INIT ('(C) KOMMUNEDATA A/S 2001');  
+ /**********************************************************************
+ * DECLARE AF STRUKTURER                                               *
+ **********************************************************************/
+ DCL     1 PERSONTAB,                  /* EVS PERONTABELSTRUKTUR */     
+         %INCLUDE BQ02200N;,                                            
+          2 BMANEVSSTI  DEC FIXED(15,2),                                
+          2 MANPENSSTI  DEC FIXED(15,2);                                
+                                                                        
+ DCL     1 RESULTATTAB,                                                 
+         %INCLUDE BQ02300N;;           /* EVS RESULTATSTRUKTUR       */ 
+                                                                        
+ DCL     1 EVS_ESK_FELT,               /* EVS EJERSKABSFELTTABELEN   */ 
+         %INCLUDE BQ31000N;;                                            
+ DCL     1 EVS_RES_FELT,               /* EVS RESULTATFELTTABELEN    */ 
+         %INCLUDE BQ41000N;;                                            
+                                                                        
+ DCL     1 INDK_EJERSK,                 /* INDIKATOR EJENDOMS OPLYSN. */
+         %INCLUDE BQ02006N;;                                            
+ DCL     1 INDK_EVS_RES,                /* INDIKATOR RESULTAT OPLYSN. */
+         %INCLUDE BQ02017N;;                                            
+                                                                        
+ DCL     UDTRAEK_UD  CHAR(537);                                         
+ DCL     1 UDTRAEK   BASED(ADDR(UDTRAEK_UD)),       /* UDTRÆK TIL DS  */
+         %INCLUDE BQ31011N;                                             
+                                                                        
+ /**********************************************************************
+ * DECLARE AF DB2 TABELLER                                             *
+ **********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */
+         EXEC SQL INCLUDE BQ30000K;     /* EVS PERSONTABEL            */
+         EXEC SQL INCLUDE BQ31000K;     /* EVS PERSONTFELTTABEL       */
+         EXEC SQL INCLUDE BQ40000K;     /* EVS RESULTATTABEL          */
+         EXEC SQL INCLUDE BQ41000K;     /* EVS RESULTATFELTTABEL      */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT OG FILER                                          */
+ /*********************************************************************/
+                                                                        
+ DCL     BQ310O          FILE OUTPUT RECORD;                            
+ /**********************************************************************
+ * DECLARE AF BUILTIN                                                  *
+ **********************************************************************/
+                                                                        
+ DCL     (ADDR, PLIDUMP, DATE, NULL,TRANSLATE,SUBSTR) BUILTIN;          
+ /**********************************************************************
+ * DECLARE AF DIVERSE FELTER                                           *
+ **********************************************************************/
+ DCL     DER_ER_FEJL     BIN FIXED (15);                                
+ DCL     SQLKODE         PIC '9999';                                    
+ DCL     FDATO           FIXED DEC (9);                                 
+ DCL     FTID            FIXED DEC (7);                                 
+ DCL     UDSKRDT         CHAR      (10);                                
+ DCL     FSKAF           FIXED DEC (15);                                
+ DCL     FPERS           FIXED DEC (15);                                
+ DCL     FSKRIV          FIXED DEC (15);                                
+ DCL     FFEJL           FIXED DEC (15);                                
+ DCL     FPERSON         FIXED DEC (15);                                
+ DCL     FEJERFORHOLD    FIXED DEC (15);                                
+ DCL     FEJENDOMSVÆRDISKAT  FIXED (15);                                
+                                                                        
+ DCL     PDCPRN          PIC       '9999999999';                        
+ DCL     DATO            CHAR      (6);                                 
+ DCL     PDATO           PIC       '999999' BASED(ADDR(DATO));          
+                                                                        
+ DCL     SLUTNU          BIT;                                           
+                                                                        
+ DCL     1 DT DEF DATO,                                                 
+           2 AA          CHAR      (2),                                 
+           2 MM          CHAR      (2),                                 
+           2 DD          CHAR      (2);                                 
+                                                                        
+ DCL     LINIE           CHAR      (133);                               
+ DCL     1 LIN           DEF LINIE,                                     
+           2 CC1         CHAR           (1),                            
+           2 TEKST       CHAR           (132);                          
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+ DCL     1 ABENDMEDD,                                                   
+           2 ABENDMODUL CHAR      (7),                                  
+           2 ABENDFILL1 CHAR      (1),                                  
+           2 ABENDMEDNR CHAR      (2),                                  
+           2 ABENDFILL2 CHAR      (1),                                  
+           2 ABENDTXT   CHAR      (45);                                 
+                                                                        
+ DCL     ABENDRTKODE    FIXED     (2);                                  
+ DCL     SQLCODE_CH     CHAR      (5);                                  
+ DCL     SQLCODE_PIC    PIC       'SSSS9' DEF SQLCODE_CH;               
+                                                                        
+ DCL     GEM_SKAF_UDTRAEK_DCPRN FIXED (11);                             
+ /*********************************************************************/
+ /*         EXTERNAL ENTRIES                                          */
+ /*********************************************************************/
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000        ENTRY;                                          
+ DCL     MEDDEL         CHAR (56);                                      
+ DCL     ABEND_STR               CHAR (56) BASED(ADDR(ABEND_STRUK));    
+ DCL     1 ABEND_STRUK,                                                 
+          2 MODULNAVN            CHAR (07) INIT ('BQ31000'),            
+          2 HFILL1               CHAR (01) INIT (' '),                  
+          2 MEDDELNR             CHAR (02) INIT ('**'),                 
+          2 HFILL2               CHAR (01) INIT (' '),                  
+          2 MEDDELTXT            CHAR (45) INIT ('');                   
+ /**********************************************************************
+ * ON CONDITIONS                                                       *
+ **********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+               ON ERROR SYSTEM;                                         
+               CALL PLIDUMP  ('SNHOB','MODUL BQ31000');                 
+            END;                                                        
+                                                                        
+ /**********************************************************************
+ * HOUSE-KEEPING                                                       *
+ **********************************************************************/
+         CALL ZS61900;                           /* SSI */              
+         OPEN FILE (BQ310O) TITLE ('BQ31000O');                         
+         CALL ZZ20390 ('*OPEN','BQ31002Y','RECF','FBA');                
+         UDTRAEK_UD = '';                                               
+         /**********************************/                           
+         /* OPSÆT DAGS DATO                */                           
+         /**********************************/                           
+         DATO = DATE;                                                   
+         UDSKRDT = DT.DD !! '/' !! DT.MM !! '-' !! DT.AA;               
+         FDATO = FIXED_DAGSDATO;                                        
+         FTID = 182000;                                                 
+         FSKAF  = 0;                                                    
+         FPERS  = 0;                                                    
+         FSKRIV = 0;                                                    
+         FFEJL  = 0;                                                    
+         FPERSON = 0;                                                   
+         FEJERFORHOLD = 0;                                              
+         FEJENDOMSVÆRDISKAT = 0;                                        
+         GEM_SKAF_UDTRAEK_DCPRN = 0;                                    
+         DER_ER_FEJL = 0;                                               
+         SLUTNU = '0'B;                                                 
+ /**********************************************************************
+ * PROCES                                                              *
+ **********************************************************************/
+                                                                        
+         CALL DECLARE_UDTRAEK;                                          
+                                                                        
+         CALL AABEN_UDTRAEK_CURSOR;                                     
+                                                                        
+         CALL LÆS_UDTRAEK;                                              
+                                                                        
+         DO WHILE (SLUTNU = '0'B);                                      
+                                                                        
+           IF GEM_SKAF_UDTRAEK_DCPRN ^= DCLGENBQ40000T.DCPRN            
+           THEN                                                         
+              FPERSON = FPERSON +1;                                     
+                                                                        
+           GEM_SKAF_UDTRAEK_DCPRN = DCLGENBQ40000T.DCPRN;               
+                                                                        
+           RESULTATTAB = '';                                            
+           INDK_EVS_RES = -1;                                           
+           CALL OVERFØR_DATA_RES;                                       
+           CALL LÆS_RESULTATS_FELTTABEL;                                
+                                                                        
+           CALL DECLARE_PERSON;                                         
+                                                                        
+           CALL AABEN_PERSON_CURSOR;                                    
+           CALL SKAF_PERSON;                                            
+                                                                        
+           PERSONTAB = '';                                              
+           INDK_EJERSK = -1;                                            
+           CALL OVERFØR_DATA_PER;                                       
+           CALL LÆS_EJERSKABS_FELTTABEL;                                
+                                                                        
+           CALL LUK_PERSON_CURSOR;                                      
+                                                                        
+           CALL DAN_UDTRAEK;                                            
+           CALL SKRIV_UDTRAEK;                                          
+                                                                        
+           FEJERFORHOLD = FEJERFORHOLD + 1;                             
+                                                                        
+           CALL LÆS_UDTRAEK;                                            
+         END;                                                           
+                                                                        
+         CALL LUK_UDTRAEK_CURSOR;                                       
+         CALL UDSKRIV_KONTROLLISTE;                                     
+         CALL LUK_FILER;                                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE CURSOR TIL UDTRÆK                                    */
+ /*********************************************************************/
+ DECLARE_UDTRAEK: PROC;                                                 
+                                                                        
+        EXEC SQL DECLARE UDTRAEK_CURSOR CURSOR FOR                      
+                                                                        
+        SELECT  T1.DCPRN                                                
+               ,T1.DINDKAAR                                             
+               ,T1.EKOMNR                                               
+               ,T1.EEJDNR                                               
+               ,T1.ELBNR                                                
+               ,T1.EGENNR                                               
+               ,T1.DFRAGLD                                              
+               ,T1.DRESULTAT                                            
+               ,T1.UDSKRDTO                                             
+               ,T1.COMPLA                                               
+               ,T1.DOMPLACPR                                            
+        FROM   BQ40000T T1                                              
+        WHERE  T1.DINDKAAR  = 2002                                      
+         AND   T1.COMPLA   ^= '1'                                       
+         AND   T1.CKOERSEL  = 'B'                                       
+         AND   T1.EGENNR    =                                           
+                  (SELECT MAX(EGENNR)                                   
+                    FROM BQ40000T T2                                    
+                    WHERE T2.DCPRN     = T1.DCPRN                       
+                    AND   T2.DINDKAAR  = T1.DINDKAAR                    
+                    AND   T2.EKOMNR    = T1.EKOMNR                      
+                    AND   T2.EEJDNR    = T1.EEJDNR                      
+                    AND   T2.ELBNR     = T1.ELBNR                       
+                    AND   T2.CKOERSEL  = 'B'                            
+                    AND   T2.DRESULTAT < '2003-11-06-00.00.00.000000')  
+        ORDER BY T1.DINDKAAR,T1.DCPRN,T1.EKOMNR,                        
+                 T1.EEJDNR, T1.ELBNR                                    
+        FOR FETCH ONLY                                                  
+        ;                                                               
+                                                                        
+        IF SQLCODE ^= 0                                                 
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '261 DECLARE_UDTRAEK_CURSOR,SQLCODE= '       
+                           !! SQLCODE_CH;                               
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END DECLARE_UDTRAEK;                                                   
+ /*********************************************************************/
+ /*      ÅBEN CURSOR TIL UDTRÆK                                       */
+ /*********************************************************************/
+ AABEN_UDTRAEK_CURSOR: PROC;                                            
+                                                                        
+        EXEC SQL OPEN UDTRAEK_CURSOR;                                   
+        IF SQLCODE ^= 0                                                 
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '265 OPEN UDTRAEK_CURSOR,SQLCODE= '          
+                           !! SQLCODE_CH;                               
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END AABEN_UDTRAEK_CURSOR;                                              
+ /*********************************************************************/
+ /*      LÆS UDTRÆK AF RESULTATER DER SKAL LEVERES TIL DS             */
+ /*********************************************************************/
+ LÆS_UDTRAEK: PROC;                                                     
+                                                                        
+        EXEC SQL                                                        
+                                                                        
+             FETCH UDTRAEK_CURSOR                                       
+                                                                        
+             INTO  :DCLGENBQ40000T.DCPRN,                               
+                   :DCLGENBQ40000T.DINDKAAR,                            
+                   :DCLGENBQ40000T.EKOMNR,                              
+                   :DCLGENBQ40000T.EEJDNR,                              
+                   :DCLGENBQ40000T.ELBNR,                               
+                   :DCLGENBQ40000T.EGENNR,                              
+                   :DCLGENBQ40000T.DFRAGLD,                             
+                   :DCLGENBQ40000T.DRESULTAT,                           
+                   :DCLGENBQ40000T.UDSKRDTO,                            
+                   :DCLGENBQ40000T.COMPLA,                              
+                   :DCLGENBQ40000T.DOMPLACPR;                           
+                                                                        
+        IF SQLCODE ^= 0                                                 
+         & SQLCODE ^= 100                                               
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '263 FETCH UDTRAEK_CURSOR,SQLCODE= '         
+                           !! SQLCODE_CH;                               
+             CALL SQL_FEJL;                                             
+           END;                                                         
+        ELSE                                                            
+        IF SQLCODE = 100                                                
+        THEN                                                            
+           SLUTNU = '1'B;                                               
+                                                                        
+        FSKAF = FSKAF + 1;                                              
+                                                                        
+ END LÆS_UDTRAEK;                                                       
+ /*********************************************************************/
+ /*       LUK CURSOR TIL UDTRÆK                                       */
+ /*********************************************************************/
+ LUK_UDTRAEK_CURSOR: PROC;                                              
+                                                                        
+        EXEC SQL CLOSE UDTRAEK_CURSOR;                                  
+                                                                        
+        IF SQLCODE ^= 0                                                 
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '267 CLOSE UDTRAEK_CURSOR,SQLCODE= '         
+                           !! SQLCODE_CH;                               
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END LUK_UDTRAEK_CURSOR;                                                
+ /*********************************************************************/
+ /* LÆS RESULTATSFELTTABEL OG FLYT DATA TIL RESULTATTAB               */
+ /*********************************************************************/
+ LÆS_RESULTATS_FELTTABEL: PROC;                                         
+                                                                        
+        CALL DECLARE_RES_FEL_CUR;                                       
+                                                                        
+        EXEC SQL OPEN RES_FEL_CUR;                                      
+                                                                        
+        IF SQLCA.SQLCODE ^= 0                                           
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '265 OPEN RES_FEL_CUR,SQLCODE= '             
+                         !! SQLCODE_CH;                                 
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+        CALL FETCH_RES_FEL_CUR;                                         
+                                                                        
+        DO WHILE(SQLCODE = 0);                                          
+          EVS_RES_FELT.INDHOLD_C = DCLGENBQ41000T.INDHOLD_C;            
+          EVS_RES_FELT.INDHOLD_D = DCLGENBQ41000T.INDHOLD_D;            
+          EVS_RES_FELT.FELTKODE  = DCLGENBQ41000T.FELTKODE;             
+          CALL FLYT_RES_FEL;                                            
+          CALL FETCH_RES_FEL_CUR;                                       
+        END;                                                            
+                                                                        
+        EXEC SQL CLOSE RES_FEL_CUR;                                     
+                                                                        
+        IF SQLCA.SQLCODE ^= 0                                           
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '264 CLOSE RES_FEL_CUR,SQLCODE= '            
+                         !! SQLCODE_CH;                                 
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END LÆS_RESULTATS_FELTTABEL;                                           
+ /*********************************************************************/
+ /* DECLARE CURSOR TIL DCLGENBQ4100T                                  */
+ /*********************************************************************/
+ DECLARE_RES_FEL_CUR: PROC;                                             
+                                                                        
+        EXEC SQL                                                        
+                                                                        
+             DECLARE RES_FEL_CUR CURSOR FOR                             
+                                                                        
+             SELECT T1.DCPRN,                                           
+                    T1.DINDKAAR,                                        
+                    T1.EKOMNR,                                          
+                    T1.EEJDNR,                                          
+                    T1.ELBNR,                                           
+                    T1.EGENNR,                                          
+                    T1.FELTKODE,                                        
+                    T1.INDHOLD_C,                                       
+                    T1.INDHOLD_D                                        
+                                                                        
+             FROM   BQ41000T T1                                         
+                                                                        
+             WHERE  T1.DCPRN    = :DCLGENBQ40000T.DCPRN                 
+             AND    T1.DINDKAAR = :DCLGENBQ40000T.DINDKAAR              
+             AND    T1.EKOMNR   = :DCLGENBQ40000T.EKOMNR                
+             AND    T1.EEJDNR   = :DCLGENBQ40000T.EEJDNR                
+             AND    T1.ELBNR    = :DCLGENBQ40000T.ELBNR                 
+             AND    T1.EGENNR   = :DCLGENBQ40000T.EGENNR                
+                                                                        
+             ORDER BY T1.FELTKODE                                       
+             FOR FETCH ONLY                                             
+        ;                                                               
+                                                                        
+        IF SQLCA.SQLCODE ^= 0                                           
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '266 DECLARE RES_FEL_CUR,SQLCODE= '          
+                         !! SQLCODE_CH;                                 
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END DECLARE_RES_FEL_CUR;                                               
+ /*********************************************************************/
+ /* FETCH CURSOR TIL DCLGENBQ41000T                                   */
+ /*********************************************************************/
+ FETCH_RES_FEL_CUR: PROC;                                               
+                                                                        
+        EXEC SQL                                                        
+                                                                        
+             FETCH RES_FEL_CUR                                          
+                                                                        
+             INTO  :DCLGENBQ41000T.DCPRN,                               
+                   :DCLGENBQ41000T.DINDKAAR,                            
+                   :DCLGENBQ41000T.EKOMNR,                              
+                   :DCLGENBQ41000T.EEJDNR,                              
+                   :DCLGENBQ41000T.ELBNR,                               
+                   :DCLGENBQ41000T.EGENNR,                              
+                   :DCLGENBQ41000T.FELTKODE,                            
+                   :DCLGENBQ41000T.INDHOLD_C,                           
+                   :DCLGENBQ41000T.INDHOLD_D;                           
+                                                                        
+        IF SQLCODE ^= 0                                                 
+         & SQLCODE ^= 100                                               
+        THEN                                                            
+           DO;                                                          
+             SQLCODE_PIC = SQLCODE;                                     
+             ABENDTXT   =  '264 FETCH RES_FEL_CUR,SQLCODE= '            
+                         !! SQLCODE_CH;                                 
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END FETCH_RES_FEL_CUR;                                                 
+ /*********************************************************************/
+ /*      DECLARE CURSOR FOR PERSON                                    */
+ /*********************************************************************/
+ DECLARE_PERSON: PROC;                                                  
+                                                                        
+       EXEC SQL DECLARE PERSON_CURSOR CURSOR FOR                        
+                                                                        
+       SELECT  T1.DCPRN                                                 
+              ,T1.DINDKAAR                                              
+              ,T1.EKOMNR                                                
+              ,T1.EEJDNR                                                
+              ,T1.ELBNR                                                 
+              ,T1.EGENNR                                                
+              ,T1.CDATAFRA                                              
+              ,T1.DFRAGLD                                               
+              ,T1.DTILGLD                                               
+              ,T1.CSCREGISTMP                                           
+              ,T1.PERSKOD                                               
+              ,T1.MYNDNR                                                
+              ,T1.COMPLA                                                
+              ,T1.DOMPLACPR                                             
+                                                                        
+       FROM  BQ30000T T1                                                
+       WHERE T1.DINDKAAR  =  :DCLGENBQ40000T.DINDKAAR                   
+        AND  T1.DCPRN     =  :DCLGENBQ40000T.DCPRN                      
+        AND  T1.EKOMNR    =  :DCLGENBQ40000T.EKOMNR                     
+        AND  T1.EEJDNR    =  :DCLGENBQ40000T.EEJDNR                     
+        AND  T1.ELBNR     =  :DCLGENBQ40000T.ELBNR                      
+        AND  T1.DFRAGLD   =  :DCLGENBQ40000T.DFRAGLD                    
+        FOR FETCH ONLY                                                  
+       ;                                                                
+                                                                        
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+          DO;                                                           
+            SQLCODE_PIC = SQLCODE;                                      
+            ABENDTXT   =  '262 DECLARE_PERSON_CURSOR,SQLCODE= '         
+                           !! SQLCODE_CH;                               
+            CALL SQL_FEJL;                                              
+          END;                                                          
+                                                                        
+ END DECLARE_PERSON;                                                    
+ /*********************************************************************/
+ /*      SKAF PERSON OPLYSNINGER                                      */
+ /*********************************************************************/
+ SKAF_PERSON: PROC;                                                     
+                                                                        
+       EXEC SQL FETCH PERSON_CURSOR                                     
+          INTO                                                          
+          :DCLGENBQ30000T.DCPRN                                         
+         ,:DCLGENBQ30000T.DINDKAAR                                      
+         ,:DCLGENBQ30000T.EKOMNR                                        
+         ,:DCLGENBQ30000T.EEJDNR                                        
+         ,:DCLGENBQ30000T.ELBNR                                         
+         ,:DCLGENBQ30000T.EGENNR                                        
+         ,:DCLGENBQ30000T.CDATAFRA                                      
+         ,:DCLGENBQ30000T.DFRAGLD                                       
+         ,:DCLGENBQ30000T.DTILGLD                                       
+         ,:DCLGENBQ30000T.CSCREGISTMP                                   
+         ,:DCLGENBQ30000T.PERSKOD                                       
+         ,:DCLGENBQ30000T.MYNDNR                                        
+         ,:DCLGENBQ30000T.COMPLA                                        
+         ,:DCLGENBQ30000T.DOMPLACPR                                     
+       ;                                                                
+                                                                        
+       IF SQLCODE ^= 0                                                  
+        & SQLCODE ^= 100                                                
+       THEN                                                             
+        DO;                                                             
+         SQLCODE_PIC = SQLCODE;                                         
+         ABENDTXT   =  '264 FETCH PERSON_CURSOR,SQLCODE= '              
+                         !! SQLCODE_CH;                                 
+         CALL SQL_FEJL;                                                 
+        END;                                                            
+                                                                        
+        FPERS = FPERS + 1;                                              
+ END SKAF_PERSON;                                                       
+ /*************************************************************/        
+ AABEN_PERSON_CURSOR: PROC;                                             
+                                                                        
+       EXEC SQL OPEN PERSON_CURSOR;                                     
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+        DO;                                                             
+         SQLCODE_PIC = SQLCODE;                                         
+         ABENDTXT   =  '266 OPEN PERSON_CURSOR,SQLCODE= '               
+                         !! SQLCODE_CH;                                 
+         CALL SQL_FEJL;                                                 
+        END;                                                            
+                                                                        
+ END AABEN_PERSON_CURSOR;                                               
+ /**********************************************************/           
+ LUK_PERSON_CURSOR: PROC;                                               
+                                                                        
+       EXEC SQL CLOSE PERSON_CURSOR;                                    
+                                                                        
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+        DO;                                                             
+         SQLCODE_PIC = SQLCODE;                                         
+         ABENDTXT   =  '268 CLOSE PERSON_CURSOR,SQLCODE= '              
+                         !! SQLCODE_CH;                                 
+         CALL SQL_FEJL;                                                 
+        END;                                                            
+                                                                        
+ END LUK_PERSON_CURSOR;                                                 
+ /*********************************************************************/
+ /* LÆS EJERSKABSFELTTABEL OG FLYT DATA TIL PERSONTAB                 */
+ /*********************************************************************/
+ LÆS_EJERSKABS_FELTTABEL: PROC;                                         
+                                                                        
+       CALL DECLARE_ESK_FEL_CUR;                                        
+                                                                        
+       EXEC SQL OPEN ESK_FEL_CUR;                                       
+                                                                        
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+          DO;                                                           
+            SQLCODE_PIC = SQLCODE;                                      
+            ABENDTXT   =  '269 OPEN ESK_FEL_CUR,SQLCODE= '              
+                          !! SQLCODE_CH;                                
+            CALL SQL_FEJL;                                              
+          END;                                                          
+                                                                        
+       CALL FETCH_ESK_FEL_CUR;                                          
+                                                                        
+       DO WHILE(SQLCODE = 0);                                           
+          SELECT;                                                       
+            WHEN (DCLGENBQ31000T.FELTKODE = 180)                        
+                PERSONTAB.BMANEVSSTI=DCLGENBQ31000T.INDHOLD_D;          
+            WHEN (DCLGENBQ31000T.FELTKODE = 233)                        
+                PERSONTAB.MANPENSSTI=DCLGENBQ31000T.INDHOLD_D;          
+            OTHER                                                       
+              DO;                                                       
+                 EVS_ESK_FELT.INDHOLD_C = DCLGENBQ31000T.INDHOLD_C;     
+                 EVS_ESK_FELT.INDHOLD_D = DCLGENBQ31000T.INDHOLD_D;     
+                 EVS_ESK_FELT.FELTKODE  = DCLGENBQ31000T.FELTKODE;      
+                 CALL FLYT_ESK_FEL;                                     
+              END;                                                      
+          END;                                                          
+                                                                        
+          CALL FETCH_ESK_FEL_CUR;                                       
+       END;                                                             
+                                                                        
+       EXEC SQL CLOSE ESK_FEL_CUR;                                      
+                                                                        
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+          DO;                                                           
+            SQLCODE_PIC = SQLCODE;                                      
+            ABENDTXT   =  '270 CLOSE ESK_FEL_CUR,SQLCODE= '             
+                          !! SQLCODE_CH;                                
+            CALL SQL_FEJL;                                              
+          END;                                                          
+                                                                        
+ END LÆS_EJERSKABS_FELTTABEL;                                           
+ /*********************************************************************/
+ /* DECLARE CURSOR TIL EVS_ESK_FELT                                   */
+ /*********************************************************************/
+ DECLARE_ESK_FEL_CUR: PROC;                                             
+                                                                        
+       EXEC SQL                                                         
+                                                                        
+            DECLARE ESK_FEL_CUR CURSOR FOR                              
+                                                                        
+            SELECT T1.DCPRN,                                            
+                   T1.DINDKAAR,                                         
+                   T1.EKOMNR,                                           
+                   T1.EEJDNR,                                           
+                   T1.ELBNR,                                            
+                   T1.EGENNR,                                           
+                   T1.FELTKODE,                                         
+                   T1.INDHOLD_C,                                        
+                   T1.INDHOLD_D                                         
+                                                                        
+            FROM     BQ31000T T1                                        
+                                                                        
+            WHERE    T1.DCPRN    = :DCLGENBQ30000T.DCPRN                
+            AND      T1.DINDKAAR = :DCLGENBQ30000T.DINDKAAR             
+            AND      T1.EKOMNR   = :DCLGENBQ30000T.EKOMNR               
+            AND      T1.EEJDNR   = :DCLGENBQ30000T.EEJDNR               
+            AND      T1.ELBNR    = :DCLGENBQ30000T.ELBNR                
+            AND      T1.EGENNR   = :DCLGENBQ30000T.EGENNR               
+                                                                        
+            ORDER BY T1.FELTKODE                                        
+            FOR FETCH ONLY                                              
+       ;                                                                
+                                                                        
+       IF SQLCODE ^= 0                                                  
+       THEN                                                             
+          DO;                                                           
+            SQLCODE_PIC = SQLCODE;                                      
+            ABENDTXT   =  '272 DECLARE ESK_FEL_CUR,SQLCODE= '           
+                          !! SQLCODE_CH;                                
+            CALL SQL_FEJL;                                              
+          END;                                                          
+                                                                        
+ END DECLARE_ESK_FEL_CUR;                                               
+ /*********************************************************************/
+ /* FETCH CURSOR TIL EVS_ESK_FELT                                     */
+ /*********************************************************************/
+ FETCH_ESK_FEL_CUR: PROC;                                               
+                                                                        
+       EXEC SQL                                                         
+                                                                        
+            FETCH ESK_FEL_CUR                                           
+                                                                        
+            INTO  :DCLGENBQ31000T.DCPRN,                                
+                  :DCLGENBQ31000T.DINDKAAR,                             
+                  :DCLGENBQ31000T.EKOMNR,                               
+                  :DCLGENBQ31000T.EEJDNR,                               
+                  :DCLGENBQ31000T.ELBNR,                                
+                  :DCLGENBQ31000T.EGENNR,                               
+                  :DCLGENBQ31000T.FELTKODE,                             
+                  :DCLGENBQ31000T.INDHOLD_C,                            
+                  :DCLGENBQ31000T.INDHOLD_D;                            
+                                                                        
+       IF SQLCODE ^= 0                                                  
+        & SQLCODE ^= 100                                                
+       THEN                                                             
+          DO;                                                           
+            SQLCODE_PIC = SQLCODE;                                      
+            ABENDTXT   =  '273 FETCH ESK_FEL_CUR,SQLCODE= '             
+                        !! SQLCODE_CH;                                  
+            CALL SQL_FEJL;                                              
+          END;                                                          
+                                                                        
+ END FETCH_ESK_FEL_CUR;                                                 
+ /*********************************************************************/
+ /*      DAN UDTRÆK                                                   */
+ /*********************************************************************/
+ DAN_UDTRAEK: PROC;                                                     
+ DCL HJCBERGRL  PIC '9';                                                
+ DCL HJCEJDTYPE PIC '9';                                                
+                                                                        
+         UDTRAEK_UD = '';                                               
+         UDTRAEK    = '';                                               
+                                                                        
+         UDTRAEK.DCPRN       =   RESULTATTAB.DCPRN;                     
+         UDTRAEK.DINDKAAR    =   RESULTATTAB.DINDKAAR ;                 
+         UDTRAEK.EKOMNR      =   RESULTATTAB.EKOMNR ;                   
+         UDTRAEK.EEJDNR      =   RESULTATTAB.EEJDNR ;                   
+         UDTRAEK.ELBNR       =   RESULTATTAB.ELBNR ;                    
+         UDTRAEK.EGENNR      =   RESULTATTAB.EGENNR ;                   
+         UDTRAEK.CDATAFRA    =   PERSONTAB.CDATAFRA;                    
+         UDTRAEK.DFRAGLD     =   RESULTATTAB.DFRAGLD ;                  
+         UDTRAEK.DTILGLD     =   PERSONTAB.DTILGLD ;                    
+         UDTRAEK.CSCREGISTMP =  PERSONTAB.CSCREGISTMP ;                 
+         UDTRAEK.PERSKOD     =  PERSONTAB.PERSKOD   ;                   
+         UDTRAEK.UDSKRDTO    =  RESULTATTAB.UDSKRDTO ;                  
+         UDTRAEK.MYNDNR      =  PERSONTAB.MYNDNR    ;                   
+         UDTRAEK.BEJBOLANV =  PERSONTAB.BEJBOLANV;                      
+         UDTRAEK.CSUPPL      =  PERSONTAB.CSUPPL ;                      
+         UDTRAEK.CAJOUR      =  PERSONTAB.CAJOUR ;                      
+         UDTRAEK.CÆGTOPR     =  PERSONTAB.CÆGTOPR ;                     
+         UDTRAEK.CFRÅR       =  PERSONTAB.CFRÅR  ;                      
+         UDTRAEK.CEJBEVS     =  PERSONTAB.CEJBEVS ;                     
+         UDTRAEK.CSLET       =  PERSONTAB.CSLET  ;                      
+         UDTRAEK.CNULSTIL    =  PERSONTAB.CNULSTIL ;                    
+         UDTRAEK.BBERGRL     =  PERSONTAB.BBERGRL;                      
+         UDTRAEK.BBERGRL_02      =  PERSONTAB.BBERGRL_02;               
+                                                                        
+         IF RESULTATTAB.EKOMNR = 999                                    
+         THEN                                                           
+           UDTRAEK.BBERGRL_015ANV  =  PERSONTAB.BBERGRLUDL_01+          
+                                      PERSONTAB.BOMBTILBUDL_01;         
+         ELSE                                                           
+           UDTRAEK.BBERGRL_015ANV  =  PERSONTAB.BBERGRL_015ANV;         
+         UDTRAEK.BBER2FAM_02     =  PERSONTAB.BBER2FAM_02;              
+         UDTRAEK.BBER2FAM_015ANV =  PERSONTAB.BBER2FAM_015ANV;          
+                                                                        
+         UDTRAEK.CEJDTYPE    =  PERSONTAB.CEJDTYPE_02;                  
+                                                                        
+         IF INDK_EJERSK.BGRPROM1_I = 0                                  
+         THEN                                                           
+           UDTRAEK.BGRPROM1    =  PERSONTAB.BGRPROM1;                   
+         ELSE                                                           
+           UDTRAEK.BGRPROM1    =  0;                                    
+         UDTRAEK.BPROM1      =  PERSONTAB.BPROM1;                       
+         IF INDK_EJERSK.BGRPROM2_I = 0                                  
+         THEN                                                           
+           UDTRAEK.BGRPROM2    =  PERSONTAB.BGRPROM2;                   
+         ELSE                                                           
+           UDTRAEK.BGRPROM2    =  0;                                    
+         UDTRAEK.BPROM2      =  PERSONTAB.BPROM2   ;                    
+         UDTRAEK.CNEDSL1     =  PERSONTAB.CNEDSL1  ;                    
+         UDTRAEK.BNEDSL1     =  PERSONTAB.BNEDSL1  ;                    
+         UDTRAEK.CNEDSL2   =    PERSONTAB.CNEDSL2  ;                    
+         UDTRAEK.BNEDSL2   =    PERSONTAB.BNEDSL2  ;                    
+         UDTRAEK.CSKPLOMF  =    PERSONTAB.CSKPLOMF ;                    
+         UDTRAEK.CBILAG_1  =  PERSONTAB.CBILAG_1   ;                    
+         UDTRAEK.FELT759   =  PERSONTAB.FELT759    ;                    
+         UDTRAEK.BPENSNED  =  PERSONTAB.BPENSNED   ;                    
+         UDTRAEK.BPENSNÆ   =  PERSONTAB.BPENSNÆ    ;                    
+         UDTRAEK.BPENSRED  =  RESULTATTAB.BPENSRED ;                    
+         UDTRAEK.BSTIBGR   =  PERSONTAB.BSTIBEGR    ;                   
+         UDTRAEK.CSTIBLB   =  PERSONTAB.CSTIBLB    ;                    
+         UDTRAEK.BSTITIL   =  PERSONTAB.BSTITIL    ;                    
+         UDTRAEK.FELT750   =  PERSONTAB.FELT750    ;                    
+         UDTRAEK.BUDLSKC   =  PERSONTAB.BUDLSKC    ;                    
+         UDTRAEK.CEKSEMP   =  PERSONTAB.CEKSEMP    ;                    
+         UDTRAEK.DATO0107  =  PERSONTAB.DATO0107   ;                    
+         UDTRAEK.DOVTG     =  PERSONTAB.DOVTG      ;                    
+         UDTRAEK.DAFSTAA   =  PERSONTAB.DAFSTAA    ;                    
+         IF INDK_EJERSK.GPCTEJER_I = 0                                  
+         THEN                                                           
+           UDTRAEK.GPCTEJER    =  PERSONTAB.GPCTEJER;                   
+         ELSE                                                           
+           UDTRAEK.GPCTEJER    =  0;                                    
+         UDTRAEK.FDAGUDLE  =  PERSONTAB.FDAGUDLE   ;                    
+         UDTRAEK.GPCTUDLE  =  PERSONTAB.GPCTUDLE   ;                    
+         UDTRAEK.FUDL100   =  PERSONTAB.FUDL100    ;                    
+         UDTRAEK.FDAGERHV  =  PERSONTAB.FDAGERHV   ;                    
+         UDTRAEK.GPCTERHV  =  PERSONTAB.GPCTERHV   ;                    
+         UDTRAEK.FERHVFLER =  PERSONTAB.FERHVFLER  ;                    
+         UDTRAEK.CUDLMAN   =  PERSONTAB.CUDLMAN    ;                    
+         UDTRAEK.CUDLHEL   =  PERSONTAB.CUDLHEL    ;                    
+         UDTRAEK.CUDLDEL   =  PERSONTAB.CUDLDEL    ;                    
+         UDTRAEK.CERHV     =  PERSONTAB.CERHV      ;                    
+         UDTRAEK.BSUM1     =  PERSONTAB.BSUM1      ;                    
+         UDTRAEK.BSUM2     =  PERSONTAB.BSUM2      ;                    
+         UDTRAEK.BNETTO    =  PERSONTAB.BNETTO     ;                    
+         UDTRAEK.BEJERAN   =  RESULTATTAB.BEJERAN  ;                    
+         FEJENDOMSVÆRDISKAT = FEJENDOMSVÆRDISKAT+UDTRAEK.BEJERAN;       
+         IF INDK_EJERSK.BEVSMAN_I = 0                                   
+         THEN                                                           
+           UDTRAEK.BEVSMAN   =  PERSONTAB.BEVSMAN;                      
+         ELSE                                                           
+           UDTRAEK.BEVSMAN   = 0;                                       
+                                                                        
+         UDTRAEK.BMANEVSSTI = PERSONTAB.BMANEVSSTI;                     
+         UDTRAEK.MANPENSSTI  = PERSONTAB.MANPENSSTI ;                   
+                                                                        
+         UDTRAEK.BMANNEDSL   = PERSONTAB.BMANNEDSL ;                    
+         UDTRAEK.FEJLNR      = PERSONTAB.FEJLNR    ;                    
+         IF INDK_EJERSK.BBER2FAM_I = 0                                  
+         THEN                                                           
+           UDTRAEK.BBER2FAM   = PERSONTAB.BBER2FAM;                     
+         ELSE                                                           
+           UDTRAEK.BBER2FAM   = 0;                                      
+         UDTRAEK.BEJBOL1    = PERSONTAB.BEJBOL1;                        
+         UDTRAEK.BEJBOL2    = PERSONTAB.BEJBOL2;                        
+         UDTRAEK.CANVEBOL   = PERSONTAB.CANVEBOL ;                      
+         UDTRAEK.FELT760    = PERSONTAB.FELT760 ;                       
+         UDTRAEK.CELØNCOR   = PERSONTAB.CELØNCOR ;                      
+         UDTRAEK.CENKE      = PERSONTAB.CENKE  ;                        
+         UDTRAEK.CPTYPGL    = PERSONTAB.CPTYPGL ;                       
+         UDTRAEK.CPTYPSLUT  = PERSONTAB.CPTYPSLUT;                      
+         IF INDK_EJERSK.BFORSKAT_I = 0                                  
+         THEN                                                           
+           UDTRAEK.BFORSKAT  = PERSONTAB.BFORSKAT;                      
+         ELSE                                                           
+           UDTRAEK.BFORSKAT  = 0;                                       
+         UDTRAEK.CFORSKAT    = PERSONTAB.CFORSKAT   ;                   
+         UDTRAEK.DOVTGFOR    = PERSONTAB.DOVTGFOR   ;                   
+         UDTRAEK.DAFSTAAFOR  = PERSONTAB.DAFSTAAFOR ;                   
+         UDTRAEK.GPCTEJERFOR = PERSONTAB.GPCTEJERFOR ;                  
+         UDTRAEK.BFSKAT      = PERSONTAB.BFSKAT     ;                   
+         UDTRAEK.BERHVAN     = PERSONTAB.BERHVAN    ;                   
+         UDTRAEK.BPRIVAN     = PERSONTAB.BPRIVAN    ;                   
+         IF INDK_EJERSK.BPENSNEDGL_I = 0                                
+         THEN                                                           
+           UDTRAEK.BPENSNEDGL  = PERSONTAB.BPENSNEDGL;                  
+         ELSE                                                           
+           UDTRAEK.BPENSNEDGL  = 0;                                     
+         UDTRAEK.BEVSGL      = PERSONTAB.BEVSGL     ;                   
+         IF INDK_EJERSK.BEVSGL_I = 0                                    
+         THEN                                                           
+           UDTRAEK.BEVSGL = PERSONTAB.BEVSGL;                           
+         ELSE                                                           
+           UDTRAEK.BEVSGL = 0;                                          
+         UDTRAEK.CIVILSTAND  = PERSONTAB.CIVILSTAND ;                   
+         IF INDK_EVS_RES.BPENSIND_I = 0                                 
+         THEN                                                           
+           UDTRAEK.BPENSIND    = RESULTATTAB.BPENSIND;                  
+         ELSE                                                           
+           UDTRAEK.BPENSIND    = 0;                                     
+         UDTRAEK.COMPLA      = RESULTATTAB.COMPLA ;                     
+         UDTRAEK.DOMPLACPR   = RESULTATTAB.DOMPLACPR;                   
+                                                                        
+ END DAN_UDTRAEK;                                                       
+ /*********************************************************************/
+ /*      SKRIV UDTRÆK                                                 */
+ /*********************************************************************/
+ SKRIV_UDTRAEK: PROC;                                                   
+         WRITE FILE (BQ310O) FROM (UDTRAEK_UD);                         
+         FSKRIV  = FSKRIV + 1;                                          
+ END SKRIV_UDTRAEK;                                                     
+ /******************************************************************/   
+ OVERFØR_DATA_PER: PROC;                                                
+                                                                        
+       PERSONTAB.CDATAFRA      =   DCLGENBQ30000T.CDATAFRA;             
+       PERSONTAB.DTILGLD       =   DCLGENBQ30000T.DTILGLD;              
+       PERSONTAB.CSCREGISTMP   =   DCLGENBQ30000T.CSCREGISTMP;          
+       PERSONTAB.PERSKOD       =   DCLGENBQ30000T.PERSKOD;              
+       PERSONTAB.MYNDNR        =   DCLGENBQ30000T.MYNDNR;               
+                                                                        
+ END OVERFØR_DATA_PER;                                                  
+ /******************************************************************/   
+ OVERFØR_DATA_RES: PROC;                                                
+                                                                        
+       RESULTATTAB.DCPRN       =   DCLGENBQ40000T.DCPRN  ;              
+       RESULTATTAB.DINDKAAR    =   DCLGENBQ40000T.DINDKAAR;             
+       RESULTATTAB.EKOMNR      =   DCLGENBQ40000T.EKOMNR  ;             
+       RESULTATTAB.EEJDNR      =   DCLGENBQ40000T.EEJDNR  ;             
+       RESULTATTAB.ELBNR       =   DCLGENBQ40000T.ELBNR   ;             
+       RESULTATTAB.EGENNR      =   DCLGENBQ40000T.EGENNR  ;             
+       RESULTATTAB.DFRAGLD     =   DCLGENBQ40000T.DFRAGLD ;             
+       RESULTATTAB.UDSKRDTO    =   DCLGENBQ40000T.UDSKRDTO;             
+       RESULTATTAB.COMPLA      =   DCLGENBQ40000T.COMPLA;               
+       RESULTATTAB.DOMPLACPR   =   DCLGENBQ40000T.DOMPLACPR;            
+                                                                        
+ END OVERFØR_DATA_RES;                                                  
+ /*********************************************************************/
+ /*      UDSKRIV KONTROLLISTE                                         */
+ /*********************************************************************/
+ UDSKRIV_KONTROLLISTE: PROC;                                            
+                                                                        
+         LINIE      = ASAK1 !! ' ';                                     
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' BQ31000L            ' !!                         
+                      'LISTE OVER OPTÆLLINGSTOTALER   ' !!              
+                      'UDSKREVET DEN ' !! UDSKRDT;                      
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL LÆSTE -  BQ40000T.......: ' !! FSKAF;      
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL LÆSTE -  BQ30000T.......: ' !! FPERS;      
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL SKREVNE - BQ31000D......: ' !! FSKRIV;     
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL RÆKKER MED FEJL.........: ' !! FFEJL;      
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL PERSONER MED EJERFORHOLD: ' !! FPERSON;    
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' ANTAL EJERFORHOLD.............: ' !!             
+         FEJERFORHOLD;                                                  
+         CALL ZZ20300(LINIE,'02');                                      
+                                                                        
+         LINIE      = '';                                               
+         LIN.CC1   = ASAS2;                                             
+         LIN.TEKST = ' SAMLET EJENDOMSVÆRDISKAT......: ' !!             
+         FEJENDOMSVÆRDISKAT;                                            
+         CALL ZZ20300(LINIE,'02');                                      
+ END UDSKRIV_KONTROLLISTE;                                              
+ /*********************************************************************/
+ /*      LUK DIVERSE FILER                                            */
+ /*********************************************************************/
+ LUK_FILER: PROC;                                                       
+         CLOSE FILE(BQ310O);                                            
+         CALL ZZ20300(LINIE,'99');                                      
+ END LUK_FILER;                                                         
+ /***************************************************/                  
+ SQL_FEJL: PROC;                                                        
+                                                                        
+       CALL ZS67000(SQLCA);                                             
+        ABENDFILL1  = ' ';                                              
+        ABENDFILL2  = ' ';                                              
+        ABENDMODUL   = 'BQ31000';                                       
+        ABENDMEDNR   = '**';                                            
+        CALL ZS30101(5,ABENDMEDD,2);                                    
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /*      MACROER                                                      */
+ /*********************************************************************/
+         %INCLUDE BS36103M;     /* RETURNERE DATO OG TID I FIXED TID  */
+         %INCLUDE BS36104M;     /* PÆN DATO                           */
+         %INCLUDE BQ02020M;              /* FLYT_ESK_FEL              */
+         %INCLUDE BQ02016M;              /* FLYT_RES_FEL              */
+                                                                        
+      ; /* UNDGÅ PROBLEMER MED LABEL */                                 
+ DCL 1 ZM,                                                              
+       2  DUMMY           CHAR (01);                                    
+ END BQ31000;                                                           

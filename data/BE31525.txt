@@ -1,0 +1,328 @@
+  PROCESS OPT(TIME);                                                    
+ BE31525: /* PÅFØR EVT. HENVISNINGSNR. PÅ EVS-UDTRÆK */                 
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : AT SKAFFE NUVÆRENDE ELLER TIDLIGERE ÆGTEFÆLLES PERSONNUM- * 
+ *          MER FRA MINI MT-FIL FRA NYT SLUTÅR TIL PÅSÆTNING PÅ EVS   * 
+ *          UDTRÆK FRA GL. SLUTÅR AF HENSYN TIL BEREGNINGEN AF UD-    * 
+ *          GANGSPUNKT FOR EVT. STIGNINGSBEGRÆNSNING FRA GL. SLUTÅR   * 
+ *          TIL NYT SLUTÅR. DETTE UDGANGSPUNKT SKAL VED OVERTAGELSE   * 
+ *          AF EJENDOM FRA ÆGTEFÆLLEN BEREGNES UDFRA DENNES EJENDOMS- * 
+ *          VÆRDISKAT FOR GL. SLUTÅR HVIS DEN AKTUELLE EJER FØRST HAR * 
+ *          KØBT/OVERTAGET EJENDOMMEN I LØBET AF NYT SLUTÅR F.EKS.    * 
+ *          VED SKILSMISSE, DØDSFALD ELLER HANDEL MELLEM ÆGTEFÆLLER   * 
+ *          SAMT VED ÆGTESKAB I NYT SLUTÅR HVOR KUN DEN ENE ÆGTEFÆLLE * 
+ *          EJEDE EJENDOMMEN I GL. SLUTÅR.                            * 
+ *                                                                    * 
+ *          HVIS ÆGTEFÆLLE PERSONNUMMER SKAFFES SKRIVES TO INDIVIDER  * 
+ *          1 MED SORTCPR=DHENVN OG 1 MED SORTCPR=DCPRN AF HENSYN TIL * 
+ *          ALTID AT KUNNE BEREGNE UDGANGSPUNKT FOR STIGNINGSBEGRÆNS- * 
+ *          NING JVF. OVENFOR.                                        * 
+ *                                                                    * 
+ * INPUT  : B.H30000D  UDTRÆK FRA EVS GL. SLUTÅR.                     * 
+ *          B.H65501D  MINI MT-FIL FRA EVS NYT SLUTÅR.                * 
+ *                                                                    * 
+ * OUTPUT : B.H31500D  EVS UDTRÆK EFTER PÅFØRSEL AF EVT. ÆGTEFÆLLE    * 
+ *                     PERSONNUMMER.                                  * 
+ *          BE31501Y   KØRSELSKONTROLLISTE                            * 
+ *                                                                    * 
+ * PROGRAMMØR: AAGE RASMUSSEN   LSU T&S EVS            NOV 2001       * 
+ * RETTET:     OLUF MØRK        LSU T&S EVS            JUN 2002       * 
+ * RETTET:     AAGE RASMUSSEN   LSU T&S EVS            OKT 2002       * 
+ * RETTET:     BO SCHMIDT       LSU T&S EVS            JUL 2003       * 
+ * RETTET:     BO SCHMIDT       LSU T&S EVS            JUN 2004       * 
+ * RETTET      ESBEN BRODERSEN          SEP    2018                   * 
+ *             TIL SLUT 2018 EJENDOMME KAN NU VÆRE OPDELT MED         * 
+ *             EENHEDLBNR SOM VIL VÆRE UDFYLDT FOR 2 FAMILIE BOLIG    * 
+ * Forskud2021 Per Brunk                               Marts 2020     * 
+ * SLUT 2021   Z6SEP (kopi af BE31500)                 Marts 2021     * 
+ *             BE65300N rettet til BE65322N og BH65300M er rettet til * 
+ *             BE55300M                                               * 
+ * Forskud2025 Tina Carstens, TIC                   BF17 15.05.2023   * 
+ * Forskud2025 Jan Jensen, JJJ BE55600M erstatter BE55300M 18.06.2024 * 
+ *********************************************************************/ 
+                                                                        
+ DCL COPYRIGHT   CHAR (30)   STATIC    INIT ('COPYRIGHT KMD A/S 2004'); 
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BE655I FILE RECORD INPUT;     /* MINI MT-FIL */                
+ DCL     BE300I FILE RECORD INPUT;     /* EVS SLUT UDTRÆK */            
+ DCL     BE315O FILE RECORD OUTPUT;    /* BEHANDLET EVS SLUT UDTRÆK */  
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /********************************************************************* 
+ *       DECLARE AF MINI MT-FIL FRA GL. SLUTÅR                        * 
+ *********************************************************************/ 
+ DCL     BE655_AR CHAR (200) VAR;                                       
+ DCL     1 BE655 BASED(ADDR(BE655_AR)),                                 
+           3 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BE65325N;;  /* RUL */                               
+ /********************************************************************* 
+ *       DECLARE AF EVS UDTRÆK INPUT                                  * 
+ *********************************************************************/ 
+ DCL     1 BE300,                                                       
+           %INCLUDE BE30000N;;                                          
+ /********************************************************************* 
+ *       DECLARE AF EVS UDTRÆK OUTPUT                                 * 
+ *********************************************************************/ 
+ DCL     1 BE315,                                                       
+           %INCLUDE BE31500N;;                                          
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                        /* TÆLLEVÆRKER TIL TOTALLISTEN */ 
+           2 LÆS_BE655   FIXED DEC (7),                                 
+           2 LÆS_BE300   FIXED DEC (7),                                 
+           2 FUNDET      FIXED DEC (7),                                 
+           2 FDHENVN     FIXED DEC (7),                                 
+           2 SKREVET     FIXED DEC (7);                                 
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL   1 BE55600M,                                                      
+         %INCLUDE BE55600M; /* OPSÆT AKTUELT INDKOMSTÅR M.V. */         
+                                                                        
+ DCL     CPRPIC          PIC       '(10)9';                             
+                                                                        
+ DCL     EOF_BE655       BIT       (1);                                 
+ DCL     EOF_BE300       BIT       (1);                                 
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS61900         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE31525L'),                                        
+           2 F1          CHAR      (21)      INIT      (' '),           
+           2 TEKST2      CHAR      (52)      INIT      (                
+           'SKAF ÆGTEFÆLLE (DHENVN) TIL EVS SLUT UDTRÆK'),              
+           2 F2          CHAR      (21)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (63)      INIT      ((63)' ');       
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+         EOF_BE655 = NEJ;                                               
+         EOF_BE300 = NEJ;                                               
+         ON ERROR CALL PLIDUMP ('SNHOB');                               
+         OPEN FILE (BE655I) TITLE ('BE65501I');                         
+         OPEN FILE (BE300I) TITLE ('BE30000I');                         
+         OPEN FILE (BE315O) TITLE ('BE31500O');                         
+         ON ENDFILE (BE655I)                                            
+         BEGIN;                                                         
+            EOF_BE655 = JA;                                             
+         END;                                                           
+         ON ENDFILE (BE300I)                                            
+         BEGIN;                                                         
+            EOF_BE655 = JA;                                             
+            EOF_BE300 = JA;                                             
+         END;                                                           
+         CALL ZZ20390 ('*OPEN','BE31501Y');                             
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+         TV = '';                                                       
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_BE655;                                                
+         CALL LÆS_BE300;                                                
+                                                                        
+         DO WHILE (EOF_BE655 = NEJ ! EOF_BE300 = NEJ);                  
+            SELECT;                                                     
+               WHEN (BE300.DCPRN > BE655.DCPRN & EOF_BE655 = NEJ)       
+                  CALL LÆS_BE655;                                       
+               WHEN (BE300.DCPRN < BE655.DCPRN & EOF_BE300 = NEJ)       
+                  DO;                                                   
+                     BE315.CSBSK = ' ';                                 
+                     CALL SKRIV_SINGLE;                                 
+                     CALL LÆS_BE300;                                    
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     TV.FUNDET = TV.FUNDET + 1;                         
+                     BE315.CSBSK = BE655.HIST_OPL(GLSLUTÅR).CSBSK;      
+                     IF (BE655.HIST_OPL(GLSLUTÅR).DHENVN > 0 !          
+                         BE655.HIST_OPL(SLUTÅR).DHENVN > 0) &           
+                         BE655.CSTATUS ^= '2'      /* IKKE OMPLACERET */
+                     THEN                                               
+                        CALL SKRIV_DUBLET;                              
+                     CALL SKRIV_SINGLE;                                 
+                     CALL LÆS_BE300;                                    
+                  END;                                                  
+            END;                                                        
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS EVS UDTRÆK                                               * 
+ *********************************************************************/ 
+ LÆS_BE300:                                                             
+ PROC;                                                                  
+                                                                        
+         READ FILE (BE300I) INTO (BE300);                               
+                                                                        
+         IF EOF_BE300 = NEJ                                             
+         THEN                                                           
+            TV.LÆS_BE300 = TV.LÆS_BE300 + 1;                            
+                                                                        
+ END LÆS_BE300;                                                         
+ /********************************************************************* 
+ *       LÆS MINI MT-FIL                                              * 
+ *********************************************************************/ 
+ LÆS_BE655:                                                             
+ PROC;                                                                  
+                                                                        
+         READ FILE (BE655I) INTO (BE655_AR);                            
+                                                                        
+         IF EOF_BE655 = NEJ & BE655.DCPRN < 9999999999                  
+         THEN                                                           
+            TV.LÆS_BE655 = TV.LÆS_BE655 + 1;                            
+                                                                        
+ END LÆS_BE655;                                                         
+ /********************************************************************* 
+ *       SKRIV EVS UDTRÆK                                             * 
+ *********************************************************************/ 
+ SKRIV_SINGLE:                                                          
+ PROC;                                                                  
+                                                                        
+         BE315.EVS_SLUT = BE300, BY NAME;                               
+         BE315.SORTCPR  = BE300.DCPRN;                                  
+         BE315.SORTKOM  = BE300.EKOMNR;                                 
+         BE315.SORTEJD  = BE300.EEJDNR;                                 
+         BE315.SORTEENHEDLBNR = BE300.EENHEDLBNR;                       
+         BE315.CFRATYPE = '2'; /* FRA EVS SLUT */                       
+                                                                        
+         WRITE FILE (BE315O) FROM (BE315);                              
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+                                                                        
+ END SKRIV_SINGLE;                                                      
+ /********************************************************************* 
+ *       SKRIV EVS UDTRÆK                                             * 
+ *********************************************************************/ 
+ SKRIV_DUBLET:                                                          
+ PROC;                                                                  
+                                                                        
+         BE315.EVS_SLUT = BE300, BY NAME;                               
+                                                                        
+         IF BE655.HIST_OPL(GLSLUTÅR).DHENVN > 0                         
+         THEN                                                           
+            BE315.SORTCPR = BE655.HIST_OPL(GLSLUTÅR).DHENVN;            
+         ELSE                                                           
+            BE315.SORTCPR = BE655.HIST_OPL(SLUTÅR).DHENVN;              
+                                                                        
+         BE315.SORTKOM  = BE300.EKOMNR;                                 
+         BE315.SORTEJD  = BE300.EEJDNR;                                 
+         BE315.SORTEENHEDLBNR = BE300.EENHEDLBNR;                       
+                                                                        
+         BE315.CFRATYPE = '1'; /* DUBLET FRA EVS SLUT */                
+                                                                        
+         WRITE FILE (BE315O) FROM (BE315);                              
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+         TV.FDHENVN = TV.FDHENVN + 1;                                   
+                                                                        
+ END SKRIV_DUBLET;                                                      
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE:                                                            
+         PROC;                                                          
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.LÆS_BE655;                                  
+         DETLIN1.TEKST = 'LÆSTE PÅ MINI MT-FIL NYT SLUTÅR    B.E65501D';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.LÆS_BE300;                                  
+         DETLIN1.TEKST = 'LÆSTE PÅ EVS SLUT UDTRÆK           B.E30000D';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.FUNDET;                                     
+         DETLIN1.TEKST = 'HERAF EJER FUNDET PÅ MINI MT-FIL            ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.FDHENVN;                                    
+         DETLIN1.TEKST = 'HERAF ÆGTEFÆLLE FUNDET PÅ MINI MT-FIL';       
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'SKREVNE INDIVIDER INCL. DUBLETTER  B.E31500D';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+  END TOTALLISTE;                                                       
+ /*********************************************************************/
+ /*      CLOSE AF FILER OG SPOOL                                      */
+ /*********************************************************************/
+ AFSLUT:                                                                
+         PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+                                                                        
+         CLOSE FILE (BE300I),                                           
+               FILE (BE655I),                                           
+               FILE (BE315O);                                           
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END  BE31525;                                                          

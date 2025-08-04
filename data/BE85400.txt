@@ -1,0 +1,614 @@
+ PROCESS OPT(TIME);                                                     
+ BE85400: /* DAN DATA TIL EVS BASISRABAT TIL FORSKUD                  */
+         PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                   
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');       
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL :                                                            *
+ * LEVERING AF OPLYSNINGER TIL FORSKUDS EVS BASISRABATTABEL            *
+ *                                                        (BS01800T).  *
+ *                                      EVS RABATBERETTIGET EJERANDEL  *
+ *                                                        (BS01900T)   *
+ *                                                                     *
+ * INPUT     : BE75000T - ESR (FORSKUD)                                *
+ *             BE76000T - MANDTAL (FORSKUD)                            *
+ *             BE77000T - EVS_UDTRÆK (FORSKUD)                         *
+ *             BE78000T - EVS_RESULTAT (FORSKUD)                       *
+ *                                                                     *
+ * OUTPUT    : B.E85200D UDTRÆK - ALLE PERSONER                        *
+ *             BE85401Y  KØRSELSKONTROLLISTE                           *
+ *                                                                     *
+ * PROGRAMMØR: AAGE RASMUSSEN            Aug. 1999                     *
+ * RETTET    : Tina Carstens             Feb. 2022                     *
+ *             Kopieret fra BH85100                                    *
+ *             Forskud 2024                                            *
+ *                                                                     *
+ ***********************************************************************
+ *                                                                     *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BE8540O FILE RECORD OUTPUT;    /* LOAD-GRUNDLAG TIL BS01800T */
+ DCL     BE8541O FILE RECORD OUTPUT;    /* LOAD-GRUNDLAG TIL BS01900T */
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK (LOAD-GRUNDLAG)                            * 
+ *********************************************************************/ 
+ DCL     ANT_SKREVET_18       BIN FIXED (31);                           
+ DCL     1 BE854_18,                                                    
+           %INCLUDE BE85400N;                                           
+                                                                        
+ DCL     ANT_SKREVET_19       BIN FIXED (31);                           
+ DCL     1 BE854_19,                                                    
+           %INCLUDE BE85401N;                                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF DB2                                               * 
+ *********************************************************************/ 
+         EXEC SQL INCLUDE SQLCA;     /* SQL KOMMUNIKATIONSAREAL       */
+         EXEC SQL INCLUDE BE75000T;  /* ESR (FORSKUD)                 */
+         EXEC SQL INCLUDE BE76000T;  /* MANDTAL (FORSKUD)             */
+         EXEC SQL INCLUDE BE77000T;  /* EVS_UDTRÆK (FORSKUD)          */
+         EXEC SQL INCLUDE BE78000T;  /* EVS_RESULTAT (FORSKUD)        */
+                                                                        
+         /* BE780_SW Indikatorvariable til BE78000T                   */
+         %INCLUDE BE85501N;                                             
+                                                                        
+         /* BE770_SW Indikatorvariable til BE77000T                   */
+ DCL     1 BE770_SW,                                                    
+          2 EVSFEJ_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFEJ_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFEJ_EJERANDEL_SW              BIN FIXED (15),            
+          2 EVSFÆG_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFÆG_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFÆG_EJERANDEL_SW              BIN FIXED (15);            
+                                                                        
+ /*********************************************************************/
+ /* TIL BE85111M                                                      */
+ /*********************************************************************/
+ DCL     RESULT_FUNDET         BIT       (1);                           
+ DCL     MT_FUNDET             BIT       (1);                           
+ DCL     SLUT_FUNDET           BIT       (1);                           
+ DCL     ESR_FUNDET            BIT       (1);                           
+                                                                        
+ DCL     AFVIST_FEJL_I_INP     BIT       (1)     INIT ('0'B);           
+ DCL     AFVIST_FEJL_INP       BIN FIXED (31);                          
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    LIN_DEB          CHAR      (133);                               
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE85400L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (' '),           
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (24)      INIT      (' ');           
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+                                                                        
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     I               BIN FIXED (15);                                
+ DCL     HJ_CHAR2        CHAR      (2);                                 
+ DCL     HJ_PIC2         PIC       '(2)9'  BASED(ADDR(HJ_CHAR2));       
+ DCL     GEM_PNR         FIXED     (11)      INIT      (0);             
+ DCL     GEM_KOMNR       FIXED     (3);                                 
+ DCL     GEM_EJDNR       FIXED     (7);                                 
+ DCL     GEM_EENHEDLBNR  BIN FIXED(15);                                 
+ DCL     SKRIV_PERSON    BIT      (1);                                  
+ DCL     TEKST45         CHAR     (45);                                 
+                                                                        
+ /* FIA */                                                              
+ DCL     HJ_CHAR_4_PIC PIC '9999';                                      
+ DCL     HJ_CHAR_4     CHAR (4) DEF HJ_CHAR_4_PIC;                      
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     FLERE_SAMME_EJD BIN FIXED (31);                                
+ DCL     ANT_LÆSTE       BIN FIXED (31);                                
+ DCL     ANT_EJET24      BIN FIXED (31);                                
+ DCL     ANT_IKKE_EJET24 BIN FIXED (31);                                
+                                                                        
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;        /*#01*/                            
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_TIL_EVS_AAR_NÆSTE           BIN FIXED (15);                 
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BE85400');      
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE85400'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+         CALL TERMINER_LISTE                                            
+                      ('***           SKAT EVS FORSKUD           ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***               BE85400                ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***      Dan EVS Basisrabat (BS01800T)   ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***      Dan Rabatberettiget Ejerandel   ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***                         (BS01900T)   ***'); 
+         CALL TERMINER_LISTE('***         '!!                           
+                              BE55600M.AFVIKLINGS_ID!!' '!!             
+                              BE55600M.INDKÅR2!!'         ***');        
+         CALL TERMINER_LISTE(' ');                                      
+                                                                        
+         ON UNDEFINEDFILE(BE8540O) BEGIN;                               
+            ABENDTXT = 'Datasæt BE8540O kan ikke åbnes';                
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         ON UNDEFINEDFILE(BE8541O) BEGIN;                               
+            ABENDTXT = 'Datasæt BE8541O kan ikke åbnes';                
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         OPEN FILE (BE8540O) TITLE ('BE85400O');                        
+         OPEN FILE (BE8541O) TITLE ('BE85401O');                        
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE85401Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         OVERLIN1.TEKST2 = 'DAN LOADGRUNDLAG TIL EVS RABAT ' !!         
+                           'FORSKUD ' !! BE55600M.INDKÅR2; /*#01*/      
+                                                                        
+         FLERE_SAMME_EJD = 0;                                           
+         ANT_LÆSTE       = 0;                                           
+         AFVIST_FEJL_INP = 0;                                           
+         ANT_SKREVET_18  = 0;                                           
+         ANT_SKREVET_19  = 0;                                           
+         ANT_EJET24      = 0;                                           
+         ANT_IKKE_EJET24 = 0;                                           
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE85400L');             
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT  = BE55600M.AFVIKLINGS_ID;        
+                  WS_TIL_EVS_AAR       = BE55600M.FORSKÅR;              
+                  WS_TIL_EVS_AAR_NÆSTE = BE55600M.FORSKÅR + 1;          
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT  = BE55600M.AFVIKLINGS_ID;        
+                  WS_TIL_EVS_AAR       = BE55600M.SLUTÅR;               
+                  WS_TIL_EVS_AAR_NÆSTE = BE55600M.SLUTÅR + 1;           
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT  = BE55600M.AFVIKLINGS_ID;        
+                  WS_TIL_EVS_AAR       = BE55600M.SLUTÅR;               
+                  WS_TIL_EVS_AAR_NÆSTE = BE55600M.SLUTÅR + 1;           
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER CHECK AF OMKØRSEL                        */     
+         /********************************************************/     
+         PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);         
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+         /* Erklæring og initiering af tællere                        */
+         %INCLUDE BE85102M;                                             
+                                                                        
+         CALL CLOSE_RESULTCURS;                                         
+         CALL OPEN_RESULTCURS;                                          
+         CALL FETCH_RESULT;       /* BE78 */                            
+                                                                        
+         DO WHILE (RESULT_FUNDET);                                      
+            CALL SELECT_ESR;      /* BE75 */                            
+            CALL SELECT_MT;       /* BE76 */                            
+            CALL SELECT_SLUT;     /* BE77 */                            
+                                                                        
+            CALL BEHANDL;                                               
+                                                                        
+            IF AFVIST_FEJL_I_INP = JA                                   
+            THEN                                                        
+               AFVIST_FEJL_INP = AFVIST_FEJL_INP + 1;                   
+                                                                        
+            CALL FETCH_RESULT;    /* BE78 */                            
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       UDSØG PERSONER SOM SKAL OPRETTES PÅ PERSONTABELLEN           * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+         /* Resultat frasorteres ift. forskellige kriterier.          */
+         /* Der foretages visse optællinger.                          */
+         AFVIST_FEJL_I_INP = JA;                                        
+                                                                        
+         %INCLUDE BE85103M;                                             
+                                                                        
+         AFVIST_FEJL_I_INP = NEJ;                                       
+                                                                        
+         IF GEM_PNR ^= DCLBE78000T.DCPRN                                
+         THEN                                                           
+            DO;                                                         
+               GEM_PNR        = DCLBE78000T.DCPRN;                      
+               GEM_KOMNR      = DCLBE78000T.EKOMNR;                     
+               GEM_EJDNR      = DCLBE78000T.EEJDNR;                     
+               GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR;                 
+               SKRIV_PERSON   = JA;                                     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+              /* Ny række på samme person                             */
+                                                                        
+              /* Ny række indenfor samme person og ejendom            */
+              IF GEM_KOMNR      = DCLBE78000T.EKOMNR                    
+               & GEM_EJDNR      = DCLBE78000T.EEJDNR                    
+               & GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR                
+              THEN DO;                                                  
+                 SKRIV_PERSON    = NEJ;                                 
+                 FLERE_SAMME_EJD = FLERE_SAMME_EJD + 1;                 
+                 END;                                                   
+              ELSE                                                      
+                DO;                                                     
+                  /* Ny ejendom indenfor samme person                 */
+                  GEM_KOMNR      = DCLBE78000T.EKOMNR;                  
+                  GEM_EJDNR      = DCLBE78000T.EEJDNR;                  
+                  GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR;              
+                  SKRIV_PERSON   = JA;                                  
+                END;                                                    
+            END;                                                        
+                                                                        
+         /* Skal den skrives? */                                        
+         IF SKRIV_PERSON = NEJ                                          
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         ANT_LÆSTE = ANT_LÆSTE + 1;                                     
+                                                                        
+         /* Optæl hvor mange med fejlnr der skrives                   */
+         IF DCLBE78000T.FEJLNR > 0                                      
+         THEN                                                           
+            DO;                                                         
+               INDEX = DCLBE78000T.FEJLNR;                              
+               SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;   
+            END;                                                        
+                                                                        
+         /* Skriv oplysninger om Rabat                                */
+         /* Oplysninger om Basisrabat (BS01800T) skal kun opdateres   */
+         /* hvis de er overført fra ægtefælle                         */
+         IF DCLBE78000T.OVERFØRT_ÆGTEF_RABAT = '1'                      
+         THEN DO;                                                       
+            BE854_18              = '';                                 
+            BE854_18.PERSONNUMMER = DCLBE78000T.DCPRN;                  
+            BE854_18.EKOMNR       = DCLBE78000T.EKOMNR;                 
+            BE854_18.EEJDNR       = DCLBE78000T.EEJDNR;                 
+            BE854_18.EENHEDLBNR   = DCLBE78000T.EENHEDLBNR;             
+            BE854_18.DFRAGLD      = DATO2.ÅR !! '-' !! DATO2.MD         
+                                             !! '-' !!                  
+                                    DATO2.DG !! '-01.01.01.000001';     
+            BE854_18.DTILGLD  = '9999-12-31-23.59.59.999999';           
+            BE854_18.DKØRT    = '1900-12-31-00.00.00.000001';           
+                                                                        
+            BE854_18.R24_SIMPELBASISRABAT     =                         
+                                  DCLBE78000T.R24_SIMPELBASISRABAT;     
+            BE854_18.R24_SIMPELBASISRABAT_NEG =                         
+                                  DCLBE78000T.R24_SIMPELBASISRABAT_NEG; 
+            BE854_18.R24_BASISRABAT_REGUL     =                         
+                                  DCLBE78000T.R24_BASISRABAT_REGUL;     
+            BE854_18.COPR_R24_BASISRABAT_REGUL =                        
+                            DCLBE78000T.COPR_R24_BASISRABAT_REGUL;      
+            BE854_18.R24_BASISRABAT = DCLBE78000T.R24_BASISRABAT;       
+                                                                        
+            BE854_18.R24_FAST_STIGNINGSBEGR_NEDSLAG =                   
+                            DCLBE78000T.R24_FAST_STIGNINGSBEGR_NEDSLAG; 
+            IF BE780_SW.R24_FAST_STIGNINGSBEGR_NED_SW = -1              
+            THEN                                                        
+               BE854_18.R24_FSTIBGRNED_NULL = '?';                      
+                                                                        
+            BE854_18.R24_STIGNINGSBEGR_NEDSLAG      =                   
+                            DCLBE78000T.R24_STIGNINGSBEGR_NEDSLAG;      
+            IF BE780_SW.R24_STIGNINGSBEGR_NEDSLAG_SW = -1               
+            THEN                                                        
+               BE854_18.R24_STIBGRNED_NULL  = '?';                      
+                                                                        
+            BE854_18.R24_EJERANDEL = DCLBE78000T.R24_EJERANDEL;         
+            IF BE780_SW.R24_EJERANDEL_SW = -1                           
+            THEN                                                        
+               BE854_18.R24_EJERANDEL_NULL  = '?';                      
+                                                                        
+            ANT_SKREVET_18 = ANT_SKREVET_18 + 1;                        
+                                                                        
+            WRITE FILE (BE8540O) FROM (BE854_18);                       
+            END;                                                        
+                                                                        
+          /* Skriv oplysninger om Rabatberettiget Ejerandel           */
+          IF DCLBE78000T.EJET20240101 = '1'                             
+          THEN DO;                                                      
+             ANT_EJET24            = ANT_EJET24 + 1;                    
+             BE854_19              = '';                                
+             BE854_19.DINDKAAR     = WS_TIL_EVS_AAR_NÆSTE;              
+             BE854_19.PERSONNUMMER = DCLBE78000T.DCPRN;                 
+             BE854_19.EKOMNR       = DCLBE78000T.EKOMNR;                
+             BE854_19.EEJDNR       = DCLBE78000T.EEJDNR;                
+             BE854_19.EENHEDLBNR   = DCLBE78000T.EENHEDLBNR;            
+             BE854_19.DFRAGLD      =                                    
+                                  DATO2.ÅR !! '-' !! DATO2.MD !! '-' !! 
+                                  DATO2.DG !! '-01.01.01.000001';       
+             BE854_19.DTILGLD  = '9999-12-31-23.59.59.999999';          
+                                                                        
+             BE854_19.RABATEJERANDEL = DCLBE78000T.RES_RABATEJERANDEL;  
+             IF BE780_SW.RES_RABATEJERANDEL_SW = -1                     
+             THEN                                                       
+                BE854_19.RABATEJERANDEL_NULL  = '?';                    
+                                                                        
+             BE854_19.COPR_RABATEJERANDEL = 'F';                        
+                                                                        
+             ANT_SKREVET_19 = ANT_SKREVET_19 + 1;                       
+                                                                        
+             WRITE FILE (BE8541O) FROM (BE854_19);                      
+             END;                                                       
+          ELSE                                                          
+             ANT_IKKE_EJET24 = ANT_IKKE_EJET24 + 1;                     
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.FETCH_RESULT;                               
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ BE78000T';                     
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+            IF LÆST_FEJLNR(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = LÆST_FEJLNR(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         IF FLERE_SAMME_EJD > 0                                         
+         THEN DO;                                                       
+            DETLIN1.CCA   = ZZWS1;                                      
+            DETLIN1.ANTAL = FLERE_SAMME_EJD;                            
+            DETLIN1.TEKST =                                             
+                  'ANTAL MED FLERE SAMME EJENDOM/LBNR         ';        
+            CALL ZZ20300 (DETLIN1,'01');                                
+            END;                                                        
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = AFVIST_FEJL_INP;                               
+         DETLIN1.TEKST = 'AFVIST PGA. FEJL I INPUT          BE78000T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_EJET24;                                    
+         DETLIN1.TEKST = 'ANTAL RABATBERETTIGEDE            BE78000T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_IKKE_EJET24;                               
+         DETLIN1.TEKST = 'ANTAL IKKE RABATBERETTIGEDE       BE78000T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_SKREVET_18;                                
+         DETLIN1.TEKST = 'ANTAL SKREVNE INDIVIDER BS01800T  B.E85400D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_SKREVET_19;                                
+         DETLIN1.TEKST = 'ANTAL SKREVNE INDIVIDER BS01900T  B.E85401D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_LÆSTE;                                     
+         DETLIN1.TEKST = 'ANTAL BEHANDLEDE INDIVIDER        B.E85401D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+            IF SKR_FEJLNR(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = SKR_FEJLNR(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /*      TERMINER LISTE                                               */
+ /*********************************************************************/
+ TERMINER_LISTE:  PROCEDURE (TEKST);                                    
+ DCL     TEKST            CHAR      (45);                               
+                                               /* Medd. til termine-  */
+ DCL     1 MEDDELELSE     STATIC,              /* ringslisten         */
+           3 MODULNAVN    CHAR      (07)    INIT ('BE85400'),           
+           3 FILLER1      CHAR      (01)    INIT (' '),                 
+           3 MEDDNR       PIC       '999'   INIT (6),                   
+           3 DATA         CHAR      (45)    INIT (' ');                 
+ DCL     MEDDELELSEN      CHAR      (56)    DEF MEDDELELSE;             
+                                                                        
+         MEDDELELSE.MEDDNR = MEDDELELSE.MEDDNR + 1;                     
+         MEDDELELSE.DATA   = TEKST;                                     
+                                                                        
+         CALL ZS30101 (2,                                               
+                       MEDDELELSEN,                                     
+                       2);                                              
+                                                                        
+ END TERMINER_LISTE;                                                    
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BE8540O);                                          
+         CLOSE FILE (BE8541O);                                          
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+    PUT SKIP LIST ('*****************************************');        
+    PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);       
+    PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);            
+    PUT SKIP LIST ('PERSON  :                ' !! DCLBE78000T.DCPRN);   
+    PUT SKIP LIST ('KOMMUNE :                ' !! DCLBE78000T.EKOMNR);  
+    PUT SKIP LIST ('EJENDOM :                ' !! DCLBE78000T.EEJDNR);  
+    PUT SKIP LIST ('*****************************************');        
+                                                                        
+    CALL ZS67000(SQLCA);                                                
+                                                                        
+    CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                      
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+         %INCLUDE BE85101M; /* SQL TIL LÆS AF TABELLER QEB 20170426*/   
+ END  BE85400;                                                          

@@ -1,0 +1,1546 @@
+  PROCESS OPT(TIME);                                                    
+ BH97400: /* OPDATER EVS TABELLER SAMT DAN DATA TIL SLUT PÅ CSC */      
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL : OPDATER EVS SLUT TABELLER SAMT DAN DATA TIL SLUT PÅ CSC    *
+ *          I.F.M. KØRSEL LIG 'SUPPLEMENTSLEVERING'.                   *
+ *                                                                     *
+ * INPUT  : B.H96000D  BEREGNINGSBÅND TIL SLUT 2011                    *
+ *                                                                     *
+ * UPDATE : BQ2X000T+BQ3X000T - EVS SLUT TABELLER                      *
+ *                                                                     *
+ * OUTPUT : D0311603.A782 UDTRÆK - EVS DATA TIL SLUT PÅ CSC            *
+ *          BH97401Y   KØRSELSKONTROLLISTE                             *
+ *                                                                     *
+ * PROGRAMMØR: BO SCHMIDT      FEBRUAR   2008                          *
+ *                                                                     *
+ * RETTET    : GEH             NOVEMBER  2009    TILRETTET SLUT09      *
+ *                                                                     *
+ * RETTET    : GEH             DECEMBER  2010    TILRETTET SLUT10      *
+ *             SLETTET CEJEV I BH97100M                                *
+ *                                                                     *
+ * OBS       : PROGRAMMET HAR SIDST VÆRET KØRT TIL SLUT 05.            *
+ *             DET ER IKKE TILRETTET NYT ÅR.                           *
+ *                                                                     *
+ * RETTET    : GEH             APRIL     2012    TILRETTET SLUT11      *
+ *             PGA. ÅRSTILRETNINGSFEJL I BH94400, HVOR DEN FORKERTE    *
+ *             STRUKTUR BLEV BRUGT, SKAL DER SKE EN OMKØRSEL AF        *
+ *             SOMMERHUSE SOM HAR STATUS SOM HELÅRSHUSE.               *
+ *                                                                     *
+ * RETTET    : GEH             APRIL     2012    NU MED OPDATERING     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+                                                                        
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+         INIT ('COPYRIGHT KOMMUNEDATA I/S 2005');                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH960I  FILE RECORD INPUT;     /* BEREGN.BÅND EFTER BEREGN. */ 
+ DCL     BH974O  FILE RECORD OUTPUT;    /* EVS DATA TIL SLUT PÅ CSC  */ 
+ DCL     BH9741O FILE RECORD OUTPUT;    /* LISTE TIL CSC             */ 
+ DCL     BH9742O FILE RECORD OUTPUT;    /* LISTE TIL CSC 2010        */ 
+ /********************************************************************* 
+ *       DECLARE AF DB2                                               * 
+ *********************************************************************/ 
+ DCL     1 EVS_ESK_FELT,                /* EVS EJERSKABSFELTTABELEN   */
+         %INCLUDE BQ31000N;;                                            
+                                                                        
+ DCL     1 HJ_FELTKODE BIN FIXED(15);                                   
+         EXEC SQL INCLUDE BQ31000T;     /* EVS EJERSKABSTFELTTABEL    */
+                                                                        
+ DCL     ZS67000         ENTRY;                       /* DB2 FEJL     */
+         EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+ DCL     BH960_AR        CHAR (23472) VAR;                              
+ DCL     1 BH960         BASED     (ADDR(BH960_AR)),                    
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90000N;;                                          
+                                                                        
+ DCL     1 BH96099       BASED     (ADDR(BH960_AR)),                    
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90099N;                                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF OUTPUT HERUNDER EVT. TEST IND-/UDDATA             * 
+ *********************************************************************/ 
+ DCL     1 BH974,                                                       
+           %INCLUDE BH96110N;;                                          
+                                                                        
+ DCL     1 KOM_AREAL ALIGNED,                                           
+           %INCLUDE BQ11010N;                                           
+                                                                        
+ DCL     1 BQ_IND ALIGNED,                                              
+           %INCLUDE BQ11011N;;                                          
+                                                                        
+ DCL     1 BQ_UD ALIGNED,                                               
+           %INCLUDE BQ11011N;;                                          
+                                                                        
+ DCL 1 STYR_FELTER,                                                     
+       5 DCPRN          DEC FIXED (11), /* PERSONNUMMER              */ 
+       5 DINDKAAR       BIN FIXED (15), /* INDKOMSTÅR                */ 
+       5 EKOMNR         BIN FIXED (15), /* KOMMUNENUMMER             */ 
+       5 EEJDNR         BIN FIXED (31), /* EJENDOMSNUMMER            */ 
+       5 ELBNR          BIN FIXED (15), /* LØBENUMMER                */ 
+       5 EGENNR         BIN FIXED (15), /* GENERATIONSNUMMER         */ 
+       5 TYPE           BIN FIXED (15), /* TYPE                      */ 
+       5 STATUS         BIN FIXED (15), /* STATUS                    */ 
+       5 RETURKODE      BIN FIXED (15), /* RETURKODE                 */ 
+       5 RETURTEKST     CHAR      (70), /* RETURTEKST                */ 
+       5 FEJLNR         PIC     '9999', /* FEJLNR                    */ 
+       5 FEJLTEKST      CHAR      (70); /* FEJLTEKST                 */ 
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                   /* TÆLLEVÆRKER TIL TOTALLISTEN */      
+           2 LÆS_BH960     FIXED DEC (7),                               
+           2 HANDEL        FIXED DEC (7),                               
+           2 HANDEL_OP     FIXED DEC (7),                               
+           2 LÆS_EJD       FIXED DEC (7),                               
+           2 LÆS_PERS      FIXED DEC (7),                               
+           2 SKRIV_EJD     FIXED DEC (7),                               
+           2 SKRIV_PERS    FIXED DEC (7),                               
+           2 SKREVET       FIXED DEC (7),                               
+           2 SKR_BH971     FIXED DEC (7),                               
+           2 EJ_BEHANDL    FIXED DEC (7),                               
+           2 BEREGNET      FIXED DEC (7),                               
+           2 EVS2011       FIXED DEC (15,2),                            
+           2 BPROM1        FIXED DEC (7),                               
+           2 BPROM2        FIXED DEC (7),                               
+           2 BNEDSL1       FIXED DEC (7),                               
+           2 BNEDSL2       FIXED DEC (7),                               
+           2 CPENSN1       FIXED DEC (7),                               
+           2 CPENSN2       FIXED DEC (7),                               
+           2 CSTIBLB(10)   FIXED DEC (7),                               
+           2 FELT759_KMD   FIXED DEC (7),                               
+           2 FELT759_CSC   FIXED DEC (7),                               
+           2 FELT759_CSC_2010  FIXED DEC (7),                           
+           2 BER_BOPÆL0    FIXED DEC (7),                               
+           2 BER_BOPÆL1    FIXED DEC (7),                               
+           2 BER_BOPÆL2    FIXED DEC (7),                               
+           2 BER_BOPÆL3    FIXED DEC (7),                               
+           2 BER_BOPÆL4    FIXED DEC (7),                               
+           2 BER_BOPÆL5    FIXED DEC (7),                               
+           2 BER_BOPÆL6    FIXED DEC (7),                               
+           2 EJBEREGNET    FIXED DEC (7),                               
+           2 EJBER_BOPÆL0  FIXED DEC (7),                               
+           2 EJBER_BOPÆL1  FIXED DEC (7),                               
+           2 EJBER_BOPÆL2  FIXED DEC (7),                               
+           2 EJBER_BOPÆL3  FIXED DEC (7),                               
+           2 EJBER_BOPÆL4  FIXED DEC (7),                               
+           2 EJBER_BOPÆL5  FIXED DEC (7),                               
+           2 EJBER_BOPÆL6  FIXED DEC (7);                               
+                                                                        
+ DCL     1 SKR_FEJLNR(4000:6000),  /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ DCL     1 SKR_EJBEVS(0:9),        /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+                                                                        
+ DCL     TV_LÆS          FIXED     (7)       INIT      (0);             
+ DCL     TV_LÆS_EVS      FIXED     (7)       INIT      (0);             
+ DCL     TV_OVERLÆS_FØR  FIXED     (7)       INIT      (0);             
+ DCL     TV_OVERLÆS_ÆGT  FIXED     (7)       INIT      (0);             
+ DCL     TV_OVERLÆS_DB2  FIXED     (7)       INIT      (0);             
+ DCL     TV_SKRIV_EVS    FIXED     (7)       INIT      (0);             
+ DCL     TV_FEJL         FIXED     (7)       INIT      (0);             
+ DCL     TV_LIN          FIXED     (7)       INIT      (0);             
+                                                                        
+ DCL     BH960_ANT_INDV  FIXED     (7)       INIT      (0);             
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     BQ11110         ENTRY;                                         
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS34900         ENTRY OPTIONS (INTER ASM);   /* FAKTURERING  */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK TIL LISTE                                  * 
+ *********************************************************************/ 
+ DCL     1 BH974_CSC,                                                   
+           3 DCPRN          PIC '(10)9',                                
+           3 FYLD1          CHAR (1),                                   
+           3 EKOMNR         PIC '999',                                  
+           3 EEJDNR         PIC '(6)9',                                 
+           3 FYLD3          CHAR (20);                                  
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    LIN_DEB          CHAR      (133);                               
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH97400L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (                
+           'OPDATER EVS TABELLER OG DAN DATA TIL SLUT PÅ CSC'),         
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 LIN3,                                                        
+          2 CTL          CHAR      (1),                                 
+          2 F1           CHAR      (2)       INIT      (' '),           
+          2 TEKST        CHAR      (52),                                
+          2 ANT          PIC       'ZZZ.ZZZ.ZZZ.ZZZ.ZZ9',               
+          2 REST         CHAR      (59)      INIT      (' ');           
+ DCL     1 LIN_BLANK,                                                   
+          2 CTL          CHAR      (1),                                 
+          2 F1           CHAR      (132)     INIT      (' ');           
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+                                    EXTERNAL INIT ('NOTEST(ALL,,;)');   
+ DCL     EOF_BH960       BIT       (1);                                 
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     I               BIN FIXED (15);                                
+ DCL     INDEX           BIN FIXED (31);                                
+                                                                        
+ DCL     HJ_FEJLNR       PIC       '(4)9';                              
+ DCL     HJ_FEJLNRC      CHAR      (4)     BASED(ADDR(HJ_FEJLNR));      
+                                                                        
+ DCL     HJ_CHAR1        CHAR      (1);                                 
+ DCL     HJ_PIC1         PIC       '9'     BASED(ADDR(HJ_CHAR1));       
+ DCL     HJ_CHAR2        CHAR      (2);                                 
+ DCL     HJ_PIC2         PIC       '99'    BASED(ADDR(HJ_CHAR2));       
+ DCL     HJ_CHAR3        CHAR      (3);                                 
+ DCL     HJ_PIC3         PIC       '999'   BASED(ADDR(HJ_CHAR3));       
+ DCL     HJ_CHAR4        CHAR      (4);                                 
+ DCL     HJ_PIC4         PIC       '(4)9'  BASED(ADDR(HJ_CHAR4));       
+ DCL     HJ_CHAR7        CHAR      (7);                                 
+ DCL     HJ_PIC7         PIC       '(7)9'  BASED(ADDR(HJ_CHAR7));       
+                                                                        
+ DCL     GL_PNR          FIXED     (11);                                
+                                                                        
+ DCL     EVS_DOVTG       FIXED     (9);                                 
+ DCL     EVS_DAFSTAA     FIXED     (9);                                 
+                                                                        
+ DCL     FEJLTEKST       CHAR      (20)    INIT (' ');                  
+ DCL     ABENDMEDD       CHAR      (56)    INIT (' ');                  
+                                                                        
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+ DCL     HJ_TIMESTAMP    CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BH960 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+               ON ERROR SYSTEM;                                         
+               PUT SKIP LIST ('PROGRAMFEJL');                           
+               CALL PLIDUMP  ('SNHOB','MODUL BH97400');                 
+            END;                                                        
+                                                                        
+         OPEN FILE (BH960I)   TITLE ('BH96000I');                       
+         OPEN FILE (BH974O)   TITLE ('BH97400O');                       
+         OPEN FILE (BH9741O)  TITLE ('BH97410O');                       
+         OPEN FILE (BH9742O)  TITLE ('BH97420O');                       
+                                                                        
+         ON ENDFILE (BH960I)                                            
+            EOF_BH960 = JA;                                             
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH97401Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         TV = 0;                                                        
+                                                                        
+         SKR_FEJLNR.ANTAL(*) = 0;                                       
+         SKR_EJBEVS.ANTAL(*) = 0;                                       
+                                                                        
+         STYR_FELTER.DINDKAAR = SLUTÅR;                                 
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_BH960;                                                
+                                                                        
+         DO WHILE ( EOF_BH960 = NEJ );                                  
+                                                                        
+            CALL BEHANDL_PERSON;                                        
+                                                                        
+            CALL LÆS_BH960;                                             
+                                                                        
+         END; /* WHILE */                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR                                           * 
+ *********************************************************************/ 
+ LÆS_BH960:                                                             
+         PROC;                                                          
+                                                                        
+         READ FILE (BH960I) INTO (BH960_AR);                            
+                                                                        
+         IF BH960.SORT_CPR = 99999999999     /* OPTÆLL.INDV. 1 */       
+         THEN                                                           
+            DO;                                                         
+               BH960_ANT_INDV = BH96099.ANT_INDV;                       
+               READ FILE (BH960I) INTO (BH960_AR);                      
+            END;                                                        
+                                                                        
+         IF EOF_BH960 = NEJ                                             
+         THEN                                                           
+            TV.LÆS_BH960 = TV.LÆS_BH960 + 1;                            
+                                                                        
+ END LÆS_BH960;                                                         
+ /********************************************************************* 
+ *       PERSONER SOM EVT. SKAL OPDATERES                             * 
+ *********************************************************************/ 
+ BEHANDL_PERSON:                                                        
+         PROC;                                                          
+                                                                        
+         IF BH960.FEJLNR = 5001 !                                       
+           (BH960.TIL_EVS.CEJBEVS = '1' & BH960.FEJLNR = 5008) !        
+            BH960.FEJLNR = 5020 !                                       
+            BH960.FEJLNR = 5024 !                                       
+            BH960.FEJLNR = 5060                                         
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS_FØR = TV_OVERLÆS_FØR + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF (BH960.TIL_EVS.DAFSTAA > 0 &                                
+             BH960.TIL_EVS.DAFSTAA < BH960.MT.DRGNÅRFRA)                
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS_FØR = TV_OVERLÆS_FØR + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF BH960.MT.CCIVS = 'D' &                                      
+            BH960.MT.HIST_OPL(SLUTÅR).DCIÆN > 0 &   /* EJER ER DØD   */ 
+           (BH960.MT.HIST_OPL(SLUTÅR).DCIÆN <       /* FØR INDK.ÅRET */ 
+            BH960.MT.DRGNÅRFRA)                                         
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS_FØR = TV_OVERLÆS_FØR + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF BH960.CINVPNR > '0' !                                       
+            BH960.ESR.EJER.COMPLA = '1'                                 
+         THEN                                                           
+            DO;                                                         
+               TV_OVERLÆS_FØR = TV_OVERLÆS_FØR + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF BH960.TIL_EVS.CPTYPSLUT        = '3'                        
+         & (BH960.EJERSKAB.CEJDTYPE        = '3'                        
+          ! BH960.EJERSKAB.CEJDTYPE        = '8')                       
+         &  BH960.TIL_FORSKUD.COPR_FELT759 = '2'                        
+         THEN                                                           
+            TV.FELT759_KMD = TV.FELT759_KMD + 1;  /* SKAL VIDERE */     
+         ELSE                                                           
+            DO;                                                         
+               TV_OVERLÆS_FØR = TV_OVERLÆS_FØR + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         BQ_IND.PERSON = '';                                            
+         BQ_IND.EJENDOM = '';                                           
+         BQ_IND.INDK_PERS = -1;                                         
+         BQ_IND.INDK_EJD = -1;                                          
+                                                                        
+         BQ_UD.PERSON = '';                                             
+         BQ_UD.EJENDOM = '';                                            
+         BQ_UD.INDK_PERS = -1;                                          
+         BQ_UD.INDK_EJD = -1;                                           
+                                                                        
+         STYR_FELTER.DCPRN     = BH960.SORT_CPR;                        
+         STYR_FELTER.DINDKAAR  = 2011;                                  
+         STYR_FELTER.EKOMNR    = BH960.SORT_KOMNR;                      
+         STYR_FELTER.EEJDNR    = BH960.SORT_EJDNR;                      
+         STYR_FELTER.ELBNR     = BH960.UDSKRLBNR;                       
+         STYR_FELTER.TYPE      = 0;                                     
+         STYR_FELTER.RETURKODE = 0;                                     
+                                                                        
+         CALL DATA_MODUL('LÆS');                                        
+                                                                        
+         SELECT (STYR_FELTER.RETURKODE);                                
+                                                                        
+            WHEN (0)  /* BÅDE PERSON OG EJENDOM FUNDET */               
+              DO;                                                       
+                 IF BQ_IND.PERSON.CÆGTOPR > '0' !                       
+                    BQ_IND.PERSON.CDATAFRA = '4' !                      
+                    BQ_IND.PERSON.CDATAFRA = '6'                        
+                 THEN                                                   
+                    DO;                                                 
+                       TV_OVERLÆS_ÆGT = TV_OVERLÆS_ÆGT + 1;             
+                       RETURN;                                          
+                    END;                                                
+                 ELSE                                                   
+                    DO;                                                 
+                       CALL BEHANDL_FELT759;                            
+                    END;                                                
+              END;                                                      
+                                                                        
+            WHEN (1)  /* KUN EJENDOMMEN FUNDET */                       
+              DO;                                                       
+                 TV_OVERLÆS_DB2 = TV_OVERLÆS_DB2 + 1;                   
+                 RETURN;                                                
+              END;                                                      
+                                                                        
+            WHEN (2)  /* HVERKEN PERSON ELLER EJENDOM FUNDET */         
+              DO;                                                       
+                 TV_OVERLÆS_DB2 = TV_OVERLÆS_DB2 + 1;                   
+                 RETURN;                                                
+              END;                                                      
+                                                                        
+            WHEN (-1); /* SQL-FEJL VED LÆS */                           
+                                                                        
+            OTHERWISE                                                   
+              PUT SKIP LIST ('BQ11110 DATAMODUL FORKERT RETURKODE'!!    
+                              STYR_FELTER.RETURKODE);                   
+                                                                        
+         END; /* SELECT RETURKODE */                                    
+                                                                        
+ END BEHANDL_PERSON;                                                    
+ /********************************************************************* 
+ *       PERSONER SOM EVT. SKAL OPDATERES                             * 
+ *********************************************************************/ 
+ BEHANDL_FELT759: PROC;                                                 
+                                                                        
+      /* VI VIL KUN HAVE DE PERSONER, DER KUN LIGGER FRA OPRETTELSEN */ 
+         IF (BQ_IND.PERSON.CSUPPL   ^= '1'                              
+         &   BQ_IND.PERSON.CAJOUR   ^= ' ')                             
+         THEN                                                           
+            DO;                                                         
+              CALL SKRIV_BH974_TIL_CSC;                                 
+              RETURN;                                                   
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               IF BQ_IND.PERSON.EGENNR  = 1                             
+                & BQ_IND.PERSON.FELT759 = 2                             
+               THEN                                                     
+                 DO;                                                    
+                                                                        
+                    STYR_FELTER.STATUS = KOM_AREAL.KOMM.TYPE;           
+                    STYR_FELTER.TYPE   = 0;                             
+                    STYR_FELTER.EGENNR = BQ_IND.PERSON.EGENNR;          
+                                                                        
+                    CALL OPSÆT_DATA_TIL_EJENDOM;                        
+                    CALL OPSÆT_DATA_TIL_PERSON;                         
+                                                                        
+                    CALL ZS38100(HJ_TIMESTAMP);                         
+                                                                        
+                    BQ_UD.PERSON.EGENNR = STYR_FELTER.EGENNR;           
+                    BQ_UD.PERSON.CAJOUR = '1';                          
+                                                                        
+                    BQ_UD.PERSON.DFRAGLD = HJ_TIMESTAMP;                
+                                                                        
+                    TV_SKRIV_EVS = TV_SKRIV_EVS + 1;                    
+                    CALL DATA_MODUL('SKRIV');                           
+                                                                        
+                    IF TV_SKRIV_EVS <= 100                              
+                    THEN                                                
+                      PUT SKIP LIST ('OPDAT CPRNR: ',BH960.SORT_CPR);   
+                                                                        
+                    CALL DAN_DATA_TIL_SLUT;                             
+                  END;                                                  
+            END;                                                        
+                                                                        
+ END BEHANDL_FELT759;                                                   
+                                                                        
+ /**********************************************************************
+ **     DATA_MODUL                                                    **
+ **********************************************************************/
+ DATA_MODUL: PROC (FUNKTION);                                           
+                                                                        
+         DCL FUNKTION    CHAR (10);                                     
+                                                                        
+         KOM_AREAL.KOMM         = '';                                   
+         KOM_AREAL.SØG          = '';                                   
+         KOM_AREAL.SØG.DCPRN    = STYR_FELTER.DCPRN;                    
+         KOM_AREAL.SØG.DINDKAAR = STYR_FELTER.DINDKAAR;                 
+         KOM_AREAL.SØG.EKOMNR   = STYR_FELTER.EKOMNR;                   
+         KOM_AREAL.SØG.EEJDNR   = STYR_FELTER.EEJDNR;                   
+         KOM_AREAL.SØG.ELBNR    = STYR_FELTER.ELBNR;                    
+         KOM_AREAL.KOMM.TYPE    = STYR_FELTER.TYPE;                     
+                                                                        
+         SELECT (FUNKTION);                                             
+                                                                        
+            WHEN ('LÆS')                                                
+              DO;                                                       
+                KOM_AREAL.FUNKTION = 1;                                 
+                CALL BQ11110 (KOM_AREAL,BQ_IND);                        
+              END;                                                      
+                                                                        
+            WHEN ('SKRIV')                                              
+              DO;                                                       
+                 KOM_AREAL.FUNKTION = 2;                                
+                 CALL BQ11110 (KOM_AREAL,BQ_UD);                        
+              END;                                                      
+                                                                        
+            OTHER                                                       
+              PUT SKIP LIST ('BQ11110 DATAMODUL FORKERT FUNKTION'!!     
+                                                        FUNKTION);      
+         END; /*SELECT (FUNKTION)*/                                     
+                                                                        
+                                                                        
+         STYR_FELTER.RETURKODE  = KOM_AREAL.RETURKODE;                  
+         STYR_FELTER.RETURTEKST = KOM_AREAL.RETURTEKST;                 
+         STYR_FELTER.FEJLTEKST  = KOM_AREAL.RETURTEKST;                 
+                                                                        
+         IF KOM_AREAL.RETURKODE = 0                                     
+         THEN                                                           
+            DO;                                                         
+              IF KOM_AREAL.FUNKTION = 1                                 
+              THEN                                                      
+                 TV_LÆS_EVS = TV_LÆS_EVS + 1;                           
+    /* #GEH   ELSE                                                      
+                 TV_SKRIV_EVS = TV_SKRIV_EVS + 1;*/                     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               IF KOM_AREAL.RETURKODE < 0                               
+               THEN                                                     
+                  DO;                                                   
+                    STYR_FELTER.FEJLNR = 9999;                          
+                    PUT SKIP LIST (' ALVORLIG FEJL ' );                 
+                    IF KOM_AREAL.SQLKODE ^= 0                           
+                    THEN                                                
+                       CALL SQL_FEJL;                                   
+                 END;                                                   
+            END;                                                        
+                                                                        
+ END DATA_MODUL;                                                        
+                                                                        
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE          RUTINE *
+ **********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         CALL ZS67000 (SQLCA);                                          
+                                                                        
+ DCL     PSQLKODE   PIC  '-----9';                                      
+ DCL     CSQLKODE   CHAR (6)      DEF PSQLKODE;                         
+                                                                        
+         PSQLKODE = SQLCA.SQLCODE;                                      
+                                                                        
+    PUT SKIP LIST ('BH97400 - SQL_FEJL CPR: ', STYR_FELTER.DCPRN);      
+    PUT SKIP LIST ('BH97400 - SQL:  ',PSQLKODE);                        
+    PUT SKIP LIST ('BH97400 - SQL_FEJL CPR: ', STYR_FELTER.DCPRN);      
+                                                                        
+         CALL ZS30101(5,'BH97400 ** 250 - SQL_FEJL' !! CSQLKODE,2);     
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+ /*    SKRIV PÅ DATASÆT DER KAN OVERFØRES TIL EXCL                    */
+ /*********************************************************************/
+ SKRIV_BH974_TIL_CSC_2010: PROC;                                        
+                                                                        
+         BH974_CSC = '';                                                
+         BH974_CSC.FYLD1 = ';';                                         
+                                                                        
+         BH974_CSC.DCPRN  = BH960.SORT_CPR;                             
+         BH974_CSC.EKOMNR = BH960.SORT_KOMNR;                           
+         BH974_CSC.EEJDNR = BH960.SORT_EJDNR;                           
+                                                                        
+         WRITE FILE (BH9742O) FROM (BH974_CSC);                         
+         TV.FELT759_CSC_2010 = TV.FELT759_CSC_2010 + 1;                 
+                                                                        
+ END SKRIV_BH974_TIL_CSC_2010;                                          
+                                                                        
+ /*********************************************************************/
+ /*    SKRIV PÅ DATASÆT DER KAN OVERFØRES TIL EXCL                    */
+ /*********************************************************************/
+ SKRIV_BH974_TIL_CSC: PROC;                                             
+                                                                        
+         BH974_CSC = '';                                                
+         BH974_CSC.FYLD1 = ';';                                         
+                                                                        
+         BH974_CSC.DCPRN  = BH960.SORT_CPR;                             
+         BH974_CSC.EKOMNR = BH960.SORT_KOMNR;                           
+         BH974_CSC.EEJDNR = BH960.SORT_EJDNR;                           
+                                                                        
+         WRITE FILE (BH9741O) FROM (BH974_CSC);                         
+         TV.FELT759_CSC = TV.FELT759_CSC + 1;                           
+                                                                        
+ END SKRIV_BH974_TIL_CSC;                                               
+                                                                        
+ /*********************************************************************/
+ /*      DANNE DATA TIL SLUT CSC VEDR. SUPPLEMENTSLEVERINGEN          */
+ /*********************************************************************/
+ DAN_DATA_TIL_SLUT: PROC;                                               
+                                                                        
+         BH974            = '';                                         
+         BH974.INDVNR     = 810;                                        
+         BH974.INDVLGD    = 556;                                        
+         BH974.FELTLGD    = 556;                                        
+         BH974.HEADER     = 'EVSGRUND';                                 
+         BH974.DINDKAAR   = '2011';                                     
+         BH974.DCPRN      = BH960.SORT_CPR;                             
+         BH974.EKOMNR     = BH960.SORT_KOMNR;                           
+         BH974.EEJDNR     = BH960.SORT_EJDNR;                           
+         BH974.ELBNR      = BH960.UDSKRLBNR;                            
+         BH974.CSLET      = ' ';                                        
+         BH974.CLANDEKODE = BH960.EJENDOM.CLANDEKODE;                   
+         BH974.CSKPLOMF   = BH960.TIL_EVS.CSKPLOMF;                     
+         BH974.CEJBEVS    = BH960.TIL_EVS.CEJBEVS;                      
+         BH974.BOBEHAKOD  = ' ';                                        
+         BH974.MANPENSSTI_I = -1;                                       
+         BH974.MANPENSSTI  = 0;                                         
+                                                                        
+      IF BH974.EKOMNR = 999    /*SLUT09 18-02 OG SLUT11 FRA*/           
+      THEN                                                              
+        DO;                                                             
+           BH974.BBERGRL_015ANV_I  = BH960.EJERSKAB.UDL_614_SW;         
+           BH974.BBERGRL_015ANV    = BH960.EJERSKAB.UDL_614;            
+           BH974.BBERGRL_02ANV_I   = BH960.EJERSKAB.UDL_615_SW;         
+           BH974.BBERGRL_02ANV     = BH960.EJERSKAB.UDL_615;            
+           BH974.BBERGRL_AKT_I     = -1;                                
+           BH974.BBERGRL_AKT       = 0;                                 
+                                                                        
+           BH974.BBER2FAM_015ANV_I = BH960.EJERSKAB.UDL_621_SW;         
+           BH974.BBER2FAM_015ANV   = BH960.EJERSKAB.UDL_621;            
+           BH974.BBER2FAM_02ANV_I  = BH960.EJERSKAB.UDL_622_SW;         
+           BH974.BBER2FAM_02ANV    = BH960.EJERSKAB.UDL_622;            
+           BH974.BBER2FAM_AKT_I    = -1;                                
+           BH974.BBER2FAM_AKT      = 0;                                 
+        END;                                                            
+      ELSE                                                              
+        DO;                    /*SLUT09 OG SLUT11 TIL*/                 
+           BH974.BBERGRL_015ANV_I = BH960.VURD_015ANV.BBERGRL_015ANV_SW;
+           BH974.BBERGRL_015ANV   = BH960.VURD_015ANV.BBERGRL_015ANV;   
+           BH974.BBERGRL_02ANV_I  = BH960.VURD_02ANV.BBERGRL_02ANV_SW;  
+           BH974.BBERGRL_02ANV    = BH960.VURD_02ANV.BBERGRL_02ANV;     
+           BH974.BBERGRL_AKT_I    = BH960.VURD_AKT.BBERGRL_AKT_SW;      
+           BH974.BBERGRL_AKT      = BH960.VURD_AKT.BBERGRL_AKT;         
+                                                                        
+           BH974.BBER2FAM_015ANV_I =                                    
+                                   BH960.VURD_015ANV.BBER2FAM_015ANV_SW;
+           BH974.BBER2FAM_015ANV  = BH960.VURD_015ANV.BBER2FAM_015ANV;  
+           BH974.BBER2FAM_02ANV_I = BH960.VURD_02ANV.BBER2FAM_02ANV_SW; 
+           BH974.BBER2FAM_02ANV   = BH960.VURD_02ANV.BBER2FAM_02ANV;    
+           BH974.BBER2FAM_AKT_I   = BH960.VURD_AKT.BBER2FAM_AKT_SW;     
+           BH974.BBER2FAM_AKT     = BH960.VURD_AKT.BBER2FAM_AKT;        
+        END;                                                            
+                                                                        
+         BH974.EJDBELIG         = BH960.EJENDOM.EJDBELIG;               
+         BH974.CEJDTYPE         = BH960.VURD_AKT.CEJDTYPE_AKT;          
+         BH974.CÆGTOPR          = BH960.TIL_EVS.CÆGTOPR;                
+                                                                        
+         IF BH960.TIL_EVS.DOVTG > 0                                     
+         THEN                                                           
+            BH974.DOVTG =                                               
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DOVTG);                    
+         ELSE                                                           
+            BH974.DOVTG = (10)' ';                                      
+                                                                        
+         IF BH960.TIL_EVS.DAFSTAA > BH960.MT.DRGNÅRTIL                  
+         THEN                                                           
+            BH974.DAFSTAA = (10)' ';                                    
+         ELSE                                                           
+            IF BH960.TIL_EVS.DAFSTAA > 0                                
+            THEN                                                        
+               BH974.DAFSTAA =                                          
+               FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DAFSTAA);               
+            ELSE                                                        
+               BH974.DAFSTAA = (10)' ';                                 
+                                                                        
+         BH974.GPCTEJER_I   = BH960.TIL_EVS.GPCTEJER_SW;                
+         BH974.GPCTEJER     = BH960.TIL_EVS.GPCTEJER;                   
+                                                                        
+         BH974.FDAGUDLE     = 0;                                        
+         BH974.GPCTUDLE     = 0;                                        
+         BH974.FUDL100      = BH960.TIL_EVS.FUDL100;                    
+         BH974.GPCTERHV     = 0;                                        
+         BH974.FDAGERHV     = 0;                                        
+         BH974.FERHVFLER    = BH960.TIL_EVS.FERHVFLER;                  
+         BH974.CENKE        = BH960.TIL_EVS.CENKE;                      
+         BH974.CPTYPSLUT    = BH960.TIL_EVS.CPTYPSLUT;                  
+         BH974.CPTYPGL      = BH960.TIL_EVS.CPTYPGL;                    
+         BH974.FELT759      = BH960.TIL_EVS.FELT759;                    
+         BH974.FELT760      = BH960.TIL_EVS.CFRED;                      
+         BH974.BEVSGL_I     = BH960.TIL_EVS.BEVSGL_SW;                  
+         BH974.BEVSGL       = BH960.TIL_EVS.BEVSGL;                     
+         BH974.BPENSNEDGL_I = BH960.TIL_EVS.BPENSNEDGL_SW;              
+         BH974.BPENSNEDGL   = BH960.TIL_EVS.BPENSNEDGL;                 
+                                                                        
+         IF BH960.TIL_EVS.DINDFLYT > 0                                  
+         THEN                                                           
+            BH974.DINDFLYT =                                            
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DINDFLYT);                 
+                                                                        
+         IF BH960.TIL_EVS.DFRAFLYT > 0                                  
+         THEN                                                           
+            BH974.DFRAFLYT =                                            
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DFRAFLYT);                 
+                                                                        
+         BH974.FUBEBOELIG = 0;                                          
+         BH974.BFASTSTIGBGR_I = BH960.TIL_EVS.BFASTSTIGBGR_SW;          
+         BH974.BFASTSTIGBGR   = BH960.TIL_EVS.BFASTSTIGBGR;             
+         BH974.CINDFLYT = ' ';                                          
+         BH974.CBERGRGLOP   = BH960.EJERSKAB.CBERGRGLOP;                
+         BH974.BMANEVSSTI_I = -1;                                       
+         BH974.BMANEVSSTI    = 0;                                       
+         BH974.BEVSMAN_I     = -1;                                      
+         BH974.BEVSMAN       = 0;                                       
+         BH974.BMANNEDSL_I   = -1;                                      
+         BH974.BMANNEDSL     = 0;                                       
+         BH974.CEKSEMP       = ' ';                                     
+         BH974.MANNEDSLSTI_I = -1;                                      
+         BH974.MANNEDSLSTI   = 0;                                       
+         BH974.BUDLSKC_I     = -1;                                      
+         BH974.BUDLSKC       = 0;                                       
+         BH974.BEJBOL1_AKT_I = BH960.VURD_AKT.BEJBOL1_AKT_SW;           
+         BH974.BEJBOL1_AKT   = BH960.VURD_AKT.BEJBOL1_AKT;              
+         BH974.BEJBOL2_AKT_I = BH960.VURD_AKT.BEJBOL2_AKT_SW;           
+         BH974.BEJBOL2_AKT   = BH960.VURD_AKT.BEJBOL2_AKT;              
+         BH974.DAFSTAAFOR = BH960.TIL_EVS.DAFSTAAFOR;                   
+         BH974.BEJBOL1_02ANV_I = BH960.VURD_02ANV.BEJBOL1_02ANV_SW;     
+         BH974.BEJBOL1_02ANV = BH960.VURD_02ANV.BEJBOL1_02ANV;          
+         BH974.BEJBOL2_02ANV_I = BH960.VURD_02ANV.BEJBOL2_02ANV_SW;     
+         BH974.BEJBOL2_02ANV = BH960.VURD_02ANV.BEJBOL2_02ANV;          
+         BH974.CBENYT = BH960.VURD_AKT.CBENYT_AKT;                      
+         BH974.CSCREGISTMP = (26)' ';                                   
+         BH974.CBERGRL  = BH960.EJENDOM.CBERGRL;                        
+         BH974.BPROM2_I = BH960.FRA_EVS_BER.BPROM2_SW;                  
+         BH974.BPROM2   = BH960.FRA_EVS_BER.BPROM2;                     
+         BH974.BPROM1_I = BH960.FRA_EVS_BER.BPROM1_SW;                  
+         BH974.BPROM1   = BH960.FRA_EVS_BER.BPROM1;                     
+         BH974.CELØNCOR = BH960.TIL_EVS.CELØNCOR;                       
+         BH974.GPCTEJERFOR = BH960.TIL_EVS.GPCTEJERFOR;                 
+         BH974.CERHV = BH960.TIL_EVS.CERHV;                             
+         BH974.CVURDOPR  = BH960.AKT_VURD.CVURDOPR;                     
+         BH974.COMBYG    = BH960.EJENDOM.COMBYG;                        
+                                                                        
+         IF BH960.TIL_EVS.BPENSNEDGL_SW = 0                             
+         THEN                                                           
+            DO;                                                         
+               BH974.BGLSUM1_I = BH960.TIL_EVS.BGLSUM1_SW;              
+               BH974.BGLSUM1   = BH960.TIL_EVS.BGLSUM1;                 
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               BH974.BGLSUM1_I = -1;                                    
+               BH974.BGLSUM1   = 0;                                     
+            END;                                                        
+                                                                        
+         BH974.BBERGRL_I = BH960.EJERSKAB.BBERGRL_SW;                   
+         BH974.BBERGRL    = BH960.EJERSKAB.BBERGRL;                     
+         BH974.CBERGROP   = BH960.EJERSKAB.CBERGROP;                    
+         BH974.BSTIBEGR_I = BH960.FRA_EVS_BER.BSTIBEGR_SW;              
+         BH974.BSTIBEGR   = BH960.FRA_EVS_BER.BSTIBEGR;                 
+                                                                        
+         IF BH960.UDSKRLBNR = 1                                         
+         THEN                                                           
+            DO;                                                         
+              BH974.BFORSKAT_I = BH960.TIL_EVS.BFORSKAT_SW;             
+              BH974.BFORSKAT = BH960.TIL_EVS.BFORSKAT;                  
+              BH974.CFORSKAT = BH960.TIL_EVS.CFORSKAT;                  
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+              BH974.BFORSKAT_I = -1;                                    
+              BH974.BFORSKAT = 0;                                       
+              BH974.CFORSKAT = '2';                                     
+            END;                                                        
+                                                                        
+         BH974.BNEDSL1_I = BH960.FRA_EVS_BER.BNEDSL1_SW;                
+         BH974.BNEDSL1   = BH960.FRA_EVS_BER.BNEDSL1;                   
+         BH974.BPENSNED_I = BH960.FRA_EVS_BER.BPENSNED_SW;              
+         BH974.BPENSNED = BH960.FRA_EVS_BER.BPENSNED;                   
+         BH974.BNEDSL2_I = BH960.FRA_EVS_BER.BNEDSL2_SW;                
+         BH974.BNEDSL2   = BH960.FRA_EVS_BER.BNEDSL2;                   
+         BH974.CNULSTIL = ' ';                                          
+         BH974.CUDLMAN = BH960.TIL_EVS.CUDLMAN;                         
+         BH974.BBER2FAM_I = BH960.EJERSKAB.BBER2FAM_SW;                 
+         BH974.BBER2FAM    = BH960.EJERSKAB.BBER2FAM;                   
+                                                                        
+         IF BH960.FEJLNR > 0                                            
+         THEN                                                           
+            DO;                                                         
+               HJ_FEJLNR = BH960.FEJLNR;                                
+               BH974.FEJLNR = HJ_FEJLNR;                                
+            END;                                                        
+         ELSE                                                           
+            BH974.FEJLNR = ' ';                                         
+                                                                        
+         BH974.BEJBOL1_015ANV_I =                                       
+                       BH960.VURD_015ANV.BEJBOL1_015ANV_SW;             
+         BH974.BEJBOL1_015ANV    =                                      
+                       BH960.VURD_015ANV.BEJBOL1_015ANV;                
+         BH974.BEJBOL2_015ANV_I =                                       
+                       BH960.VURD_015ANV.BEJBOL2_015ANV_SW;             
+         BH974.BEJBOL2_015ANV    =                                      
+                       BH960.VURD_015ANV.BEJBOL2_015ANV;                
+                                                                        
+         IF BH960.TIL_EVS.EKOMNR_GL > 0                                 
+         THEN                                                           
+            DO;                                                         
+               HJ_PIC3 = BH960.TIL_EVS.EKOMNR_GL;                       
+               BH974.EKOMNR_GL = HJ_CHAR3;                              
+               HJ_PIC7 = BH960.TIL_EVS.EEJDNR_GL;                       
+               BH974.EEJDNR_GL = HJ_PIC7;                               
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               BH974.EKOMNR_GL = '   ';                                 
+               BH974.EEJDNR_GL = (7)' ';                                
+            END;                                                        
+                                                                        
+         BH974.CSKPLOMFGL = BH960.TIL_EVS.CSKPLOMFGL;                   
+                                                                        
+         BH974.DFRAGLD = HJ_TIMESTAMP;                                  
+                                                                        
+         BH974.CNEDSL1 = BH960.TIL_EVS.CNEDSL1;                         
+         BH974.FLEJL = BH960.VURD_AKT.FLEJL_AKT;                        
+         BH974.BGRPROM2 = BH960.FRA_EVS_BER.BGRPROM2;                   
+         BH974.BGRPROM2_I = BH960.FRA_EVS_BER.BGRPROM2_SW;              
+         BH974.DOVTGFOR = BH960.TIL_EVS.DOVTGFOR;                       
+         BH974.CSTIBLB   = BH960.FRA_EVS_BER.CSTIBLB;                   
+         BH974.CDATAFRA = BH960.TIL_EVS.CDATAFRA;                       
+         BH974.CUDLHEL   = BH960.TIL_EVS.CUDLHEL;                       
+         BH974.CUDLDEL   = BH960.TIL_EVS.CUDLDEL;                       
+         BH974.BGRPROM1 = BH960.FRA_EVS_BER.BGRPROM1;                   
+         BH974.BGRPROM1_I = BH960.FRA_EVS_BER.BGRPROM1_SW;              
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+                                                                        
+         WRITE FILE (BH974O) FROM (BH974);                              
+                                                                        
+ END DAN_DATA_TIL_SLUT;                                                 
+ /**********************************************************************
+ *       BH97101M - OPSÆT DATA TIL EJERSKABSTABELLEN                   *
+ *       OBS. ÅRSTILRETNING FORETAGES 'LETTEST' VED KONTROL AF INDHOLD *
+ *            IMOD MEMBER=BH96131M FRA GRUNDLEVERINGEN (NATURLIGVIS    *
+ *            EFTER AT BH96131M ER ÅRSTILRETTET OG TESTET!)            *
+ **********************************************************************/
+ OPSÆT_DATA_TIL_PERSON:                                                 
+ PROC;                                                                  
+                                                                        
+         /* FÆLLESDATA FOR BQ30000T OG BQ31000T */                      
+                                                                        
+         BQ_UD.PERSON.DCPRN    = BH960.SORT_CPR;                        
+         BQ_UD.PERSON.DINDKAAR = 2011;                                  
+         BQ_UD.PERSON.EKOMNR   = BH960.SORT_KOMNR;                      
+         BQ_UD.PERSON.EEJDNR   = BH960.SORT_EJDNR;                      
+         BQ_UD.PERSON.ELBNR    = BH960.UDSKRLBNR;                       
+                                                                        
+         /* DATA KUN TIL BQ30000T */                                    
+                                                                        
+         BQ_UD.PERSON.CDATAFRA = BH960.TIL_EVS.CDATAFRA;                
+                                                                        
+         BQ_UD.PERSON.DFRAGLD  = ' '; /* OPSÆTTES AF DATAMODUL */       
+                                                                        
+         BQ_UD.PERSON.DTILGLD  = ' '; /* OPSÆTTES AF DATAMODUL */       
+                                                                        
+         BQ_UD.PERSON.CSCREGISTMP = ' ';                                
+                                                                        
+         BQ_UD.PERSON.PERSKOD = ' ';                                    
+                                                                        
+         BQ_UD.PERSON.MYNDNR = ' ';                                     
+                                                                        
+         IF BH960.ESR.EJER.COMPLA > '0'                                 
+         THEN                                                           
+            DO;                                                         
+              BQ_UD.PERSON.COMPLA = BH960.ESR.EJER.COMPLA;              
+              BQ_UD.PERSON.DOMPLACPR = BH960.ESR.EJER.DOMPLACPR;        
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+              BQ_UD.PERSON.COMPLA =  ' ';                               
+              BQ_UD.PERSON.DOMPLACPR = ' ';                             
+            END;                                                        
+                                                                        
+         /* SUPPLEMENTSKØRSEL - DISSE 2 KODER   */                      
+         /* SKAL OPSÆTTES HVIS OPDATERING SKER  */                      
+                                                                        
+      /* BQ_UD.PERSON.CAJOUR = '3'; */                                  
+         BQ_UD.PERSON.CAJOUR = '1'; /* AKTIVERES HVIS FEJLRETTELSE */   
+                                                                        
+         BQ_UD.PERSON.CSUPPL = '2';                                     
+                                                                        
+         IF BH960.FEJLNR > 0                                            
+         THEN                                                           
+            DO;                                                         
+               HJ_FEJLNR = BH960.FEJLNR;                                
+               INDEX = HJ_FEJLNR;                                       
+               SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;   
+               BQ_UD.PERSON.FEJLNR = HJ_FEJLNRC;                        
+            END;                                                        
+         ELSE                                                           
+            BQ_UD.PERSON.FEJLNR = ' ';                                  
+                                                                        
+         /* DATA KUN TIL BQ31000T */                                    
+                                                                        
+         BQ_UD.PERSON.BBER2FAM = BH960.EJERSKAB.BBER2FAM;               
+         BQ_UD.INDK_PERS.BBER2FAM_I = BH960.EJERSKAB.BBER2FAM_SW;       
+                                                                        
+         BQ_UD.PERSON.BBERGRL = BH960.EJERSKAB.BBERGRL;                 
+         BQ_UD.INDK_PERS.BBERGRL_I = BH960.EJERSKAB.BBERGRL_SW;         
+                                                                        
+         IF BH960.SORT_KOMNR = 999      /* UDL EJD SLUT09  #18-2 */     
+         THEN                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_015ANV =                           
+               BH960.EJERSKAB.UDL_621;                                  
+               BQ_UD.INDK_PERS.BBER2FAM_015ANV_I =                      
+               BH960.EJERSKAB.UDL_621_SW;                               
+                                                                        
+               BQ_UD.PERSON.BBERGRL_015ANV =                            
+               BH960.EJERSKAB.UDL_614;                                  
+               BQ_UD.INDK_PERS.BBERGRL_015ANV_I =                       
+               BH960.EJERSKAB.UDL_614_SW;                               
+            END;                                                        
+         ELSE                           /* UDL EJD SLUT09  #18-2 */     
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_015ANV =                           
+               BH960.VURD_015ANV.BBER2FAM_015ANV;                       
+               BQ_UD.INDK_PERS.BBER2FAM_015ANV_I =                      
+               BH960.VURD_015ANV.BBER2FAM_015ANV_SW;                    
+                                                                        
+               BQ_UD.PERSON.BBERGRL_015ANV =                            
+               BH960.VURD_015ANV.BBERGRL_015ANV;                        
+               BQ_UD.INDK_PERS.BBERGRL_015ANV_I =                       
+               BH960.VURD_015ANV.BBERGRL_015ANV_SW;                     
+            END;                                                        
+                                                                        
+         BQ_UD.PERSON.BEJBOL1 = BH960.EJENDOM.BEJBOL1;                  
+         BQ_UD.INDK_PERS.BEJBOL1_I = BH960.EJENDOM.BEJBOL1_SW;          
+                                                                        
+         BQ_UD.PERSON.BEJBOL1_015ANV =                                  
+         BH960.VURD_015ANV.BEJBOL1_015ANV;                              
+         BQ_UD.INDK_PERS.BEJBOL1_015ANV_I =                             
+         BH960.VURD_015ANV.BEJBOL1_015ANV_SW;                           
+                                                                        
+         BQ_UD.PERSON.BEJBOL2 = BH960.EJENDOM.BEJBOL2;                  
+         BQ_UD.INDK_PERS.BEJBOL2_I = BH960.EJENDOM.BEJBOL2_SW;          
+                                                                        
+         BQ_UD.PERSON.BEJBOL2_015ANV =                                  
+         BH960.VURD_015ANV.BEJBOL2_015ANV;                              
+         BQ_UD.INDK_PERS.BEJBOL2_015ANV_I =                             
+         BH960.VURD_015ANV.BEJBOL2_015ANV_SW;                           
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV = BH960.EJERSKAB.BEJBOLANV;             
+         BQ_UD.INDK_PERS.BEJBOLANV_I = BH960.EJERSKAB.BEJBOLANV_SW;     
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_015ANV =                                
+         BH960.VURD_015ANV.BEJBOLANV_015ANV;                            
+         BQ_UD.INDK_PERS.BEJBOLANV_015ANV_I =                           
+         BH960.VURD_015ANV.BEJBOLANV_015ANV_SW;                         
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_02 =                                    
+         BH960.VURD_02.BEJBOLANV_02;                                    
+         BQ_UD.INDK_PERS.BEJBOLANV_02_I =                               
+         BH960.VURD_02.BEJBOLANV_02_SW;                                 
+                                                                        
+         BQ_UD.PERSON.BEJDVÆR_015ANV =                                  
+         BH960.VURD_015ANV.BEJDVÆR_015ANV;                              
+         BQ_UD.INDK_PERS.BEJDVÆR_015ANV_I =                             
+         BH960.VURD_015ANV.BEJDVÆR_015ANV_SW;                           
+                                                                        
+         BQ_UD.PERSON.BERHVAN = BH960.TIL_EVS.BERHVAN;                  
+                                                                        
+         BQ_UD.PERSON.BEVSGL   = BH960.TIL_EVS.BEVSGL;                  
+         BQ_UD.INDK_PERS.BEVSGL_I = BH960.TIL_EVS.BEVSGL_SW;            
+                                                                        
+         BQ_UD.PERSON.BEVSMAN = 0;                                      
+         BQ_UD.INDK_PERS.BEVSMAN_I = -1;                                
+                                                                        
+         IF BH960.UDSKRLBNR = 1                                         
+         THEN                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BFORSKAT = BH960.TIL_EVS.BFORSKAT;          
+               BQ_UD.INDK_PERS.BFORSKAT_I = BH960.TIL_EVS.BFORSKAT_SW;  
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BFORSKAT = 0;                               
+               BQ_UD.INDK_PERS.BFORSKAT_I = -1;                         
+            END;                                                        
+                                                                        
+         BQ_UD.PERSON.BFSKAT = BH960.TIL_EVS.BFSKAT;                    
+                                                                        
+         BQ_UD.PERSON.BGRPROM1 = BH960.FRA_EVS_BER.BGRPROM1;            
+         BQ_UD.INDK_PERS.BGRPROM1_I = BH960.FRA_EVS_BER.BGRPROM1_SW;    
+                                                                        
+         BQ_UD.PERSON.BGRPROM2 = BH960.FRA_EVS_BER.BGRPROM2;            
+         BQ_UD.INDK_PERS.BGRPROM2_I = BH960.FRA_EVS_BER.BGRPROM2_SW;    
+                                                                        
+         BQ_UD.PERSON.BMANNEDSL = 0;                                    
+         BQ_UD.INDK_PERS.BMANNEDSL_I = -1;                              
+                                                                        
+         BQ_UD.PERSON.BNEDSL1 = BH960.FRA_EVS_BER.BNEDSL1;              
+         BQ_UD.INDK_PERS.BNEDSL1_I = BH960.FRA_EVS_BER.BNEDSL1_SW;      
+                                                                        
+         BQ_UD.PERSON.BNEDSL2 = BH960.FRA_EVS_BER.BNEDSL2;              
+         BQ_UD.INDK_PERS.BNEDSL2_I = BH960.FRA_EVS_BER.BNEDSL2_SW;      
+                                                                        
+         BQ_UD.PERSON.BNETTO = BH960.FRA_EVS_BER.BNETTO;                
+         BQ_UD.INDK_PERS.BNETTO_I = BH960.FRA_EVS_BER.BNETTO_SW;        
+                                                                        
+         BQ_UD.PERSON.BOBEHAKOD = ' ';                                  
+                                                                        
+   /*    BQ_UD.INDK_PERS.BOMBTILBUDL_01_I = -1;                         
+         BQ_UD.PERSON.BOMBTILBUDL_01 = 0;               SLUT09 */       
+                                                                        
+         BQ_UD.PERSON.BPENSNED = BH960.FRA_EVS_BER.BPENSNED;            
+         BQ_UD.INDK_PERS.BPENSNED_I = BH960.FRA_EVS_BER.BPENSNED_SW;    
+                                                                        
+         BQ_UD.PERSON.BPENSNEDGL = BH960.TIL_EVS.BPENSNEDGL;            
+         BQ_UD.INDK_PERS.BPENSNEDGL_I = BH960.TIL_EVS.BPENSNEDGL_SW;    
+                                                                        
+         BQ_UD.PERSON.BPENSNÆ = BH960.FRA_EVS_BER.BPENSNÆ;              
+         BQ_UD.INDK_PERS.BPENSNÆ_I = BH960.FRA_EVS_BER.BPENSNÆ_SW;      
+                                                                        
+         BQ_UD.PERSON.BPRIVAN = BH960.TIL_EVS.BPRIVAN;                  
+                                                                        
+         BQ_UD.PERSON.BPROM1 = BH960.FRA_EVS_BER.BPROM1;                
+         BQ_UD.INDK_PERS.BPROM1_I = BH960.FRA_EVS_BER.BPROM1_SW;        
+                                                                        
+         BQ_UD.PERSON.BPROM2 = BH960.FRA_EVS_BER.BPROM2;                
+         BQ_UD.INDK_PERS.BPROM2_I = BH960.FRA_EVS_BER.BPROM2_SW;        
+                                                                        
+         BQ_UD.PERSON.BSTIBEGR = BH960.FRA_EVS_BER.BSTIBEGR;            
+         BQ_UD.INDK_PERS.BSTIBEGR_I = BH960.FRA_EVS_BER.BSTIBEGR_SW;    
+                                                                        
+         BQ_UD.PERSON.BSTITIL = BH960.FRA_EVS_BER.BSTITIL;              
+         BQ_UD.INDK_PERS.BSTITIL_I = BH960.FRA_EVS_BER.BSTITIL_SW;      
+                                                                        
+         BQ_UD.PERSON.BSUM1 = BH960.FRA_EVS_BER.BSUM1;                  
+         BQ_UD.INDK_PERS.BSUM1_I = BH960.FRA_EVS_BER.BSUM1_SW;          
+                                                                        
+         BQ_UD.PERSON.BSUM2 = BH960.FRA_EVS_BER.BSUM2;                  
+         BQ_UD.INDK_PERS.BSUM2_I = BH960.FRA_EVS_BER.BSUM2_SW;          
+                                                                        
+         BQ_UD.INDK_PERS.BUDLSKC_I = -1;                                
+         BQ_UD.PERSON.BUDLSKC = 0;                                      
+                                                                        
+         BQ_UD.PERSON.CANVEBOL = BH960.EJERSKAB.CANVEBOL;               
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_015ANV =                                 
+         BH960.VURD_015ANV.CANVEBOL_015ANV;                             
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_02 =                                     
+         BH960.VURD_02.CANVEBOL_02;                                     
+                                                                        
+         BQ_UD.PERSON.CBERGRGLOP = BH960.EJERSKAB.CBERGRGLOP;           
+         BQ_UD.PERSON.CBERGROP = BH960.EJERSKAB.CBERGROP;               
+                                                                        
+         BQ_UD.PERSON.CEJBEVS = BH960.TIL_EVS.CEJBEVS;                  
+                                                                        
+         BQ_UD.PERSON.CEKSEMP = BH960.TIL_EVS.CEKSEMP;                  
+                                                                        
+         BQ_UD.PERSON.CELØNCOR = BH960.TIL_EVS.CELØNCOR;                
+                                                                        
+         BQ_UD.PERSON.CENKE = BH960.TIL_EVS.CENKE;                      
+                                                                        
+         BQ_UD.PERSON.CENKEBOH   = ' ';                                 
+                                                                        
+         BQ_UD.PERSON.CERHV = BH960.TIL_EVS.CERHV;                      
+                                                                        
+         IF BH960.UDSKRLBNR = 1                                         
+         THEN                                                           
+            BQ_UD.PERSON.CFORSKAT = BH960.TIL_EVS.CFORSKAT;             
+         ELSE                                                           
+            BQ_UD.PERSON.CFORSKAT = '2';                                
+                                                                        
+         BQ_UD.PERSON.CFRÅR = BH960.MT.CFRÅR;                           
+                                                                        
+         BQ_UD.PERSON.CINDFLYT   = ' ';                                 
+                                                                        
+         BQ_UD.PERSON.CIVILSTAND = BH960.MT.CCIVS;                      
+                                                                        
+         BQ_UD.PERSON.CKØBSALG   = BH960.TIL_EVS.CKØBSALG;              
+                                                                        
+         BQ_UD.PERSON.CNEDSL1 = BH960.TIL_EVS.CNEDSL1;                  
+                                                                        
+         BQ_UD.PERSON.CNEDSL2 = BH960.FRA_EVS_BER.CNEDSL2;              
+                                                                        
+         BQ_UD.PERSON.CNULSTIL = ' ';                                   
+                                                                        
+         BQ_UD.PERSON.CPTYPGL = BH960.TIL_EVS.CPTYPGL;                  
+                                                                        
+         BQ_UD.PERSON.CPTYPSLUT = BH960.TIL_EVS.CPTYPSLUT;              
+                                                                        
+         BQ_UD.PERSON.CSKPLOMF = BH960.TIL_EVS.CSKPLOMF;                
+                                                                        
+         BQ_UD.PERSON.CSKPLOMFGL = BH960.TIL_EVS.CSKPLOMFGL;            
+                                                                        
+         BQ_UD.PERSON.CSLET = ' ';                                      
+                                                                        
+         BQ_UD.PERSON.CSTIBLB = BH960.FRA_EVS_BER.CSTIBLB;              
+                                                                        
+         BQ_UD.PERSON.CUDLDEL  = BH960.TIL_EVS.CUDLDEL;                 
+                                                                        
+         BQ_UD.PERSON.CUDLHEL  = BH960.TIL_EVS.CUDLHEL;                 
+                                                                        
+         BQ_UD.PERSON.CUDLMAN = BH960.TIL_EVS.CUDLMAN;                  
+                                                                        
+         BQ_UD.PERSON.CÆGTOPR = BH960.TIL_EVS.CÆGTOPR;                  
+                                                                        
+         IF BH960.TIL_EVS.DAFSTAA > BH960.MT.DRGNÅRTIL                  
+         THEN                                                           
+            BQ_UD.PERSON.DAFSTAA = ' ';                                 
+         ELSE                                                           
+            IF BH960.TIL_EVS.DAFSTAA > 0                                
+            THEN                                                        
+               BQ_UD.PERSON.DAFSTAA =                                   
+               FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DAFSTAA);               
+            ELSE                                                        
+               BQ_UD.PERSON.DAFSTAA = ' ';                              
+                                                                        
+         BQ_UD.PERSON.DAFSTAAFOR = BH960.TIL_EVS.DAFSTAAFOR;            
+                                                                        
+         IF BH960.TIL_EVS.DATO0107 > 0                                  
+         THEN                                                           
+            BQ_UD.PERSON.DATO0107 =                                     
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DATO0107);                 
+         ELSE                                                           
+            BQ_UD.PERSON.DATO0107 = ' ';                                
+                                                                        
+         IF BH960.TIL_EVS.DFRAFLYT > 0                                  
+         THEN                                                           
+            BQ_UD.PERSON.DFRAFLYT =                                     
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DFRAFLYT);                 
+         ELSE                                                           
+            BQ_UD.PERSON.DFRAFLYT = ' ';                                
+                                                                        
+         BQ_UD.PERSON.DHENVN = BH960.TIL_EVS.DHENVN;                    
+                                                                        
+         IF BH960.TIL_EVS.DINDFLYT > 0                                  
+         THEN                                                           
+            BQ_UD.PERSON.DINDFLYT =                                     
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DINDFLYT);                 
+         ELSE                                                           
+            BQ_UD.PERSON.DINDFLYT = ' ';                                
+                                                                        
+         IF BH960.TIL_EVS.DOVTG > 0                                     
+         THEN                                                           
+            BQ_UD.PERSON.DOVTG =                                        
+            FIX09_TIL_DB2_DATO(BH960.TIL_EVS.DOVTG);                    
+         ELSE                                                           
+            BQ_UD.PERSON.DOVTG = ' ';                                   
+                                                                        
+         BQ_UD.PERSON.DOVTGFOR = BH960.TIL_EVS.DOVTGFOR;                
+                                                                        
+         BQ_UD.PERSON.FDAGERHV = 0;                                     
+                                                                        
+         BQ_UD.PERSON.FDAGUDLE = 0;                                     
+                                                                        
+         BQ_UD.PERSON.FELT759  = BH960.TIL_EVS.FELT759;                 
+                                                                        
+         BQ_UD.PERSON.FELT760 = BH960.TIL_EVS.CFRED;                    
+                                                                        
+         BQ_UD.PERSON.FERHVFLER = BH960.TIL_EVS.FERHVFLER;              
+                                                                        
+         BQ_UD.PERSON.FUBEBOELIG = 0;                                   
+                                                                        
+         BQ_UD.PERSON.FUDL100 = BH960.TIL_EVS.FUDL100;                  
+                                                                        
+         BQ_UD.PERSON.GLPNR = 0;                                        
+                                                                        
+         BQ_UD.PERSON.GPCTEJER = BH960.TIL_EVS.GPCTEJER;                
+         BQ_UD.INDK_PERS.GPCTEJER_I = BH960.TIL_EVS.GPCTEJER_SW;        
+                                                                        
+         BQ_UD.PERSON.GPCTEJERFOR = BH960.TIL_EVS.GPCTEJERFOR;          
+                                                                        
+         BQ_UD.PERSON.GPCTERHV = 0;                                     
+                                                                        
+         BQ_UD.PERSON.GPCTUDLE = 0;                                     
+                                                                        
+         BQ_UD.PERSON.MANNEDSLSTI = 0;                                  
+         BQ_UD.INDK_PERS.MANNEDSLSTI_I = -1;                            
+                                                                        
+         BQ_UD.PERSON.CTILKØB = BH960.AKT_EJER.CTILKØB;                 
+                                                                        
+         IF BH960.MT.DRGNÅRFRA > 0                                      
+         THEN                                                           
+            BQ_UD.PERSON.DRGNÅRFRA =                                    
+            FIX09_TIL_DB2_DATO(BH960.MT.DRGNÅRFRA);                     
+         ELSE                                                           
+            BQ_UD.PERSON.DRGNÅRFRA = ' ';                               
+                                                                        
+         IF BH960.MT.DRGNÅRTIL > 0                                      
+         THEN                                                           
+            BQ_UD.PERSON.DRGNÅRTIL =                                    
+            FIX09_TIL_DB2_DATO(BH960.MT.DRGNÅRTIL);                     
+         ELSE                                                           
+            BQ_UD.PERSON.DRGNÅRTIL = ' ';                               
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_015PCT =                                
+         BH960.VURD_015PCT.BEJBOLANV_015PCT;                            
+         BQ_UD.INDK_PERS.BEJBOLANV_015PCT_I =                           
+         BH960.VURD_015PCT.BEJBOLANV_015PCT_SW;                         
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_02OM =                                  
+         BH960.VURD_02OM.BEJBOLANV_02OM;                                
+         BQ_UD.INDK_PERS.BEJBOLANV_02OM_I =                             
+         BH960.VURD_02OM.BEJBOLANV_02OM_SW;                             
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_02OMNY =                                
+         BH960.VURD_02OMNY.BEJBOLANV_02OMNY;                            
+         BQ_UD.INDK_PERS.BEJBOLANV_02OMNY_I =                           
+         BH960.VURD_02OMNY.BEJBOLANV_02OMNY_SW;                         
+                                                                        
+         BQ_UD.PERSON.CANVBOL_015PCT =                                  
+         BH960.VURD_015PCT.CANVEBOL_015PCT;                             
+                                                                        
+         BQ_UD.PERSON.CANVBOL_02OM =                                    
+         BH960.VURD_02OM.CANVEBOL_02OM;                                 
+                                                                        
+         BQ_UD.PERSON.CANVBOL_02OMNY =                                  
+         BH960.VURD_02OMNY.CANVEBOL_02OMNY;                             
+                                                                        
+         BQ_UD.PERSON.CEJDTYPE_015ANV =                                 
+         BH960.VURD_015ANV.CEJDTYPE_015ANV;                             
+                                                                        
+         IF BH960.SORT_KOMNR = 999                                      
+         THEN                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_AKT      = 0;                      
+               BQ_UD.INDK_PERS.BBER2FAM_AKT_I = -1;                     
+                                                                        
+               BQ_UD.PERSON.BBERGRL_AKT       = 0;                      
+               BQ_UD.INDK_PERS.BBERGRL_AKT_I  = -1;                     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_AKT =                              
+               BH960.VURD_AKT.BBER2FAM_AKT;                             
+               BQ_UD.INDK_PERS.BBER2FAM_AKT_I =                         
+               BH960.VURD_AKT.BBER2FAM_AKT_SW;                          
+                                                                        
+               BQ_UD.PERSON.BBERGRL_AKT =                               
+               BH960.VURD_AKT.BBERGRL_AKT;                              
+               BQ_UD.INDK_PERS.BBERGRL_AKT_I =                          
+               BH960.VURD_AKT.BBERGRL_AKT_SW;                           
+            END;                                                        
+                                                                        
+         BQ_UD.PERSON.BEJBOL1_AKT =                                     
+         BH960.VURD_AKT.BEJBOL1_AKT;                                    
+         BQ_UD.INDK_PERS.BEJBOL1_AKT_I =                                
+         BH960.VURD_AKT.BEJBOL1_AKT_SW;                                 
+                                                                        
+         BQ_UD.PERSON.BEJBOL2_AKT =                                     
+         BH960.VURD_AKT.BEJBOL2_AKT;                                    
+         BQ_UD.INDK_PERS.BEJBOL2_AKT_I =                                
+         BH960.VURD_AKT.BEJBOL2_AKT_SW;                                 
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_AKT =                                   
+         BH960.VURD_AKT.BEJBOLANV_AKT;                                  
+         BQ_UD.INDK_PERS.BEJBOLANV_AKT_I =                              
+         BH960.VURD_AKT.BEJBOLANV_AKT_SW;                               
+                                                                        
+         BQ_UD.PERSON.BPENSNÆGL = BH960.TIL_EVS.BPENSNÆGL;              
+         BQ_UD.INDK_PERS.BPENSNÆGL_I = BH960.TIL_EVS.BPENSNÆGL_SW;      
+                                                                        
+         BQ_UD.PERSON.BSUM3 = BH960.FRA_EVS_BER.BSUM3;                  
+         BQ_UD.INDK_PERS.BSUM3_I = BH960.FRA_EVS_BER.BSUM3_SW;          
+                                                                        
+         BQ_UD.PERSON.BGLSUM1 = BH960.TIL_EVS.BGLSUM1;                  
+         BQ_UD.INDK_PERS.BGLSUM1_I = BH960.TIL_EVS.BGLSUM1_SW;          
+                                                                        
+         /* BFASTSTIGBGR TILFØJET I EVS SLUT 2005 - VAR GLEMT I 2003 */ 
+         BQ_UD.PERSON.BFASTSTIGBGR = BH960.TIL_EVS.BFASTSTIGBGR;        
+         BQ_UD.INDK_PERS.BFASTSTIGBGR_I = BH960.TIL_EVS.BFASTSTIGBGR_SW;
+                                                                        
+         BQ_UD.PERSON.BMANEVSSTI = 0;                                   
+         BQ_UD.INDK_PERS.BMANEVSSTI_I = -1;                             
+                                                                        
+         BQ_UD.PERSON.CAFSTAA = ' ';                                    
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_AKT =                                    
+         BH960.VURD_AKT.CANVEBOL_AKT;                                   
+                                                                        
+         BQ_UD.PERSON.CEJDTYPE_AKT = BH960.VURD_AKT.CEJDTYPE_AKT;       
+                                                                        
+         BQ_UD.PERSON.EKOMNR_GL = BH960.TIL_EVS.EKOMNR_GL;              
+                                                                        
+         BQ_UD.PERSON.EEJDNR_GL = BH960.TIL_EVS.EEJDNR_GL;              
+                                                                        
+         BQ_UD.PERSON.MANPENSSTI = 0;                                   
+         BQ_UD.INDK_PERS.MANPENSSTI_I = -1;                             
+                                                                        
+         BQ_UD.PERSON.CBGLSUM1 = BH960.TIL_EVS.CBGLSUM1;                
+                                                                        
+         /* NYE FELTER FRA OG MED 2004 */                               
+                                                                        
+         IF BH960.SORT_KOMNR = 999                                      
+         THEN                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_02ANV =                            
+               BH960.EJERSKAB.UDL_622;                                  
+               BQ_UD.INDK_PERS.BBER2FAM_02ANV_I =                       
+               BH960.EJERSKAB.UDL_622_SW;                               
+                                                                        
+               BQ_UD.PERSON.BBERGRL_02ANV  =                            
+               BH960.EJERSKAB.UDL_615;                                  
+               BQ_UD.INDK_PERS.BBERGRL_02ANV_I  =                       
+               BH960.EJERSKAB.UDL_615_SW;                               
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               BQ_UD.PERSON.BBER2FAM_02ANV =                            
+               BH960.VURD_02ANV.BBER2FAM_02ANV;                         
+               BQ_UD.INDK_PERS.BBER2FAM_02ANV_I =                       
+               BH960.VURD_02ANV.BBER2FAM_02ANV_SW;                      
+                                                                        
+               BQ_UD.PERSON.BBERGRL_02ANV  =                            
+               BH960.VURD_02ANV.BBERGRL_02ANV;                          
+               BQ_UD.INDK_PERS.BBERGRL_02ANV_I  =                       
+               BH960.VURD_02ANV.BBERGRL_02ANV_SW;                       
+            END;                                                        
+                                                                        
+         BQ_UD.PERSON.BEJBOL1_02ANV =                                   
+         BH960.VURD_02ANV.BEJBOL1_02ANV;                                
+         BQ_UD.INDK_PERS.BEJBOL1_02ANV_I =                              
+         BH960.VURD_02ANV.BEJBOL1_02ANV_SW;                             
+                                                                        
+         BQ_UD.PERSON.BEJBOL2_02ANV =                                   
+         BH960.VURD_02ANV.BEJBOL2_02ANV;                                
+         BQ_UD.INDK_PERS.BEJBOL2_02ANV_I =                              
+         BH960.VURD_02ANV.BEJBOL2_02ANV_SW;                             
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_01OM =                                  
+         BH960.VURD_01OM.BEJBOLANV_01OM;                                
+         BQ_UD.INDK_PERS.BEJBOLANV_01OM_I =                             
+         BH960.VURD_01OM.BEJBOLANV_01OM_SW;                             
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_01OMNY =                                
+         BH960.VURD_01OMNY.BEJBOLANV_01OMNY;                            
+         BQ_UD.INDK_PERS.BEJBOLANV_01OMNY_I =                           
+         BH960.VURD_01OMNY.BEJBOLANV_01OMNY_SW;                         
+                                                                        
+         BQ_UD.PERSON.BEJBOLANV_02ANV =                                 
+         BH960.VURD_02ANV.BEJBOLANV_02ANV;                              
+         BQ_UD.INDK_PERS.BEJBOLANV_02ANV_I =                            
+         BH960.VURD_02ANV.BEJBOLANV_02ANV_SW;                           
+                                                                        
+         BQ_UD.PERSON.BEJDVÆR_02ANV =                                   
+         BH960.VURD_02ANV.BEJDVÆR_02ANV;                                
+         BQ_UD.INDK_PERS.BEJDVÆR_02ANV_I =                              
+         BH960.VURD_02ANV.BEJDVÆR_02ANV_SW;                             
+                                                                        
+         BQ_UD.PERSON.CEJDTYPE_02ANV = BH960.VURD_02ANV.CEJDTYPE_02ANV; 
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_02ANV =                                  
+         BH960.VURD_02ANV.CANVEBOL_02ANV;                               
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_01OM =                                   
+         BH960.VURD_01OM.CANVEBOL_01OM;                                 
+                                                                        
+         BQ_UD.PERSON.CANVEBOL_01OMNY =                                 
+         BH960.VURD_01OMNY.CANVEBOL_01OMNY;                             
+                                                                        
+      /* 18-03 SLUT09 HERFRA KUN I OPRETTELSEN */                       
+      /* FELT 278 - 289      */                                         
+         BQ_UD.PERSON.DERHVPER_FRA1 = BH960.EJERSKAB.DERHVPER_FRA1;     
+         BQ_UD.PERSON.DERHVPER_TIL1 = BH960.EJERSKAB.DERHVPER_TIL1;     
+         BQ_UD.PERSON.DERHVPER_FRA2 = BH960.EJERSKAB.DERHVPER_FRA2;     
+         BQ_UD.PERSON.DERHVPER_TIL2 = BH960.EJERSKAB.DERHVPER_TIL2;     
+         BQ_UD.PERSON.DERHVPER_FRA3 = BH960.EJERSKAB.DERHVPER_FRA3;     
+         BQ_UD.PERSON.DERHVPER_TIL3 = BH960.EJERSKAB.DERHVPER_TIL3;     
+         BQ_UD.PERSON.DERHVPER_FRA4 = BH960.EJERSKAB.DERHVPER_FRA4;     
+         BQ_UD.PERSON.DERHVPER_TIL4 = BH960.EJERSKAB.DERHVPER_TIL4;     
+         BQ_UD.PERSON.DERHVPER_FRA5 = BH960.EJERSKAB.DERHVPER_FRA5;     
+         BQ_UD.PERSON.DERHVPER_TIL5 = BH960.EJERSKAB.DERHVPER_TIL5;     
+         BQ_UD.PERSON.FERHVPER_ANT  = BH960.EJERSKAB.FERHVPER_ANT;      
+         BQ_UD.PERSON.CNEDTAG158    = BH960.EJERSKAB.CNEDTAG158;        
+      /* 18-03 SLUT09 HERTIL */                                         
+                                                                        
+         TV.SKRIV_PERS = TV.SKRIV_PERS + 1;                             
+                                                                        
+ END OPSÆT_DATA_TIL_PERSON;                                             
+ /*-------------------------------------------------------------------*/
+ /* DB2_DATO_TIL_FIX09                                                */
+ /* HVIS DATO = BLANKE, RETURNES 0                                    */
+ /*-------------------------------------------------------------------*/
+ DB2_DATO_TIL_FIX09: PROC (DB2_DATO_IND) RETURNS (DEC FIXED (09));      
+                                                                        
+ DCL     DB2_DATO_IND    CHAR      (10);   /* ÅÅÅÅ-MM-DD*/              
+ DCL     DATO_CHAR       CHAR      (08);   /* ÅÅÅÅMMDD  */              
+ DCL     DATO_PIC        PIC       '99999999' DEF DATO_CHAR;            
+ DCL     DATO_FIX        DEC FIXED (09);                                
+                                                                        
+         DATO_CHAR = SUBSTR (DB2_DATO_IND,1,4) !!                       
+                     SUBSTR (DB2_DATO_IND,6,2) !!                       
+                     SUBSTR (DB2_DATO_IND,9,2);                         
+         IF DB2_DATO_IND = ''                                           
+         THEN                                                           
+            DATO_PIC = 0;                                               
+                                                                        
+         DATO_FIX = DATO_PIC;                                           
+                                                                        
+         RETURN (DATO_FIX);                                             
+                                                                        
+ END DB2_DATO_TIL_FIX09;                                                
+ /*-------------------------------------------------------------------*/
+ /* DB2_DATO_TIL_FIX09                                                */
+ /* NB HVIS DATO = 0, SÆTTES DB2-DATO = BLANKE                        */
+ /*-------------------------------------------------------------------*/
+ FIX09_TIL_DB2_DATO: PROC (FIX_DATO_IND) RETURNS (CHAR (10));           
+                                                                        
+ DCL     FIX_DATO_IND        DEC FIXED (09);                            
+ DCL     DATO_PIC        PIC       '99999999';                          
+ DCL     1 DATO          BASED (ADDR(DATO_PIC)),                        
+          2 ÅR           PIC      '9999',                               
+          2 MD           PIC        '99',                               
+          2 DG           PIC        '99';                               
+ DCL     DATO_CHAR       CHAR      (10);   /* ÅÅÅÅ-MM-DD*/              
+                                                                        
+         DATO_PIC  = FIX_DATO_IND;                                      
+         DATO_CHAR = DATO.ÅR !! '-' !!                                  
+                     DATO.MD !! '-' !!                                  
+                     DATO.DG;                                           
+                                                                        
+         IF FIX_DATO_IND = 0                                            
+         THEN                                                           
+            DATO_CHAR = '';                        /** ?? **/           
+                                                                        
+         RETURN (DATO_CHAR);                                            
+                                                                        
+ END FIX09_TIL_DB2_DATO;                                                
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE:                                                            
+         PROC;                                                          
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.LÆS_BH960;                                  
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK             B.H96000D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV_SKRIV_EVS;                                  
+         DETLIN1.TEKST = 'ANTAL AJOURFØRTE EVS                        ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'ANTAL SUPPL INDIVIDER TIL CSC D0311604.A782'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         LIN3.CTL = ZZWS1;                                              
+         LIN3.TEKST = 'ANTAL OVERLÆSTE F.EKS. ÆNDRING EFTER HOVEDOPRET';
+         LIN3.ANT = TV_OVERLÆS_FØR;                                     
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS1;                                              
+         LIN3.TEKST = 'ANTAL OVERLÆSTE ÆGTEFÆLLEFORDELING             ';
+         LIN3.ANT = TV_OVERLÆS_ÆGT;                                     
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS1;                                              
+         LIN3.TEKST = 'ANTAL OVERLÆSTE MED FEJL I DB2                 ';
+         LIN3.ANT = TV_OVERLÆS_DB2;                                     
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.TEKST = 'ANTAL ADVIS (F.EKS. OPRETTELSER PÅ EVS)        ';
+         LIN3.ANT = TV_FEJL;                                            
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.TEKST = 'ANTAL FUNDNE MED FELT759 ÆNDRET FRA 2 TIL 1    ';
+         LIN3.ANT = TV.FELT759_KMD;                                     
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.TEKST = 'ANTAL FUNDNE MED FELT759 ÆNDRET TIL 1 HOS CSC  ';
+         LIN3.ANT = TV.FELT759_CSC;                                     
+         CALL ZZ20300(LIN3,'01');                                       
+                                                                        
+   /*    LIN3.CTL = ZZWS2;                                              
+         LIN3.TEKST = 'ANTAL MED FELT759 FORSKELLIG FRA 1 I 2010      ';
+         LIN3.ANT = TV.FELT759_CSC_2010;                                
+         CALL ZZ20300(LIN3,'01');     */                                
+                                                                        
+ END TOTALLISTE;                                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:                                                                
+         PROC;                                                          
+                                                                        
+         CALL FAKTURER_TS;                                              
+                                                                        
+         CALL TOTALLISTE;                                               
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+         CLOSE FILE (BH960I);                                           
+         CLOSE FILE (BH974O);                                           
+         CLOSE FILE (BH9741O);                                          
+         CLOSE FILE (BH9742O);                                          
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+         %INCLUDE BH00001M;                    /* CHAR4_TIL_BIN15     */
+                                               /* CHAR10_TIL_FIX11    */
+                                                                        
+         %INCLUDE BH97100M;                    /* DAN_DATA_TIL_EJDTAB */
+                                                                        
+         %INCLUDE BH97103M;                    /* FAKTURER T&S        */
+                                                                        
+      ; /* UNDGÅ PROBLEMER MED LABEL */                                 
+ DCL 1 ZM,                                                              
+       2  DUMMY           CHAR (01);                                    
+ END  BH97400;                                                          

@@ -1,0 +1,397 @@
+ BH37900: /* OPRETNING AF OMBEREGNEDE VURDERING FORSKUD 2016 */         
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+         INIT ('COPYRIGHT KMD A/S');                                    
+ /********************************************************************* 
+ * FORMÅL : DER ER OPSAT FORKERTE VÆRDIER TIL EVS BEREGNINGEN.         *
+ * INPUT  : B.H95001D BEREGNINGSBÅND                                   *
+ *          BN0500T, EVS FORSKUD TABEL                                 *
+ * OUTPUT : BN00600T OPDATERET                                         *
+ * PROGRAMMØR: HANS ERIK KJELDSEN  DEC. 2015                           *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+                                                                        
+ /**********************************************************************
+ *                       DECLARE AF REGISTRE                           *
+ **********************************************************************/
+ DCL     BH950I FILE RECORD INPUT;      /* BEREGNINGSBÅND             */
+ DCL     BH3792O FILE RECORD OUTPUT;    /* KONTROL DATASÆT.           */
+ DCL     BH379I FILE RECORD INPUT;      /* PARMKORT                   */
+ /**********************************************************************
+ *       DECLARE AF UDTRÆK                                             *
+ **********************************************************************/
+ DCL     BH950_AR        CHAR      (6000) VAR;                          
+ DCL     1 BH950         BASED     (ADDR(BH950_AR)),                    
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90100N;;                                          
+                                                                        
+ DCL     1 BH95099       BASED     (ADDR(BH950_AR)),                    
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90099N;                                           
+ DCL     1 PARMI,                                                       
+         2 KØRSW    CHAR(1),          /* Blank = uden opdtering       */
+                                      /* X     = med opdatering       */
+         2 TESTP    CHAR(1),          /* X = PUT SKIP                 */
+         2 FILLER   CHAR(78);                                           
+ DCL   1 KONTROLFIL,                                                    
+        2 FEKOMNR        CHAR(8),                                       
+        2 EKOMNR         PIC '999',                                     
+        2 FEEJDNR        CHAR(8),                                       
+        2 EEJDNR         PIC '9999999',                                 
+        2 FBBERGRL       CHAR(9),                                       
+        2 BBERGRL        PIC '99999999999V,99',                         
+        2 FBBER2FAM      CHAR(10),                                      
+        2 BBER2FAM       PIC '99999999999V,99';                         
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF DB2                                               */
+ /*********************************************************************/
+ DCL 1 GEM_PERSONEJENDOMSOPL,                                           
+       5 DINDKAAR        BIN FIXED(15),                                 
+       5 EKOMNR          BIN FIXED(15),                                 
+       5 EEJDNR          BIN FIXED(31),                                 
+       5 BBERGRL         DEC FIXED(13,2),                               
+       5 BBER2FAM        DEC FIXED(13,2);                               
+ DCL 1 NULL_INDK,                                                       
+       5 BEVSGL          FIXED BIN(15,0);                               
+ %INCLUDE SQLCA;                                                        
+ %INCLUDE BN00600T;                                                     
+                                                                        
+     EXEC SQL                                                           
+        DECLARE PERS_CUR CURSOR WITH HOLD FOR                           
+           SELEct T1.DINDKAAR,                                          
+                  T1.EKOMNR,                                            
+                  T1.EEJDNR,                                            
+                  T1.BBERGRL,                                           
+                  T1.BBER2FAM                                           
+              FROM BN00600T T1                                          
+              WHERE T1.DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR       
+                AND T1.EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR         
+                AND T1.EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR         
+                    ;                                                   
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     STG             BUILTIN;                                       
+ DCL     PROCNAME        BUILTIN;                                       
+ DCL     TIME            BUILTIN;                                       
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP   */ 
+ /**********************************************************************
+ *               DECLARE AF DIVERSE                                    *
+ **********************************************************************/
+ DCL     JA              BIT(1)          INIT('1'B);                    
+ DCL     NEJ             BIT(1)          INIT('0'B);                    
+ DCL     TFLAG           BIT(1)          INIT('0'B);                    
+ DCL     ÆND_MINDSTE_BEL BIT(1)          INIT('0'B);                    
+ DCL     PARM_EOF        BIT(1)          INIT('0'B);                    
+ DCL     OPDAT_SW        BIT(1)          INIT('0'B);                    
+ DCL     CUR_EOF         BIT(1)          INIT('0'B);                    
+ DCL     FEJLTEKST       CHAR (40)       INIT(' ');                     
+ DCL     ABENDMEDD       CHAR (56)       INIT(' ');                     
+ DCL     PLIXOPT         CHAR      (40)  VAR STATIC                     
+                                       EXTERNAL INIT ('NOTEST(ALL,,;)');
+ DCL     EOF_BH950       BIT(1)          INIT('0'B);                    
+ DCL     BN00600T_NF     BIT(1)          INIT('0'B);                    
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLERE                                           */
+ /*********************************************************************/
+ DCL     BH950_ANT_LÆST         FIXED DEC(7)   INIT(0);                 
+ DCL     BH950_ANT_UDEN_SKTSTOP FIXED DEC(7)   INIT(0);                 
+ DCL     BH379_ANT_SKRIV        FIXED DEC(7)   INIT(0);                 
+ DCL     BH379_ANT_EJOP         FIXED DEC(7)   INIT(0);                 
+ DCL     DB_ANT_EJ_FUNDET       FIXED DEC(7)   INIT(0);                 
+ DCL     DB_ANT_OPDATERET       FIXED DEC(7)   INIT(0);                 
+ DCL     CUR_LÆS_ANT            FIXED DEC(7)   INIT(0);                 
+ DCL     COMMIT_ANT             FIXED DEC(7)   INIT(0);                 
+ DCL     OPDAT_ANT              FIXED DEC(7)   INIT(0);                 
+ DCL     ANT_ÆND_SKAT           FIXED DEC(7)   INIT(0);                 
+ DCL     ANT_OPDAT_BEVSGL       FIXED DEC(7)   INIT(0);                 
+ DCL     GEM_EKOMNR             BIN FIXED(15)  INIT(0);                 
+ DCL     GEM_EEJDNR             BIN FIXED(31)  INIT(0);                 
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+         EOF_BH950 = NEJ;                                               
+         ON CONVERSION                                                  
+            BEGIN;                                                      
+              PUT SKIP LIST ('KOM-NR = ',BH950.SORT_KOMNR);             
+              PUT SKIP LIST ('EJD-NR = ',BH950.SORT_EJDNR);             
+              CALL PLIDUMP ('SNHOB');                                   
+            END;                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+              CALL PLIDUMP ('SNHOB');                                   
+            END;                                                        
+         ON ENDFILE (BH379I)                                            
+            PARM_EOF = '1'B;                                            
+         OPEN FILE (BH950I) TITLE ('BH95000I');                         
+         OPEN FILE (BH3792O) TITLE ('BH37901O');                        
+                                                                        
+         ON ENDFILE (BH950I)                                            
+            EOF_BH950 = JA;                                             
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+         CALL SKAF_PARM;                                                
+         CALL LÆS_BH950;                                                
+         DO WHILE(^EOF_BH950);                                          
+           IF BH950.SKATSTOP.DSTOPÅR > '    '   /* SKATTESTOP FINDES */ 
+            &(GEM_EKOMNR ^= BH950.SORT_KOMNR                            
+            ! GEM_EEJDNR ^= BH950.SORT_EJDNR)                           
+           THEN                                                         
+             DO;                                                        
+               CUR_EOF     = NEJ;                                       
+               CUR_LÆS_ANT = 0;                                         
+                                                                        
+               PERSONEJENDOMSOPL              = '';                     
+               PERSONEJENDOMSOPL.DINDKAAR     = 2016;                   
+               PERSONEJENDOMSOPL.EKOMNR       = BH950.SORT_KOMNR;       
+               PERSONEJENDOMSOPL.EEJDNR       = BH950.SORT_EJDNR;       
+                                                                        
+               EXEC SQL OPEN PERS_CUR;                                  
+                                                                        
+               SELECT (SQLCA.SQLCODE);                                  
+                WHEN (0);                                               
+                OTHERWISE                                               
+                 DO;                                                    
+                   FEJLTEKST = 'FEJL VED OPEN AF CURSOR: '!!            
+                             SQLCA.SQLCODE;                             
+                   CALL SQL_FEJL('001');                                
+                 END;                                                   
+               END;                                                     
+               CALL FETCH_CUR;                                          
+                IF ^BN00600T_NF                                         
+                THEN                                                    
+                  CALL BEHANDL;                                         
+               EXEC SQL                                                 
+                  CLOSE PERS_CUR;                                       
+               GEM_EKOMNR = BH950.SORT_KOMNR;                           
+               GEM_EEJDNR = BH950.SORT_EJDNR;                           
+             END;                                                       
+           CALL LÆS_BH950;                                              
+         END;                                                           
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS BEREGNINGSBÅND                                           * 
+ *********************************************************************/ 
+ LÆS_BH950: PROC;                                                       
+                                                                        
+         READ FILE (BH950I) INTO (BH950_AR);                            
+                                                                        
+         IF BH950.SORT_CPR > 99999999999     /* OPTÆLL.INDV. 1 */       
+         THEN                                                           
+           EOF_BH950 = JA;                                              
+         ELSE                                                           
+           BH950_ANT_LÆST = BH950_ANT_LÆST + 1;                         
+                                                                        
+ END LÆS_BH950;                                                         
+ /********************************************************************* 
+ *       EJENDOMME SOM EVT. SKAL OPDATEREES                           * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+ DCL FORSKEL  FIXED (13,2);                                             
+ DCL ANVEND   FIXED (11,2);                                             
+       FORSKEL = 0;                                                     
+       ANVEND = 0;                                                      
+       IF BH950.VURD_01OM.CBENYT_01OM ^= '  '                           
+         & BH950.VURD_01OMNY.CBENYT_01OMNY ^= '  '                      
+        THEN;                                                           
+        ELSE                                                            
+           DO;                                                          
+              GEM_PERSONEJENDOMSOPL.BBERGRL  = BH950.EJERSKAB.BBERGRL;  
+              GEM_PERSONEJENDOMSOPL.BBER2FAM = BH950.EJERSKAB.BBER2FAM; 
+              CALL OPDATER_BN00600T();                                  
+              OPDAT_ANT     = OPDAT_ANT + 1;                            
+           END;                                                         
+ END BEHANDL;                                                           
+                                                                        
+ /*********************************************************************/
+ /*      FETCH CURSOR                                                 */
+ /*********************************************************************/
+ FETCH_CUR: PROC;                                                       
+                                                                        
+         EXEC SQL                                                       
+            FETCH PERS_CUR                                              
+               into :PERSONEJENDOMSOPL.DINDKAAR                         
+                   ,:PERSONEJENDOMSOPL.EKOMNR                           
+                   ,:PERSONEJENDOMSOPL.EEJDNR                           
+                   ,:PERSONEJENDOMSOPL.BBERGRL                          
+                   ,:PERSONEJENDOMSOPL.BBER2FAM                         
+                                                                        
+          ;                                                             
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0)                                                     
+              DO;                                                       
+                CUR_LÆS_ANT = CUR_LÆS_ANT + 1;                          
+                GEM_PERSONEJENDOMSOPL  = PERSONEJENDOMSOPL, BY NAME;    
+                BN00600T_NF = NEJ;                                      
+              END;                                                      
+            WHEN(100)                                                   
+              DO;                                                       
+                IF CUR_LÆS_ANT = 0                                      
+                THEN                                                    
+                  DO;                                                   
+                    DB_ANT_EJ_FUNDET = DB_ANT_EJ_FUNDET + 1;            
+                    BN00600T_NF = JA;                                   
+                  END;                                                  
+                CUR_EOF = JA;                                           
+                EXEC SQL                                                
+                  CLOSE PERS_CUR;                                       
+                SELECT (SQLCA.SQLCODE);                                 
+                  WHEN (0);                                             
+                  OTHERWISE                                             
+                    DO;                                                 
+                      FEJLTEKST = 'FEJL VED CLOSE PÅ CURSOR: '!!        
+                                 SQLCA.SQLCODE;                         
+                      CALL SQL_FEJL('002');                             
+                    END;                                                
+                END; /* SELECT (SQLCA.SQLCODE) */                       
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                CALL SQL_FEJL('003');                                   
+              END;                                                      
+         END;                                                           
+ END FETCH_CUR;                                                         
+                                                                        
+ /*********************************************************************/
+ /*      OPDATER BN00600T                                             */
+ /*********************************************************************/
+ OPDATER_BN00600T: PROC;                                                
+     CALL SKRIV_KONTROLFIL;                                             
+     IF OPDAT_SW                                                        
+     THEN                                                               
+       DO;                                                              
+         EXEC SQL                                                       
+           UPDATE BN00600T                                              
+              SET BBERGRL     = :GEM_PERSONEJENDOMSOPL.BBERGRL,         
+                  BBER2FAM    = :GEM_PERSONEJENDOMSOPL.BBER2FAM         
+              where DINDKAAR     = :GEM_PERSONEJENDOMSOPL.DINDKAAR      
+                AND EKOMNR       = :GEM_PERSONEJENDOMSOPL.EKOMNR        
+                AND EEJDNR       = :GEM_PERSONEJENDOMSOPL.EEJDNR        
+         ;                                                              
+         SELECT(SQLCA.SQLCODE);                                         
+           WHEN(0)                                                      
+             DO;                                                        
+               COMMIT_ANT = COMMIT_ANT + 1;                             
+               IF COMMIT_ANT > 9999                                     
+               THEN                                                     
+                 DO;                                                    
+                   EXEC SQL COMMIT;                                     
+                   IF SQLCA.SQLCODE ^= 0                                
+                   THEN                                                 
+                     DO;                                                
+                       CALL SQL_FEJL('004');                            
+                     END;                                               
+                   COMMIT_ANT = 0;                                      
+                 END;                                                   
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST = 'FEJL VED opdate: '!!                        
+                                 SQLCA.SQLCODE;                         
+               CALL SQL_FEJL('005');                                    
+             END;                                                       
+         END;                                                           
+       END;                                                             
+     DB_ANT_OPDATERET = DB_ANT_OPDATERET + 1;                           
+                                                                        
+ END OPDATER_BN00600T;                                                  
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES kontrolfil                                   RUTINE */
+ /*********************************************************************/
+ SKRIV_KONTROLFIL: PROC;                                                
+                                                                        
+         KONTROLFIL.FEKOMNR       = ' EKOMNR.';                         
+         KONTROLFIL.EKOMNR        = GEM_PERSONEJENDOMSOPL.EKOMNR;       
+         KONTROLFIL.FEEJDNR       = ' EEJDNR.';                         
+         KONTROLFIL.EEJDNR        = GEM_PERSONEJENDOMSOPL.EEJDNR;       
+         KONTROLFIL.FBBERGRL      = ' BBERGRL.';                        
+         KONTROLFIL.BBERGRL       = GEM_PERSONEJENDOMSOPL.BBERGRL;      
+         KONTROLFIL.FBBER2FAM     = ' BBER2FAM.';                       
+         KONTROLFIL.BBER2FAM      = GEM_PERSONEJENDOMSOPL.BBER2FAM;     
+                                                                        
+          WRITE FILE (BH3792O) FROM (KONTROLFIL);                       
+ END SKRIV_KONTROLFIL;                                                  
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC(SF_SEQNR);                                              
+ DCL SF_SEQNR            CHAR(3);                                       
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+         ABENDMEDD =  FEJLTEKST;                                        
+         CALL ZS30101 (4, ABENDMEDD, 2);                                
+         CALL PLIDUMP ('SNHOB');                                        
+ END SQL_FEJL;                                                          
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+     PUT SKIP LIST('ANTAL LÆSTE PÅ BH950..:',BH950_ANT_LÆST);           
+     PUT SKIP LIST('ANTAL OPDATEREDE......:',OPDAT_ANT);                
+                                                                        
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ SKAF_PARM: PROC;                                                       
+                                                                        
+    OPEN FILE(BH379I) TITLE('BH37900I');                                
+    READ FILE(BH379I) INTO(PARMI);                                      
+    IF ^PARM_EOF                                                        
+    THEN                                                                
+      DO;                                                               
+        IF PARMI.KØRSW ^= ' '                                           
+        THEN                                                            
+           OPDAT_SW = JA;                                               
+        ELSE                                                            
+           OPDAT_SW = NEJ;                                              
+      END;                                                              
+    ELSE                                                                
+      DO;                                                               
+        PUT SKIP LIST('DEFAULT OPDATERING OPSAT');                      
+        OPDAT_SW = NEJ;                                                 
+      END;                                                              
+                                                                        
+    IF OPDAT_SW                                                         
+    THEN                                                                
+       PUT SKIP LIST('Der sker opdatering af BN00600T');                
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering af BN00600T');                   
+ END SKAF_PARM;                                                         
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+         CALL TOTALLISTE;                                               
+         CLOSE FILE (BH950I),                                           
+               FILE (BH3792O),                                          
+               FILE (BH379I);                                           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /*      DIVERSE INCLUDE                                              */
+ /*********************************************************************/
+    %INCLUDE ZZ20301M;     /* PRINT STYRE TEGN                        */
+                                                                        
+ END  BH37900;                                                          

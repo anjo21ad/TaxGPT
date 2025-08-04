@@ -1,0 +1,239 @@
+ BH21000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS SLUT ELLER EVS FORSKUD                             *
+ * PROGRAMNAVN: BH21000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE EJENDOMME FRA EJENDOMSTABEL  *
+ *              EVS SLUT 2003.                                         *
+ * PGMFORLØB:   1. ÅBEN EVS UDTRÆKSFIL.                                *
+ *              2. DECLARE EJENDOMSOPL.                                *
+ *              3. OPEN EJENDOMSOPL.                                   *
+ *              4. LÆS/FETCH RÆKKE PÅ EJENDOMSTABEL.                   *
+ *              5. BEHANDL DATA TIL RECORDSTRUKTUR.                    *
+ *              6. CHECK/SKRIV RÆKKE PÅ EVS FIL.                       *
+ *              7. GENTAG PUNKT 4 TIL 6 INTIL IKKE FLERE RÆKKER        *
+ *              8. LUK EJENDOMSOPL.                                    *
+ *              9. LUK EVS UDTRÆKSFIL.                                 *
+ *             10. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     BQ21000T - EVS EJENDOMSTABEL.                          *
+ * UDDATA:      BH21000O - BH21000N UDTRÆK FRA EJENDOMSTABEL.          *
+ *              BH21001Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: BO BECK SCHMIDT       BOB                  MAJ 2004    *
+ * ÆNDRINGSLOG:                                                        *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2004');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;         /* SQL KOMMUNIKATIONSAREAL   */
+         EXEC SQL INCLUDE BQ20000T;      /* EVS SLUT EJENDOMSTABEL    */
+         EXEC SQL INCLUDE BQ21000T;      /* EVS SLUT EJENDOMSFELTTABEL*/
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     FETCH_SQLKODE  FIXED BIN (15)   INIT(0);                       
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+         2 ÅR           PIC   '99',                                     
+         2 MD           PIC   '99',                                     
+         2 DAG          PIC   '99';                                     
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH210O FILE OUTPUT RECORD;  /* EVS UDTRÆK                    */
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK,                                                      
+           2 FELTER,                                                    
+             %INCLUDE BQ03100N;,                                        
+           2 INDK,                                                      
+             %INCLUDE BQ03005N;;                                        
+                                                                        
+ DCL     1 EJENDOMTAB,                                                  
+           %INCLUDE BQ03100N;;                                          
+                                                                        
+ DCL     1 INDK_EJEND,                  /* INDIKATOR EJENDOMS OPLYSN. */
+           %INCLUDE BQ03005N;;                                          
+                                                                        
+ DCL     1 EVS_EJD,                     /* EVS EJENDOMSTABEL          */
+           %INCLUDE BQ20000N;;                                          
+                                                                        
+ DCL     1 EVS_EJD_FELT,                /* EVS EJENDOMS FELTTABEL     */
+           %INCLUDE BQ21000N;;                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆS_EJD        BIN FIXED (31) INIT(0);/* LÆSTE EJENDOMSTABEL*/
+ DCL   ANTSKRIV_EJD      BIN FIXED (31) INIT(0);/* SKREVET UDTRÆKSFIL */
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (45);                                     
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH21000');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         UDTRÆK.FELTER = '';                                            
+         UDTRÆK.INDK   = -1;                                            
+         EJENDOMTAB    = '';                                            
+         INDK_EJEND    = -1;                                            
+                                                                        
+         DT = DATE;                                                     
+                                                                        
+         OPEN FILE (BH210O) TITLE ('BH21000O');                         
+                                                                        
+         CALL ZZ20390('*OPEN','BH21001Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         LINIE = ZZWS3 !! ' KØRSELSKONTROLLISTE FRA UDTRÆK '            
+                       !! ' FRA EVS SLUT 2003 EJD.TABEL ' !! 'DATO: '   
+                       !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;  
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH21000 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL DECLARE_CURSOR;                                           
+         CALL OPEN_EJENDOMSOPL;                                         
+         CALL FETCH_EJENDOMSOPL;                                        
+                                                                        
+         DO WHILE (FETCH_SQLKODE = 0);                                  
+           CALL BEHANDL;                                                
+           CALL FETCH_EJENDOMSOPL;                                      
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+         EJENDOMTAB.DINDKAAR = EVS_EJD.DINDKAAR;                        
+         EJENDOMTAB.EKOMNR   = EVS_EJD.EKOMNR;                          
+         EJENDOMTAB.EEJDNR   = EVS_EJD.EEJDNR;                          
+                                                                        
+         CALL EJENDOMSOPL;                                              
+         CALL SKRIV;                                                    
+                                                                        
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /* HER INDSÆTTES DATA I UDTRÆK                                       */
+ /*********************************************************************/
+ SKRIV:  PROC;                                                          
+                                                                        
+         UDTRÆK.FELTER = EJENDOMTAB, BY NAME;                           
+         UDTRÆK.INDK   = INDK_EJEND, BY NAME;                           
+                                                                        
+         ANTSKRIV_EJD = ANTSKRIV_EJD + 1;                               
+                                                                        
+         WRITE FILE (BH210O) FROM (UDTRÆK);                             
+                                                                        
+         EJENDOMTAB  = ''; /* NULSTILLE FØR DEN NÆSTE */                
+         INDK_EJEND = -1;                                               
+                                                                        
+ END SKRIV;                                                             
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         CLOSE FILE(BH210O);                                            
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD =  FEJLTEKST;                                        
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE(BH210O);                                            
+         CALL CLOSE_EJENDOMSOPL;                                        
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA EJENDOMSTABELLEN ..............'; 
+         LIN.ANT   = ANTLÆS_EJD;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT ............................'; 
+         LIN.ANT   = ANTSKRIV_EJD;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ %INCLUDE BH21000M;             /* DECLARE OG FETCH SQL STATEMENTS.   */
+ %INCLUDE BQ03014M;             /* FLYT VÆRDIER FRA EJENDOMS FELTER   */
+                                                                        
+ END BH21000;                                                           

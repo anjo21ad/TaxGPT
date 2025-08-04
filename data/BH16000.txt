@@ -1,0 +1,526 @@
+ BH16000: PROC(COMPTR)  OPTIONS(MAIN,REENTRANT) REORDER;                
+ /**********************************************************************
+ *                                                                     *
+ *     SKELETPROGRAM GENERERET AF ZSRØR                                *
+ *                                                                     *
+ *       EXTERN MODUL-BESKRIVELSE                                      *
+ *                                                                     *
+ *       NAVN          - BH16000                                       *
+ *                                                                     *
+ *       FUNKTION      - VISNING AF EVS DATA FRA TABEL BQ01200T        *
+ *                                                                     *
+ *       TRANSKODE     - B990                                          *
+ *                                                                     *
+ *       INDDATA       - COMMAREA FRA ZSRØR                            *
+ *                                                                     *
+ *       UDDATA        - COMMAREA TIL ZSRØR                            *
+ *                                                                     *
+ *       EXTERNE REF.  -                                               *
+ *                                                                     *
+ *       GENERERET AF  - BO P SØRENSEN        12.12.01                 *
+ *                                                                     *
+ *       RETTET        -                                               *
+ *                                                                     *
+ **********************************************************************/
+ /**********************************************************************
+ *    COMMAREA.                                                        *
+ **********************************************************************/
+ %INCLUDE ZX23000M;                                                     
+                                                                        
+ /**********************************************************************
+ *    ZSRØR INCLUDES.                                                  *
+ **********************************************************************/
+ %INCLUDE BH16000M;                                                     
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ %INCLUDE ZS37800M;                                                     
+                                                                        
+ /**********************************************************************
+ *    RUTINE TIL UNIQ NAVNGIVNING AF TSKØER                            *
+ **********************************************************************/
+ DCL 1 ZS62002,                                                         
+ %INCLUDE ZS62002N;                                                     
+                                                                        
+ /**********************************************************************
+ *    ØVRIGE DECLARES                                                  *
+ **********************************************************************/
+ DCL  TSKØNAVN             CHAR(8);                                     
+ DCL  FLERE_ELEMENTER      BIT(1) INIT('0'B);                           
+ DCL  ANTALELEMENTER       BIN FIXED(15,0)  INIT(0);                    
+ DCL  I                    BIN FIXED(15,0);                             
+ DCL  CICSRC               BIN FIXED(31,0);                             
+ DCL (ADDR,CSTG,NULL,STG,SUBSTR)   BUILTIN;                             
+                                                                        
+ /*********************************************************************/
+ /* BPS DECLARES BEGYNDER HER */                                        
+ /*********************************************************************/
+ DCL ANTAL_RK_RETUR    BIN FIXED(15) INIT(0);                           
+ DCL SQL_RETURKODE     BIN FIXED (31);                                  
+ DCL SQL_RETURKODEPIC  PIC '9999';                                      
+ DCL CPRNUMERISK       PIC '(10)9';                                     
+ DCL CPRTILDB2         DEC FIXED (11,0);                                
+ DCL PIC10             PIC '(10)Z';                                     
+ DCL PIC11             PIC '-----------9';                              
+ DCL PIC13_2           PIC '-----------9V,99';                          
+ DCL PIC5_2            PIC 'ZZ9V,99';                                   
+ DCL 1 EVSPERSON,                                                       
+       % INCLUDE BQ01200N;;                                             
+ DCL 1 EVSPERSON_I,                                                     
+       % INCLUDE BQ01006N;;                                             
+ /* SQL DECLARES */                                                     
+ EXEC SQL INCLUDE BQ01200T;                                             
+ EXEC SQL INCLUDE SQLCA;                                                
+ /* SLUT BPS DECLARES */                                                
+ /**********************************************************************
+ *    HOUSE-KEEPING                                                    *
+ **********************************************************************/
+ EXEC CICS HANDLE CONDITION ERROR(ABEND);                               
+                                                                        
+ /**********************************************************************
+ *    HOVEDSTYRING                                                      
+ **********************************************************************/
+ /*                                                                   */
+ /* BH16000 UDFØRER 3  FUNKTIONER PÅ BAGGRUND AF INPUT                */
+ /* CURSOR1 CUR1  UDSØGER MED DINDKAAR/DCPRN, HVIS                    */
+ /* INPUT.EEJDNR=0 OG INPUT.EGENNR=0                                  */
+ /* CURSOR2 CUR2 UDSØGER MED DET I CURSOR 1 PLUS EJDNR OG GENNR       */
+ /* CURSOR3 CUR3 UDSØGER MED DET I CUSSOR 1 OG 2 PLUS EKOMNR          */
+ /* FLYT_DATA FLYTTER FRA HOST VARS OVER I OUTPUT STRUKTUR - OG       */
+ /* CHECKER PÅ INDIKATORVARIABLE                                      */
+ /*********************************************************************/
+  TSKØNAVN = TILDEL_TSKØNAVN;                                           
+  CALL SLET_TSKØ;                                                       
+  CALL GETMAIN(HJPTR_OUTPUT,STG(OUTPUTELEM));                           
+  CPRNUMERISK = INPUT.DCPRN;                                            
+  CPRTILDB2 = CPRNUMERISK;                                              
+  CALL SKAF_DATA_OG_OPBYG_TSKØ;                                         
+  CALL OVERFØR_TIL_ELEMENT;                                             
+                                                                        
+    /*****************************************                          
+    * HER BØR DER INDLÆGGES FEJLBEHANDLING   *                          
+    *****************************************/                          
+                                                                        
+  EXEC CICS RETURN;                                                     
+ ABEND:                                                                 
+  CALL ABEND_PROCEDURE;                                                 
+  EXEC CICS RETURN;                                                     
+                                                                        
+ /**********************************************************************
+ *    FREMSKAF DATA OG OPBYG TSKØ.                                   *  
+ **********************************************************************/
+ SKAF_DATA_OG_OPBYG_TSKØ:  PROC;                                        
+  IF INPUT.EEJDNR^=0 & INPUT.EKOMNR^=0 THEN                             
+   DO; /* CURSOR 3 */                                                   
+    CALL DECLARE_CUR3;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR3 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR3;                                                     
+    CALL FETCH_CUR3;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR3;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR3 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR3;                                                    
+   END; /* CURSOR 3 */                                                  
+  ELSE IF INPUT.EEJDNR^=0 & INPUT.EKOMNR=0 THEN                         
+   DO; /* CURSOR 2 */                                                   
+    CALL DECLARE_CUR2;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR2 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR2;                                                     
+    CALL FETCH_CUR2;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR2;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR2 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR2;                                                    
+   END;                                                                 
+  ELSE /* CURSOR 1 */                                                   
+   DO;                                                                  
+    CALL DECLARE_CUR1;                                                  
+    IF SQLCODE ^= 0                                                     
+    THEN                                                                
+      DO;                                                               
+       SQL_RETURKODE=SQLCODE;                                           
+       SQL_RETURKODEPIC = SQLCODE;                                      
+       ZS378TEKST = 'DECL CUR1 - SQLCODE='!! SQL_RETURKODEPIC;          
+       CALL ABEND_PROCEDURE;                                            
+      END;                                                              
+    OUTPUTELEM = '';                                                    
+    CALL OPEN_CUR1;                                                     
+    CALL FETCH_CUR1;                                                    
+    SQL_RETURKODE=SQLCODE;                                              
+    SELECT (SQLCODE);                                                   
+     WHEN (0)                                                           
+       DO;                                                              
+         DO WHILE (SQLCODE = 0);                                        
+           ANTAL_RK_RETUR=ANTAL_RK_RETUR+1;                             
+           CALL FLYT_DATA;                                              
+           CALL SKRIV_TSKØ;                                             
+           CALL FETCH_CUR1;                                             
+         END;                                                           
+       END;                                                             
+     WHEN (100)                                                         
+       DO;                                                              
+         /* INGEN RÆKKER FUNDET */                                      
+         /* GØR INGENTING */                                            
+       END;                                                             
+     OTHER                                                              
+       DO;                                                              
+         SQL_RETURKODEPIC    = SQLCODE;                                 
+         ZS378TEKST = 'FETCH CUR1 - SQLCODE='!!SQL_RETURKODEPIC;        
+         CALL ABEND_PROCEDURE;                                          
+       END;                                                             
+    END; /* SELECT*/                                                    
+    CALL CLOSE_CUR1;                                                    
+   END; /* IF INPUT.EEJDNR^=0 ... */                                    
+ END SKAF_DATA_OG_OPBYG_TSKØ;                                           
+                                                                        
+ /**********************************************************************
+ *    OVERFØR FREMFUNDNE DATA TIL ELEMENTSTRUKTUREN.                 *  
+ **********************************************************************/
+ OVERFØR_TIL_ELEMENT:  PROC;                                            
+   CALL FREEMAIN(HJPTR_OUTPUT);                                         
+   CAREA.ANTALELEM_UD = 0;                                              
+   CAREA.LÆNGDE_UD = STG(OUTPUT) +                                      
+          (ANTALELEMENTER * STG(OUTPUTELEM));                           
+   CALL GETMAIN(CAREA.OUTPUTPTR,CAREA.LÆNGDE_UD);                       
+   OUTPUT = '';                                                         
+   OUTPUT.RETURKODE=SQL_RETURKODE;                                      
+   OUTPUT.ANTAL=ANTAL_RK_RETUR;                                         
+     /*****************************************                         
+     * UDFYLD OUTPUT MED DE FREMFUNDNE DATA   *                         
+     * OG F.EKS. RETURKODER ELLER LIGN.       *                         
+     *****************************************/                         
+   HJPTR_OUTPUT = ADDR(OUTPUT.ELEMENTDATA);                             
+   DO I = 1 TO ANTALELEMENTER;                                          
+      CALL LÆS_TSKØ(I);                                                 
+      SELECT(CICSRC);                                                   
+       WHEN(DFHRESP(NORMAL)) DO;                                        
+         CAREA.ANTALELEM_UD = ANTALELEM_UD + 1;                         
+         HJOUT_ADDR = HJOUT_ADDR + STG(OUTPUTELEM);                     
+       END;                                                             
+       OTHER;  /* INDSÆT FEJLKODE HER */                                
+      END;                                                              
+   END;                                                                 
+   CALL SLET_TSKØ;                                                      
+ END OVERFØR_TIL_ELEMENT;                                               
+                                                                        
+ /**********************************************************************
+ *    SKRIV FUNDNE OPLYSNINGER PÅ TSKØ.                              *  
+ **********************************************************************/
+ SKRIV_TSKØ:  PROC;                                                     
+   EXEC CICS WRITEQ TS QUEUE(TSKØNAVN)                                  
+                       FROM(OUTPUTELEM)                                 
+                       RESP(CICSRC);                                    
+   ANTALELEMENTER = ANTALELEMENTER + 1;                                 
+ END SKRIV_TSKØ;                                                        
+                                                                        
+ /**********************************************************************
+ *    LÆS FUNDNE OPLYSNINGER FRA TSKØ.                               *  
+ **********************************************************************/
+ LÆS_TSKØ:  PROC(ITEMNO);                                               
+ DCL  ITEMNO               BIN FIXED(15,0);                             
+                                                                        
+   EXEC CICS READQ TS QUEUE(TSKØNAVN)                                   
+                      ITEM(ITEMNO)                                      
+                      INTO(OUTPUTELEM)                                  
+                      RESP(CICSRC);                                     
+ END LÆS_TSKØ;                                                          
+                                                                        
+ /**********************************************************************
+ *    SLET TSKØ MED DE FUNDNE OPLYSNINGER.                           *  
+ **********************************************************************/
+ SLET_TSKØ:  PROC;                                                      
+   EXEC CICS DELETEQ TS QUEUE(TSKØNAVN)                                 
+                        NOHANDLE;                                       
+ END SLET_TSKØ;                                                         
+                                                                        
+ /**********************************************************************
+ *    TILDEL TSKØNAVN - RETURNERE KØNAVN.                              *
+ **********************************************************************/
+ TILDEL_TSKØNAVN:   PROC          RETURNS(CHAR(8));                     
+   ZS62002                = '';                                         
+   ZS62002.FUNKTION       = '0';                                        
+   ZS62002.IDENTIFIKATION = 'BH16000' !! '1' !! EIBTRNID;               
+   EXEC CICS LINK PROGRAM('ZS62002')                                    
+                  COMMAREA(ZS62002)                                     
+                  RESP(CICSRC);                                         
+                                                                        
+   RETURN(ZS62002.TSQNAVN);                                             
+ END TILDEL_TSKØNAVN;                                                   
+                                                                        
+ /*********************************************************************/
+ /*       FLYT FREMFUNDEN RÆKKE TIL OUTPUT STRUKTUR                   */
+ /*********************************************************************/
+ FLYT_DATA: PROC;                                                       
+  /* HVAD MED DE FORSKELLIGE TYPER ??? */                               
+  OUTPUTELEM.DCPRN         =INPUT.DCPRN               ;                 
+  OUTPUTELEM.DINDKAAR      =EVSPERSON.DINDKAAR        ;                 
+  OUTPUTELEM.EKOMNR        =EVSPERSON.EKOMNR          ;                 
+  OUTPUTELEM.EEJDNR        =EVSPERSON.EEJDNR          ;                 
+  OUTPUTELEM.ELBNR         =EVSPERSON.ELBNR           ;                 
+  OUTPUTELEM.EGENNR        =EVSPERSON.EGENNR          ;                 
+  OUTPUTELEM.DFRAGLD       =EVSPERSON.DFRAGLD         ;                 
+  OUTPUTELEM.DTILGLD       =EVSPERSON.DTILGLD         ;                 
+  OUTPUTELEM.CSCREGISTMP   =EVSPERSON.CSCREGISTMP     ;                 
+  OUTPUTELEM.KOERSTMP      =EVSPERSON.KOERSTMP        ;                 
+  OUTPUTELEM.PERSKOD       =EVSPERSON.PERSKOD         ;                 
+  OUTPUTELEM.UDSKRDTO      =EVSPERSON.UDSKRDTO        ;                 
+  OUTPUTELEM.MYNDNR        =EVSPERSON.MYNDNR          ;                 
+  OUTPUTELEM.CSUPPL        =EVSPERSON.CSUPPL          ;                 
+  OUTPUTELEM.CAJOUR        =EVSPERSON.CAJOUR          ;                 
+  CPRNUMERISK = EVSPERSON.DHENVNR         ;                             
+  OUTPUTELEM.DHENVNR       = CPRNUMERISK;                               
+  OUTPUTELEM.CAEGTOPR      =EVSPERSON.CÆGTOPR         ;                 
+  OUTPUTELEM.CFRAAR        =EVSPERSON.CFRÅR           ;                 
+  OUTPUTELEM.CEJBEVS       =EVSPERSON.CEJBEVS         ;                 
+  OUTPUTELEM.CSLET         =EVSPERSON.CSLET           ;                 
+  OUTPUTELEM.CNULSTIL      =EVSPERSON.CNULSTIL        ;                 
+  IF EVSPERSON_I.BBERGRL_I=-1 THEN                                      
+   OUTPUTELEM.BBERGRL='';                                               
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BBERGRL;                                            
+    OUTPUTELEM.BBERGRL       =PIC10;                                    
+   END;                                                                 
+  OUTPUTELEM.CBERGRL       =EVSPERSON.CBERGRL         ;                 
+  OUTPUTELEM.CEJDTYPE      =EVSPERSON.CEJDTYPE        ;                 
+  IF EVSPERSON_I.BGRPROM1_I=-1 THEN                                     
+   OUTPUTELEM.BGRPROM1='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BGRPROM1;                                           
+    OUTPUTELEM.BGRPROM1      =PIC10;                                    
+   END;                                                                 
+  OUTPUTELEM.BPROM1        =EVSPERSON.BPROM1          ;                 
+  IF EVSPERSON_I.BGRPROM2_I=-1 THEN                                     
+   OUTPUTELEM.BGRPROM2='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BGRPROM2;                                           
+    OUTPUTELEM.BGRPROM2      =PIC10;                                    
+   END;                                                                 
+  OUTPUTELEM.BPROM2        =EVSPERSON.BPROM2          ;                 
+  OUTPUTELEM.CFORNEDSL1    =EVSPERSON.CFORNEDSL1      ;                 
+  OUTPUTELEM.CNEDSL1       =EVSPERSON.CNEDSL1         ;                 
+  OUTPUTELEM.BNEDSL1       =EVSPERSON.BNEDSL1         ;                 
+  OUTPUTELEM.CNEDSL2       =EVSPERSON.CNEDSL2         ;                 
+  OUTPUTELEM.BNEDSL2       =EVSPERSON.BNEDSL2         ;                 
+  OUTPUTELEM.CSKPLOMF      =EVSPERSON.CSKPLOMF        ;                 
+  OUTPUTELEM.CPENSNED      =EVSPERSON.CPENSNED        ;                 
+  OUTPUTELEM.BPENSNED      =EVSPERSON.BPENSNED        ;                 
+  OUTPUTELEM.BPENSNAE      =EVSPERSON.BPENSNÆ         ;                 
+  OUTPUTELEM.BPENSRED      =EVSPERSON.BPENSRED        ;                 
+  OUTPUTELEM.CSTIBEGR      =EVSPERSON.CSTIBEGR        ;                 
+  OUTPUTELEM.BSTIBGR       =EVSPERSON.BSTIBGR         ;                 
+  OUTPUTELEM.CSTIBLB       =EVSPERSON.CSTIBLB         ;                 
+  OUTPUTELEM.BSTITIL       =EVSPERSON.BSTITIL         ;                 
+  OUTPUTELEM.BUDLSKC       =EVSPERSON.BUDLSKC         ;                 
+  OUTPUTELEM.CEKSEMP       =EVSPERSON.CEKSEMP         ;                 
+  OUTPUTELEM.DATO0107      =EVSPERSON.DATO0107        ;                 
+  OUTPUTELEM.DOVTG         =EVSPERSON.DOVTG           ;                 
+  OUTPUTELEM.DAFSTAA       =EVSPERSON.DAFSTAA         ;                 
+  IF EVSPERSON_I.GPCTEJER_I=-1 THEN                                     
+   OUTPUTELEM.GPCTEJER='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC5_2=EVSPERSON.GPCTEJER;                                          
+    OUTPUTELEM.GPCTEJER=PIC5_2;                                         
+   END;                                                                 
+  OUTPUTELEM.FDAGUDLE      =EVSPERSON.FDAGUDLE        ;                 
+  OUTPUTELEM.GPCTUDLE      =EVSPERSON.GPCTUDLE        ;                 
+  OUTPUTELEM.FUDL100       =EVSPERSON.FUDL100         ;                 
+  OUTPUTELEM.FDAGERHV      =EVSPERSON.FDAGERHV        ;                 
+  OUTPUTELEM.GPCTERHV      =EVSPERSON.GPCTERHV        ;                 
+  OUTPUTELEM.FERHVFLER     =EVSPERSON.FERHVFLER       ;                 
+  OUTPUTELEM.BSUM1         =EVSPERSON.BSUM1           ;                 
+  OUTPUTELEM.BNETTO        =EVSPERSON.BNETTO          ;                 
+  IF EVSPERSON_I.BEVSMAN_I=-1 THEN                                      
+   OUTPUTELEM.BEVSMAN='';                                               
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BEVSMAN;                                            
+    OUTPUTELEM.BEVSMAN       =PIC10;                                    
+   END;                                                                 
+  IF EVSPERSON_I.BMANEVSSTI_I=-1 THEN                                   
+   OUTPUTELEM.BMANEVSSTI='';                                            
+  ELSE                                                                  
+   DO;                                                                  
+    PIC13_2=EVSPERSON.BMANEVSSTI;                                       
+    OUTPUTELEM.BMANEVSSTI = PIC13_2;                                    
+   END;                                                                 
+  OUTPUTELEM.MANPENSSTI    =EVSPERSON.MANPENSSTI      ;                 
+  OUTPUTELEM.BMANNEDSL     =EVSPERSON.BMANNEDSL       ;                 
+  OUTPUTELEM.FEJLNR        =EVSPERSON.FEJLNR          ;                 
+  IF EVSPERSON_I.BBER2FAM_I=-1 THEN                                     
+   OUTPUTELEM.BBER2FAM='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BBER2FAM;                                           
+    OUTPUTELEM.BBER2FAM      =PIC10;                                    
+   END;                                                                 
+  IF EVSPERSON_I.BEJBOL1_I=-1 THEN                                      
+   OUTPUTELEM.BEJBOL1='';                                               
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BEJBOL1;                                            
+    OUTPUTELEM.BEJBOL1       =PIC10   ;                                 
+   END;                                                                 
+  IF EVSPERSON_I.BEJBOL2_I=-1 THEN                                      
+   OUTPUTELEM.BEJBOL2='';                                               
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BEJBOL2;                                            
+    OUTPUTELEM.BEJBOL2       =PIC10;                                    
+   END;                                                                 
+  OUTPUTELEM.CANVEBOL      =EVSPERSON.CANVEBOL        ;                 
+  OUTPUTELEM.CFRED         =EVSPERSON.CFRED           ;                 
+  OUTPUTELEM.CELOENCOR     =EVSPERSON.CELØNCOR        ;                 
+  OUTPUTELEM.CENKE         =EVSPERSON.CENKE           ;                 
+  OUTPUTELEM.CPTYPGL       =EVSPERSON.CPTYPGL         ;                 
+  OUTPUTELEM.CPTYPSLUT     =EVSPERSON.CPTYPSLUT       ;                 
+  IF EVSPERSON_I.BFORSKAT_I=-1 THEN                                     
+   OUTPUTELEM.BFORSKAT='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BFORSKAT;                                           
+    OUTPUTELEM.BFORSKAT      =PIC10;                                    
+   END;                                                                 
+  OUTPUTELEM.CFORSKAT      =EVSPERSON.CFORSKAT        ;                 
+  OUTPUTELEM.DOVTGFOR      =EVSPERSON.DOVTGFOR        ;                 
+  OUTPUTELEM.DAFSTAAFOR    =EVSPERSON.DAFSTAAFOR      ;                 
+  OUTPUTELEM.GPCTEJERFOR   =EVSPERSON.GPCTEJERFOR     ;                 
+  OUTPUTELEM.BFSKAT        =EVSPERSON.BFSKAT          ;                 
+  OUTPUTELEM.BERHVAN       =EVSPERSON.BERHVAN         ;                 
+  OUTPUTELEM.BPRIVAN       =EVSPERSON.BPRIVAN         ;                 
+  OUTPUTELEM.BOBHAKOD      =EVSPERSON.BOBHAKOD        ;                 
+  OUTPUTELEM.CIVILSTAND    =EVSPERSON.CIVILSTAND      ;                 
+  IF EVSPERSON_I.BPENSIND_I=-1 THEN                                     
+   OUTPUTELEM.BPENSIND='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC10=EVSPERSON.BPENSIND;                                           
+    OUTPUTELEM.BPENSIND      =PIC10;                                    
+   END;                                                                 
+  /* NYE INDIKATORFELTER I 2001 */                                      
+  IF EVSPERSON_I.BEJBOLANV_I=-1 THEN                                    
+   OUTPUTELEM.BEJBOLANV='';                                             
+  ELSE                                                                  
+   DO;                                                                  
+    PIC11 = EVSPERSON.BEJBOLANV;                                        
+    OUTPUTELEM.BEJBOLANV = PIC11;                                       
+   END;                                                                 
+  IF EVSPERSON_I.BNETTOGL_I=-1  THEN                                    
+   OUTPUTELEM.BNETTOGL='';                                              
+  ELSE                                                                  
+   DO;                                                                  
+    PIC13_2 = EVSPERSON.BNETTOGL;                                       
+    OUTPUTELEM.BNETTOGL = PIC13_2;                                      
+   END;                                                                 
+  IF EVSPERSON_I.BPENSNEDGL_I=-1 THEN                                   
+   OUTPUTELEM.BPENSNEDGL='';                                            
+  ELSE                                                                  
+   DO;                                                                  
+    PIC13_2=EVSPERSON.BPENSNEDGL;                                       
+    OUTPUTELEM.BPENSNEDGL = PIC13_2;                                    
+   END;                                                                 
+  IF EVSPERSON_I.BEVSGL_I=-1    THEN                                    
+   OUTPUTELEM.BEVSGL='';                                                
+  ELSE                                                                  
+   DO;                                                                  
+    PIC13_2=EVSPERSON.BEVSGL;                                           
+    OUTPUTELEM.BEVSGL = PIC13_2;                                        
+   END;                                                                 
+  /* NYE FELTER I 2001 */                                               
+  OUTPUTELEM.CKOPI         =EVSPERSON.CKOPI     ;                       
+  OUTPUTELEM.DCPRNKOPI     =EVSPERSON.DCPRNKOPI ;                       
+  OUTPUTELEM.CDATAFRA      =EVSPERSON.CDATAFRA  ;                       
+  OUTPUTELEM.CSKPLOMGL     =EVSPERSON.CSKPLOMGL ;                       
+  OUTPUTELEM.CBILAG_1      =EVSPERSON.CBILAG_1  ;                       
+  OUTPUTELEM.FELT759       =EVSPERSON.FELT759   ;                       
+  OUTPUTELEM.FELT750       =EVSPERSON.FELT750   ;                       
+  OUTPUTELEM.CUDLMAN       =EVSPERSON.CUDLMAN   ;                       
+  OUTPUTELEM.CUDLHEL       =EVSPERSON.CUDLHEL   ;                       
+  OUTPUTELEM.CUDLDEL       =EVSPERSON.CUDLDEL   ;                       
+  OUTPUTELEM.CERHV         =EVSPERSON.CERHV     ;                       
+  OUTPUTELEM.BSUM2         =EVSPERSON.BSUM2     ;                       
+  OUTPUTELEM.FELT760       =EVSPERSON.FELT760   ;                       
+  OUTPUTELEM.COMPLA        =EVSPERSON.COMPLA    ;                       
+  OUTPUTELEM.DOMPLACPR     =EVSPERSON.DOMPLACPR;                        
+ END FLYT_DATA;                                                         
+ /*********************************************************************/
+ /* EGNE INCLUDES */                                                    
+ /*********************************************************************/
+  %INCLUDE BH16010M; /* ALT VEDR. CURSOR 1 */                           
+  %INCLUDE BH16011M; /* ALT VEDR. CURSOR 2 */                           
+  %INCLUDE BH16012M; /* ALT VEDR. CURSOR 3 */                           
+ /*********************************************************************/
+                                                                        
+ /**********************************************************************
+ *    ABEND PÅ EN PÆN MÅDE                                             *
+ **********************************************************************/
+ ABEND_PROCEDURE:  PROC;                                                
+   ZS378FUNK  = '04';         /* AFSLUT, COMMAREA SLETTES     */        
+   ZS378TYPE  = 'CICS';                                                 
+   ZS378MODUL = 'BH16000';                                              
+   %INCLUDE ZS37802M;                                                   
+ END ABEND_PROCEDURE;                                                   
+                                                                        
+ %INCLUDE ZX23000G         /* GETMAIN RUTINE     */;                    
+ %INCLUDE ZX23000F         /* FREEMAIN RUTINE     */;                   
+ END BH16000;                                                           

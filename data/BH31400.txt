@@ -1,0 +1,639 @@
+ BH31400: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * Opdatering af manglende landekode og beliggenhed for udenlandske    *
+ * ejendomme                                                           *
+ * indhold tages fra SLUT 2014 og overføres til SLUT 2015 hvis denne   *
+ * er blank                                                            *
+ * N.B.  INSERT ER UDKOMMENTERET                                       *
+ ***********************************************************************
+ * RETTELSESLOG:                                                       *
+ * 11.11.2016  Lene Maj Jensen QLE                                     *
+ *             NYT PROGRAM                                             *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S');                 
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH3141O FILE OUTPUT RECORD;  /* EJENDOMME DER KAN RETTES     */
+ DCL     BH3142O FILE OUTPUT RECORD;  /* EJENDOMME DER IKKE KAN RETTES*/
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     FETCH_SQLKODE  FIXED BIN (15)   INIT(0);                       
+                                                                        
+ DCL     1 WS,                                                          
+         3 WS_2014_FUNDET  BIT (1) INIT ('0'B),                         
+         3 WS_2013_FUNDET  BIT (1) INIT ('0'B),                         
+         3 WS_DINDKAAR     BIN FIXED(15),                               
+         3 WS_EKOMNR       BIN FIXED(15),                               
+         3 WS_EEJDNR       BIN FIXED(31),                               
+         3 WS_FELTKODE     BIN FIXED(15),                               
+         3 WS_FELTKODETYPE BIN FIXED(15),                               
+         3 WS_INDHOLD_C    CHAR(254),                                   
+         3 WS_INDHOLD_D    DEC FIXED(15,2),                             
+         3 WS_FELTCHECK    CHAR (3);                                    
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+         2 ÅR           PIC   '99',                                     
+         2 MD           PIC   '99',                                     
+         2 DAG          PIC   '99';                                     
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK,                                                      
+           2 FELTER,                                                    
+             %INCLUDE BQ21000N;,                                        
+           2 TEKST     CHAR (30);                                       
+                                                                        
+ DCL     1 MANGLER,                                                     
+           3 DINDKAAR     BIN FIXED(15),                                
+           3 EKOMNR       BIN FIXED(15),                                
+           3 EEJDNR       BIN FIXED(31),                                
+           3 FELTKODE     BIN FIXED(15);                                
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆS_EJD        BIN FIXED (31) INIT(0);/* LÆSTE EJENDOMSTABEL*/
+ DCL   ANTLÆS_BELIG      BIN FIXED (31) INIT(0);/* LÆSTE EJENDOMSTABEL*/
+ DCL   ANTLÆS_LAND       BIN FIXED (31) INIT(0);/* LÆSTE EJENDOMSTABEL*/
+ DCL   ANTSKRIV_EJD      BIN FIXED (31) INIT(0);/* SKREVET UDTRÆKSFIL */
+ DCL   ANTFEJL_EJD       BIN FIXED (31) INIT(0);/* SKREVET MANGLER    */
+ DCL   ANTUPD_EJD        BIN FIXED (31) INIT(0);/* OPDATERINGER       */
+ DCL   ANTSKRIV13_LKD    BIN FIXED (31) INIT(0);/* OPDAT FRA 2013     */
+ DCL   ANTSKRIV14_LKD    BIN FIXED (31) INIT(0);/* OPDAT FRA 2014     */
+ DCL   ANTSKRIV13_EJD    BIN FIXED (31) INIT(0);/* OPDAT FRA 2013     */
+ DCL   ANTSKRIV14_EJD    BIN FIXED (31) INIT(0);/* OPDAT FRA 2014     */
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  'ZZZZZZZZZ9',                             
+           2 FIL1        CHAR (66);                                     
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;         /* SQL KOMMUNIKATIONSAREAL   */
+         EXEC SQL INCLUDE BQ20000T;      /* EVS SLUT EJENDOMSTABEL    */
+         EXEC SQL INCLUDE BQ21000T;      /* EVS SLUT EJENDOMSFELTTABEL*/
+                                                                        
+         EXEC SQL                                                       
+         DECLARE EJD_CUR_105 CURSOR FOR                                 
+         SELECT T1.DINDKAAR,                                            
+                T1.EKOMNR,                                              
+                T1.EEJDNR                                               
+         FROM   BQ20000T T1                                             
+         WHERE  T1.DINDKAAR = 2015                                      
+         AND    T1.EKOMNR   = 999                                       
+         AND    105 not in (select FELTKODE                             
+                   from BQ21000T T2                                     
+                   where T2.dindkaar = t1.dindkaar                      
+                   and   T2.ekomnr   = t1.ekomnr                        
+                   and   T2.eejdnr   = T1.eejdnr)                       
+         ORDER BY T1.DINDKAAR, T1.EKOMNR, T1.EEJDNR                     
+         FOR READ ONLY;                                                 
+                                                                        
+         EXEC SQL                                                       
+         DECLARE EJD_CUR_276 CURSOR FOR                                 
+         SELECT T1.DINDKAAR,                                            
+                T1.EKOMNR,                                              
+                T1.EEJDNR                                               
+         FROM   BQ20000T T1                                             
+         WHERE  T1.DINDKAAR = 2015                                      
+         AND    T1.EKOMNR   = 999                                       
+         AND    276 not in (select FELTKODE                             
+                   from BQ21000T T2                                     
+                   where T2.dindkaar = t1.dindkaar                      
+                   and   T2.ekomnr   = t1.ekomnr                        
+                   and   T2.eejdnr   = T1.eejdnr)                       
+         ORDER BY T1.DINDKAAR, T1.EKOMNR, T1.EEJDNR                     
+         FOR READ ONLY;                                                 
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH31400'); /*SLUT15*/      
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         DT = DATE;                                                     
+                                                                        
+         OPEN FILE (BH3141O) TITLE ('BH31410O');                        
+         OPEN FILE (BH3142O) TITLE ('BH31420O');                        
+                                                                        
+         CALL ZZ20390('*OPEN','BH31401Y');                              
+                                                                        
+         LINIE = ZZWS3 !! ' KØRSELSKONTROLLISTE FRA UDTRÆK '            
+                       !! ' FRA EVS SLUT 2015 EJD.TABEL ' !! 'DATO: '   
+                       !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;  
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH31400 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         /* Find 2015 ejendomme uden beliggenhed */                     
+         WS_FELTCHECK = '105';                                          
+                                                                        
+         CALL OPEN_EJD_105;                                             
+         CALL FETCH_EJD_105;                                            
+                                                                        
+         DO WHILE (FETCH_SQLKODE = 0);                                  
+           /* Find tilsvarende ejendom i 2014 til senere update */      
+           CALL BEHANDL;                                                
+           CALL FETCH_EJD_105;                                          
+         END;                                                           
+                                                                        
+         CALL CLOSE_CUR_105;                                            
+                                                                        
+         /* Find 2015 ejendomme uden landekode */                       
+         WS_FELTCHECK = '276';                                          
+                                                                        
+         CALL OPEN_EJD_276;                                             
+         CALL FETCH_EJD_276;                                            
+                                                                        
+         DO WHILE (FETCH_SQLKODE = 0);                                  
+           /* Find tilsvarende ejendom i 2014 til senere update */      
+           CALL BEHANDL;                                                
+           CALL FETCH_EJD_276;                                          
+         END;                                                           
+                                                                        
+         CALL CLOSE_CUR_276;                                            
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+         IF WS_FELTCHECK = '105'                                        
+         THEN DO;                                                       
+            UDTRÆK.FELTER = '';                                         
+            MANGLER = '';                                               
+                                                                        
+            /* LÆS Landekode og Beliggenhed fra 2014 */                 
+                                                                        
+            WS_FELTKODE = 105;  /* beliggenhed */                       
+            CALL LÆS_EJD_2014;                                          
+            IF WS_2014_FUNDET                                           
+            THEN DO;                                                    
+               /* skriv record som den skal opdateres */                
+               UDTRÆK.TEKST = 'Kan opdateres fra 2014 data';            
+               CALL SKRIV;                                              
+            END;                                                        
+            ELSE DO;                                                    
+               /* forsøg at finde 2013 oplysninger */                   
+               CALL LÆS_EJD_2013;                                       
+               if WS_2013_FUNDET                                        
+               THEN DO;                                                 
+                  /* skriv record som den skal opdateres */             
+                  UDTRÆK.TEKST = 'Kan opdateres fra 2013 data';         
+                  CALL SKRIV;                                           
+               END;                                                     
+               ELSE DO;                                                 
+                  /* der er ikke fundet data til opdatering, så der */  
+                  /* dannes bare en række på mangel-listen          */  
+                  CALL SKRIV_MANGLER;                                   
+               END;                                                     
+            END;                                                        
+         END;                                                           
+                                                                        
+         IF WS_FELTCHECK = '276'                                        
+         THEN DO;                                                       
+            UDTRÆK.FELTER = '';                                         
+            MANGLER = '';                                               
+                                                                        
+            WS_FELTKODE = 276;  /* landekode */                         
+            CALL LÆS_EJD_2014;                                          
+            IF WS_2014_FUNDET                                           
+            THEN DO;                                                    
+               /* skriv record som den skal opdateres */                
+               UDTRÆK.TEKST = 'Kan opdateres fra 2014 data';            
+               CALL SKRIV;                                              
+            END;                                                        
+            ELSE DO;                                                    
+               /* forsøg at finde 2013 oplysninger */                   
+               CALL LÆS_EJD_2013;                                       
+               if WS_2013_FUNDET                                        
+               THEN DO;                                                 
+                  /* skriv record som den skal opdateres */             
+                  UDTRÆK.TEKST = 'Kan opdateres fra 2013 data';         
+                  CALL SKRIV;                                           
+               END;                                                     
+               ELSE DO;                                                 
+                  /* der er ikke fundet data til opdatering, så der */  
+                  /* dannes bare en række på mangel-listen          */  
+                  CALL SKRIV_MANGLER;                                   
+               END;                                                     
+            END;                                                        
+         END;                                                           
+                                                                        
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /* HER INDSÆTTES DATA I UDTRÆK                                       */
+ /*********************************************************************/
+ SKRIV:  PROC;                                                          
+                                                                        
+         UDTRÆK.FELTER.DINDKAAR     = WS_DINDKAAR;                      
+         UDTRÆK.FELTER.EKOMNR       = WS_EKOMNR;                        
+         UDTRÆK.FELTER.EEJDNR       = WS_EEJDNR;                        
+         UDTRÆK.FELTER.FELTKODETYPE = WS_FELTKODETYPE;                  
+         UDTRÆK.FELTER.FELTKODE     = WS_FELTKODE;                      
+         UDTRÆK.FELTER.INDHOLD_C    = WS_INDHOLD_C;                     
+                                                                        
+         ANTSKRIV_EJD = ANTSKRIV_EJD + 1;                               
+                                                                        
+         IF WS_FELTKODE = 105                                           
+         THEN                                                           
+            IF WS_2014_FUNDET                                           
+            THEN                                                        
+               ANTSKRIV14_EJD = ANTSKRIV14_EJD + 1;                     
+            ELSE                                                        
+               ANTSKRIV13_EJD = ANTSKRIV13_EJD + 1;                     
+                                                                        
+         IF WS_FELTKODE = 276                                           
+         THEN                                                           
+            IF WS_2014_FUNDET                                           
+            THEN                                                        
+               ANTSKRIV14_LKD = ANTSKRIV14_LKD + 1;                     
+            ELSE                                                        
+               ANTSKRIV13_LKD = ANTSKRIV13_LKD + 1;                     
+                                                                        
+         WRITE FILE (BH3141O) FROM (UDTRÆK);                            
+                                                                        
+         /* CALL INSERT_BQ21000T; */                                    
+                                                                        
+ END SKRIV;                                                             
+ /*********************************************************************/
+ /* HER INDSÆTTES DATA I UDTRÆK                                       */
+ /*********************************************************************/
+ SKRIV_MANGLER:  PROC;                                                  
+                                                                        
+         MANGLER.DINDKAAR = WS_DINDKAAR;                                
+         MANGLER.EKOMNR   = WS_EKOMNR;                                  
+         MANGLER.EEJDNR   = WS_EEJDNR;                                  
+         MANGLER.FELTKODE = WS_FELTKODE;                                
+                                                                        
+         ANTFEJL_EJD = ANTFEJL_EJD + 1;                                 
+                                                                        
+         WRITE FILE (BH3142O) FROM (MANGLER);                           
+                                                                        
+ END SKRIV_MANGLER;                                                     
+                                                                        
+ /*********************************************************************/
+ /* Insert række på BQ21000T                                          */
+ /*********************************************************************/
+ INSERT_BQ21000T: PROC;                                                 
+                                                                        
+        EXEC SQL                                                        
+       INSERT INTO BQ21000T                                             
+          (DINDKAAR,                                                    
+           EKOMNR,                                                      
+           EEJDNR,                                                      
+           FELTKODE,                                                    
+           FELTKODETYPE,                                                
+           INDHOLD_C,                                                   
+           INDHOLD_D)                                                   
+          VALUES(:UDTRÆK.FELTER.DINDKAAR                                
+                ,:UDTRÆK.FELTER.EKOMNR                                  
+                ,:UDTRÆK.FELTER.EEJDNR                                  
+                ,:UDTRÆK.FELTER.FELTKODE                                
+                ,:UDTRÆK.FELTER.FELTKODETYPE                            
+                ,:UDTRÆK.FELTER.INDHOLD_C                               
+                ,:UDTRÆK.FELTER.INDHOLD_D);                             
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+       WHEN (0)                                                         
+          DO;                                                           
+             ANTUPD_EJD = ANTUPD_EJD + 1;                               
+          END;                                                          
+       OTHERWISE                                                        
+          DO;                                                           
+            FEJLTEKST  =  'BH31400 ** 262  INSERT BQ21000T';            
+            CALL SQL_FEJL;                                              
+          END;                                                          
+    END; /* END SELECT */                                               
+                                                                        
+ END INSERT_BQ21000T;                                                   
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         CLOSE FILE(BH3141O);                                           
+         CLOSE FILE(BH3142O);                                           
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD =  FEJLTEKST;                                        
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE(BH3141O);                                           
+         CLOSE FILE(BH3142O);                                           
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FELTER DER BØR OPDATERES:.............';    
+         LIN.ANT   = ANTLÆS_BELIG + ANTLÆS_LAND;                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FELTER DER KAN OPDATERES:.............';    
+         LIN.ANT   = ANTSKRIV_EJD;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '        Landekode fra 2013:.................';    
+         LIN.ANT   = ANTSKRIV13_LKD;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '        Landekode fra 2014:.................';    
+         LIN.ANT   = ANTSKRIV14_LKD;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '        Beliggenhed fra 2013:...............';    
+         LIN.ANT   = ANTSKRIV13_EJD;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '        Beliggenhed fra 2014:...............';    
+         LIN.ANT   = ANTSKRIV14_EJD;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL FELTER  DER IKKE KAN OPDATERES:.......';    
+         LIN.ANT   = ANTFEJL_EJD;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL DB2-OPDATERINGER FORETAGET:...........';    
+         LIN.ANT   = ANTUPD_EJD;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF TABEL BQ20000T                      RUTINE */
+ /*********************************************************************/
+ OPEN_EJD_105: PROC;                                                    
+                                                                        
+         EXEC SQL OPEN EJD_CUR_105;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN EJD_CUR_105';                           
+              FEJLTEKST  = 'BH31400 ** 253 ' !! FEJLTEKST;              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_EJD_105;                                                      
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF TABEL BQ20000T                      RUTINE */
+ /*********************************************************************/
+ OPEN_EJD_276: PROC;                                                    
+                                                                        
+         EXEC SQL OPEN EJD_CUR_276;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN EJD_CUR_276';                           
+              FEJLTEKST  = 'BH31400 ** 253 ' !! FEJLTEKST;              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_EJD_276;                                                      
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF EJENDOMSTABEL BQ20000T                    */
+ /*********************************************************************/
+ FETCH_EJD_105: PROC;                                                   
+                                                                        
+         EXEC SQL FETCH EJD_CUR_105                                     
+                                                                        
+         INTO :WS_DINDKAAR,                                             
+              :WS_EKOMNR,                                               
+              :WS_EEJDNR;                                               
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+               ANTLÆS_BELIG = ANTLÆS_BELIG + 1;                         
+           WHEN (100);                                                  
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  =  'BH31400 ** 262  FETCH EJD_CUR_105';       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         FETCH_SQLKODE = SQLCA.SQLCODE;  /* GEMMES TIL SENERE BRUG */   
+                                                                        
+ END FETCH_EJD_105;                                                     
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF EJENDOMSTABEL BQ20000T                    */
+ /*********************************************************************/
+ FETCH_EJD_276: PROC;                                                   
+                                                                        
+         EXEC SQL FETCH EJD_CUR_276                                     
+                                                                        
+         INTO :WS_DINDKAAR,                                             
+              :WS_EKOMNR,                                               
+              :WS_EEJDNR;                                               
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+               ANTLÆS_LAND = ANTLÆS_LAND + 1;                           
+           WHEN (100);                                                  
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  =  'BH31400 ** 262  FETCH EJD_CUR_105';       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         FETCH_SQLKODE = SQLCA.SQLCODE;  /* GEMMES TIL SENERE BRUG */   
+                                                                        
+ END FETCH_EJD_276;                                                     
+ /*********************************************************************/
+ /* SELECT EJENDOMSOPLYSN.                                            */
+ /*********************************************************************/
+ LÆS_EJD_2014: PROC;                                                    
+                                                                        
+         WS_INDHOLD_C = ' ';                                            
+         WS_INDHOLD_D = 0;                                              
+         WS_2014_FUNDET = '0'B;                                         
+                                                                        
+         EXEC SQL                                                       
+                                                                        
+           SELECT T2.INDHOLD_C, T2.INDHOLD_D, T2.FELTKODETYPE           
+           INTO :WS_INDHOLD_C,                                          
+                :WS_INDHOLD_D,                                          
+                :WS_FELTKODETYPE                                        
+           FROM   BQ20000T T1, BQ21000T T2                              
+           WHERE  T1.DINDKAAR = 2014                                    
+           AND    T1.EKOMNR   = 999                                     
+           AND    T1.EEJDNR   = :WS_EEJDNR                              
+           AND    T1.DINDKAAR = T2.DINDKAAR                             
+           AND    T1.EKOMNR   = T2.EKOMNR                               
+           AND    T1.EEJDNR    = T2.EEJDNR                              
+           AND    T2.FELTKODE = :WS_FELTKODE;                           
+                                                                        
+         IF (SQLCA.SQLCODE ^= 0 & SQLCA.SQLCODE ^= 100)                 
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'LÆS_EJD_2014';                               
+              CALL SQL_FEJL;                                            
+            END;                                                        
+         IF SQLCA.SQLCODE = 0                                           
+         THEN                                                           
+            DO;                                                         
+              WS_2014_FUNDET = '1'B;                                    
+            END;                                                        
+                                                                        
+ END LÆS_EJD_2014;                                                      
+ /*********************************************************************/
+ /* SELECT EJENDOMSOPLYSN.                                            */
+ /*********************************************************************/
+ LÆS_EJD_2013: PROC;                                                    
+                                                                        
+         WS_INDHOLD_C = ' ';                                            
+         WS_INDHOLD_D = 0;                                              
+         WS_2013_FUNDET = '0'B;                                         
+                                                                        
+         EXEC SQL                                                       
+                                                                        
+           SELECT T2.INDHOLD_C, T2.INDHOLD_D, T2.FELTKODETYPE           
+           INTO :WS_INDHOLD_C,                                          
+                :WS_INDHOLD_D,                                          
+                :WS_FELTKODETYPE                                        
+           FROM   BQ20000T T1, BQ21000T T2                              
+           WHERE  T1.DINDKAAR = 2013                                    
+           AND    T1.EKOMNR   = 999                                     
+           AND    T1.EEJDNR   = :WS_EEJDNR                              
+           AND    T1.DINDKAAR = T2.DINDKAAR                             
+           AND    T1.EKOMNR   = T2.EKOMNR                               
+           AND    T1.EEJDNR    = T2.EEJDNR                              
+           AND    T2.FELTKODE = :WS_FELTKODE;                           
+                                                                        
+         IF (SQLCA.SQLCODE ^= 0 & SQLCA.SQLCODE ^= 100)                 
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'LÆS_EJD_2013';                               
+              CALL SQL_FEJL;                                            
+            END;                                                        
+         IF SQLCA.SQLCODE = 0                                           
+         THEN                                                           
+            DO;                                                         
+              WS_2013_FUNDET = '1'B;                                    
+            END;                                                        
+                                                                        
+ END LÆS_EJD_2013;                                                      
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF TABEL BQ20000T                     RUTINE */
+ /*********************************************************************/
+ CLOSE_CUR_105: PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE EJD_CUR_105;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE EJD_CUR_105';                          
+              FEJLTEKST  = 'BH31400 ** 256 ' !! FEJLTEKST;              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_CUR_105;                                                     
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF TABEL BQ20000T                     RUTINE */
+ /*********************************************************************/
+ CLOSE_CUR_276: PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE EJD_CUR_276;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE EJD_CUR_276';                          
+              FEJLTEKST  = 'BH31400 ** 256 ' !! FEJLTEKST;              
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_CUR_276;                                                     
+ /***********************************************************/          
+ KONTROL:PROC(TAL,TEKST);                                               
+ DCL TAL   CHAR (3);                                                    
+ DCL TEKST CHAR (80) VARYING;                                           
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0);                                                    
+           OTHER                                                        
+             DO;                                                        
+               FEJLTEKST  = 'BH31400 ** '!!TAL!! TEKST;                 
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* SELECT*/                                               
+ END KONTROL;                                                           
+                                                                        
+ END BH31400;                                                           

@@ -1,0 +1,1486 @@
+  PROCESS OPT(TIME);                                                    
+ BE85100: /* DAN DATA TIL EVS EJERFORHOLD TIL FORSKUD                 */
+         PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                   
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');       
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL :                                                            *
+ * LEVERING AF OPLYSNINGER TIL FORSKUDS EVS EJERFORHOLDSTABEL          *
+ *                                                        (BS01700T).  *
+ *                                                                     *
+ * INPUT  : BE75000T - ESR (FORSKUD)                                   *
+ *          BE76000T - MANDTAL (FORSKUD)                               *
+ *          BE77000T - EVS_UDTRÆK (FORSKUD)                            *
+ *          BE78000T - EVS_RESULTAT (FORSKUD)                          *
+ *                                                                     *
+ * OUTPUT : B.E85100D  UDTRÆK - ALLE PERSONER                          *
+ *          B.E85110D  UDTRÆK - FEJLNUMRE TIL BN04000T                 *
+ *          BE85101Y   KØRSELSKONTROLLISTE                             *
+ *          BE85102Y   FEJLLISTE FRA MASKINEL AFSTEMNING               *
+ *                                                                     *
+ *                                                                     *
+ * PROGRAMMØR: AAGE RASMUSSEN            Aug. 1999                     *
+ * RETTET    : Tina Carstens             Feb. 2022                     *
+ *             Kopieret fra BH85100                                    *
+ *             Forskud 2024                                            *
+ * FORSKUD2023 Udgåede ejendomme         PBR           08.09.2022      *
+ * Forskud2024 årstal i fejlnummer fil   EBD           26.02.2023      *
+ * Forskud2024 defect 1910 BF17          EBD           10.05.2023      *
+ * Forskud2025 Tina Carstens, TIC                 BF17 16.05.2023      *
+ * Forskud2025 US1549422 JXT                      BF17 01.11.2023      *
+ * Forskud2025 Per Jensen, PEN Marts 2024         BF17 25.03.2024      *
+ *             Ukendt VURMARK kode - 299 (tidligere 99) bliver nu      *
+ *             opdateret direkte.                                      *
+ *             Interval for VURMARK udvidet fra 0-99 til 0-299         *
+ *             Output til BS01700T load udvidet med CVUR_KAT og        *
+ *             COPR_CVUR_KAT                                           *
+ * Forskud2025 Jan Jensen, JJJ Juni 2024          BF17 20.06.2024      *
+ *             BE55600M erstatter BE55300M                             *
+ * Forskud2025 Per Brunk, PBR                          01.07.2024      *
+ *             Fejlnr 5188 skal være et advis. (BE95100M)              *
+ * Forskud2025 Per Jensen, PEN     BF17 ÆA65           02.07.2024      *
+ *             Justering så 'Ukendt VURMARK kode' - 299 bliver sat op  *
+ *             uden hensyntagen til tidligere værdi - blev tidligere   *
+ *             kun sat hvis VURMARK var = 0                            *
+ ***********************************************************************
+ *                                                                     *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BE8510O FILE RECORD OUTPUT;    /* LOAD-GRUNDLAG TIL EVS     */ 
+ DCL     BE8511O FILE RECORD OUTPUT;    /* FEJLNUMRE TIL BN04000T    */ 
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK (LOAD-GRUNDLAG)                            * 
+ *********************************************************************/ 
+ DCL     1 BE851,                                                       
+           %INCLUDE BE85100N;                                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK (FEJL TIL BN04000T)                        * 
+ *********************************************************************/ 
+ DCL     1 BE8511,                                                      
+           %INCLUDE BE85110N;                                           
+ /********************************************************************* 
+ *       DECLARE AF DB2                                               * 
+ *********************************************************************/ 
+         EXEC SQL INCLUDE SQLCA;     /* SQL KOMMUNIKATIONSAREAL       */
+         EXEC SQL INCLUDE BE75000T;  /* ESR (FORSKUD)                 */
+         EXEC SQL INCLUDE BE76000T;  /* MANDTAL (FORSKUD)             */
+         EXEC SQL INCLUDE BE77000T;  /* EVS_UDTRÆK (FORSKUD)          */
+         EXEC SQL INCLUDE BE78000T;  /* EVS_RESULTAT (FORSKUD)        */
+                                                                        
+         /* BE780_SW Indikatorvariable til BE78000T                   */
+         %INCLUDE BE85501N;                                             
+                                                                        
+         /* BE770_SW Indikatorvariable til BE77000T                   */
+ DCL     1 BE770_SW,                                                    
+          2 EVSFEJ_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFEJ_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFEJ_EJERANDEL_SW              BIN FIXED (15),            
+          2 EVSFÆG_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFÆG_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFÆG_EJERANDEL_SW              BIN FIXED (15);            
+                                                                        
+ /*********************************************************************/
+ /* TIL BE85111M                                                      */
+ /*********************************************************************/
+ DCL     RESULT_FUNDET         BIT       (1);                           
+ DCL     MT_FUNDET             BIT       (1);                           
+ DCL     SLUT_FUNDET           BIT       (1);                           
+ DCL     ESR_FUNDET            BIT       (1);                           
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    LIN_DEB          CHAR      (133);                               
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE85100L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (' '),           
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (24)      INIT      (' ');           
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+                                                                        
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     I               BIN FIXED (15);                                
+ DCL     HJ_CHAR2        CHAR      (2);                                 
+ DCL     HJ_PIC2         PIC       '(2)9'  BASED(ADDR(HJ_CHAR2));       
+ DCL     GEM_PNR         FIXED     (11)      INIT      (0);             
+ DCL     GEM_KOMNR       FIXED     (3);                                 
+ DCL     GEM_EJDNR       FIXED     (7);                                 
+ DCL     GEM_EENHEDLBNR  BIN FIXED(15);                                 
+ DCL     HJ_EPLBNR       BIN FIXED(15)      INIT      (0);              
+ DCL     HJ_ERLBNR       BIN FIXED(15)      INIT      (0);              
+ DCL     FANTINDV    BIN FIXED     (31)     INIT      (0);              
+ DCL     FEJLTAB (1000)   BIT       (1);   /*#02*/                      
+                                                                        
+ /* FIA */                                                              
+ DCL     HJ_CHAR_4_PIC PIC '9999';                                      
+ DCL     HJ_CHAR_4     CHAR (4) DEF HJ_CHAR_4_PIC;                      
+ DCL     TEKST45         CHAR     (45);                                 
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     FTYPE          CHAR(1);          /* #6.1       /* A = ADVIS */ 
+                                                        /* B = FEJL  */ 
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;        /*#01*/                            
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BE85100');      
+                                                                        
+ DCL     WS_VURMARK_UKENDT              FIXED (3) INIT (299);           
+ DCL     WS_MAX_VURMARK                 FIXED (3) INIT (299);           
+                                                                        
+ DCL     HJ_VURD_A_VURMARK_AKT          DEC (3,0);                      
+ DCL     HJ_EJERSKAB_VURMARK            DEC (3,0);                      
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE85100'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+         CALL TERMINER_LISTE                                            
+                      ('***           SKAT EVS FORSKUD           ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***     BE85100 - Dan EVS Ejerforhold    ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***              (BS01700T)              ***'); 
+         CALL TERMINER_LISTE('***         '!!                           
+                              BE55600M.AFVIKLINGS_ID!!' '!!             
+                              BE55600M.INDKÅR2!!'         ***');        
+         CALL TERMINER_LISTE(' ');                                      
+                                                                        
+         OPEN FILE (BE8510O) TITLE ('BE85100O');                        
+         OPEN FILE (BE8511O) TITLE ('BE85110O');                        
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE85101Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         OVERLIN1.TEKST2 = 'DAN LOADGRUNDLAG TIL EVS EJERFORHOLD' !!    
+                           'FORSKUD ' !! BE55600M.INDKÅR2; /*#01*/      
+                                                                        
+         DO I = 1 TO 1000;  /*#02*/                                     
+            FEJLTAB(I) = NEJ;                                           
+         END;                                                           
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE85100L');             
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+         /* Erklæring og initiering af tællere                        */
+         %INCLUDE BE85102M;                                             
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.FORSKÅR;                    
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER CHECK AF OMKØRSEL                        */     
+         /********************************************************/     
+         PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);         
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL CLOSE_RESULTCURS;                                         
+         CALL OPEN_RESULTCURS;                                          
+         CALL FETCH_RESULT;       /* BE78 */                            
+                                                                        
+         DO WHILE (RESULT_FUNDET);                                      
+            CALL SELECT_ESR;      /* BE75 */                            
+            CALL SELECT_MT;       /* BE76 */                            
+            CALL SELECT_SLUT;     /* BE77 */                            
+            CALL BEHANDL;                                               
+            CALL FETCH_RESULT;    /* BE78 */                            
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       UDSØG PERSONER SOM SKAL OPRETTES PÅ PERSONTABELLEN           * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+        /* Resultat frasorteres ift. forskellige kriterier.           */
+        /* Der foretages visse optællinger.                           */
+        %INCLUDE BE85103M;                                              
+                                                                        
+        /* Der opsæætes nu EPLBNR - periodeløbenummer              */   
+        /*              og ERLBNR - rækkeløbenumer inde for person */   
+        /* Ny regl for bestemmelse af ELBNR (HJLBNR) til BS00600T  */   
+        IF GEM_PNR ^= DCLBE78000T.DCPRN                                 
+        THEN                                                            
+           DO;                                                          
+              IF FANTINDV > 0                                           
+              THEN                                                      
+                 DO;                                                    
+                    CALL OPTÆL_PERSON;                                  
+                    CALL SKRIV_TIL_BN04000T;                            
+                 END;                                                   
+              ERKLÆRBAR = JA;                                           
+              FANTINDV = 1;                                             
+              GEM_PNR   = DCLBE78000T.DCPRN;                            
+              GEM_PNR   = DCLBE78000T.DCPRN;                            
+              GEM_KOMNR = DCLBE78000T.EKOMNR;                           
+              GEM_EJDNR = DCLBE78000T.EEJDNR;                           
+              GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR;                  
+              HJ_EPLBNR = 1;                                            
+              HJ_ERLBNR = 1;                                            
+           END;                                                         
+        ELSE                                                            
+           DO;                                                          
+             /* Ny række på samme person */                             
+             HJ_ERLBNR = HJ_ERLBNR + 1;                                 
+              /* Ny række indenfor samme person og ejendom */           
+             IF GEM_KOMNR   = DCLBE78000T.EKOMNR &                      
+                GEM_EJDNR   = DCLBE78000T.EEJDNR &                      
+                GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR                 
+             THEN                                                       
+               HJ_EPLBNR = HJ_EPLBNR + 1;                               
+             ELSE                                                       
+               DO;                                                      
+                 GEM_KOMNR = DCLBE78000T.EKOMNR;                        
+                 GEM_EJDNR = DCLBE78000T.EEJDNR;                        
+                 GEM_EENHEDLBNR = DCLBE78000T.EENHEDLBNR;               
+                 /* Ny ejendom indenfor samme person */                 
+                 HJ_EPLBNR = 1;                                         
+               END;                                                     
+              FANTINDV = FANTINDV + 1;                                  
+           END;                                                         
+                                                                        
+        CALL UDSØG_TIL_BN04000T;                                        
+                                                                        
+        IF DCLBE78000T.TILEVS_CEJBEVS = '0' !                           
+           DCLBE78000T.TILEVS_CEJBEVS = 'A'                             
+        THEN;                                                           
+        ELSE                                                            
+           ERKLÆRBAR = NEJ;                                             
+                                                                        
+         BE851 = '';                                                    
+                                                                        
+         BE851.DINDKAAR     = BE55600M.FORSKÅR;        /*#01*/          
+         BE851.PERSONNUMMER = DCLBE78000T.DCPRN;                        
+         BE851.EKOMNR       = DCLBE78000T.EKOMNR;                       
+         BE851.EEJDNR       = DCLBE78000T.EEJDNR;                       
+         BE851.EENHEDLBNR   = DCLBE78000T.EENHEDLBNR;                   
+         BE851.EPLBNR       = HJ_EPLBNR;                                
+         BE851.DFRAGLD = DATO2.ÅR !! '-' !! DATO2.MD !! '-' !!          
+                         DATO2.DG !! '-01.01.01.000001';                
+         BE851.DTILGLD  = '9999-12-31-23.59.59.999999';                 
+         BE851.DKØRT    = '1900-12-31-00.00.00.000001';                 
+         BE851.ERLBNR       = HJ_ERLBNR;                                
+         BE851.CEVSBENY = '1'; /* SÆTTES NUL HVIS ANVENDES I BEREGNING*/
+                               /* NÅR FORSKUD AFVIKLES */               
+         BE851.CEJBEVS  = DCLBE78000T.TILEVS_CEJBEVS;                   
+         BE851.FEJLNR   = DCLBE78000T.FEJLNR;                           
+         /* Udgåede ejendomme    PBR 08.09.2022 */                      
+         IF DCLBE78000T.FEJLNR = 5502 &                                 
+            DCLBE78000T.TILEVS_A_V_CBENYT = '16'                        
+         THEN                                                           
+           DO;                                                          
+             BE851.FEJLNR     = 5001;                                   
+             BE851.CSLET      = '1';                                    
+             BE851.COPR_CSLET = 'F';                                    
+           END;                                                         
+         BE851.CDATAFRA = DCLBE78000T.TILEVS_CDATAFRA;                  
+         BE851.DOVTG    = DCLBE78000T.TILEVS_DOVTG;                     
+         BE851.DAFSTAA  = DCLBE78000T.TILEVS_DAFSTAA;                   
+         IF DCLBE78000T.EJERSKAB_CEJDTYPE > '0'                         
+         THEN                                                           
+           BE851.CEJDTYPE = DCLBE78000T.EJERSKAB_CEJDTYPE;              
+         ELSE                                                           
+           BE851.CEJDTYPE = DCLBE78000T.EJENDOM_CEJDTYPE;               
+         BE851.GPCTEJER = DCLBE78000T.TILEVS_GPCTEJER * 100;            
+         BE851.BBERGRL  = DCLBE78000T.EJERSKAB_BBERGRL;                 
+         BE851.CBERGRL  = DCLBE78000T.EJENDOM_CBERGRL;                  
+         BE851.BGRPROM1 = DCLBE78000T.FRAEVS_FOR_BGRPROM1;              
+         BE851.BPROM1   = DCLBE78000T.FRAEVS_FOR_BPROM1;                
+         BE851.BGRPROM2 = DCLBE78000T.FRAEVS_FOR_BGRPROM2;              
+         BE851.BPROM2   = DCLBE78000T.FRAEVS_FOR_BPROM2;                
+         BE851.CNEDSL1  = DCLBE78000T.TILEVS_CNEDSL1;                   
+         BE851.BNEDSL1  = DCLBE78000T.FRAEVS_FOR_BNEDSL1;               
+         BE851.CNEDSL2  = DCLBE78000T.FRAEVS_FOR_CNEDSL2;               
+         BE851.BNEDSL2  = DCLBE78000T.FRAEVS_FOR_BNEDSL2;               
+         BE851.BPENSNED = DCLBE78000T.FRAEVS_FOR_BPENSNED;              
+         BE851.BPENSIND = DCLBE78000T.TILEVS_BPENSIND;                  
+         BE851.BPENSRED = DCLBE78000T.FRAEVS_FOR_BPENSRED;              
+         BE851.BUDLSKC  = DCLBE78000T.TILEVS_FOR_BUDLSKC;               
+         BE851.DATO0107 = DCLBE78000T.TILEVS_DATO0107;                  
+         BE851.FDAGEJ   = DCLBE78000T.FRAEVS_FOR_FDAGEJ;                
+         BE851.FDAGEJEJ = DCLBE78000T.FRAEVS_FOR_FDAGEJEJ;              
+         BE851.FDAGUDLE = DCLBE78000T.TILEVS_FOR_FDAGUDLE;              
+         BE851.GPCTUDLE = DCLBE78000T.TILEVS_FOR_GPCTUDLE;              
+         BE851.FDAGERHV = DCLBE78000T.TILEVS_FOR_FDAGERHV;              
+         BE851.GPCTERHV = DCLBE78000T.TILEVS_FOR_GPCTERHV;              
+         BE851.BSUM1    = DCLBE78000T.FRAEVS_FOR_BSUM1;                 
+         BE851.BNETTO   = DCLBE78000T.FRAEVS_FOR_BNETTO;                
+         BE851.BBRUTTO  = DCLBE78000T.FRAEVS_FOR_BBRUTTO;               
+         BE851.BEJERED  = DCLBE78000T.FRAEVS_FOR_BEJERED;               
+         BE851.BERHVRED = DCLBE78000T.FRAEVS_FOR_BERHVRED;              
+         BE851.BUDLERED = DCLBE78000T.FRAEVS_FOR_BUDLERED;              
+         BE851.B100     = DCLBE78000T.FRAEVS_FOR_B100;                  
+         BE851.BEJERAN  = DCLBE78000T.FRAEVS_FOR_BEJERAN;               
+         BE851.BEJBOL1  = DCLBE78000T.EJENDOM_BEJBOL1;                  
+         BE851.BEJBOL2  = DCLBE78000T.EJENDOM_BEJBOL2;                  
+         BE851.CFRED    = DCLBE78000T.TILEVS_CFRED;                     
+         BE851.CTYPFOR  = DCLBE78000T.TILEVS_CPTYPFOR;                  
+         BE851.BGLEVS10 = 0;                                            
+         BE851.BGLEVS2  = 0;                                            
+         BE851.BGLEVS4  = 0;                                            
+         BE851.BGLEVSP  = 0;                                            
+         BE851.BNYMAN    = DCLBE78000T.TILEVS_BNYMAN;                   
+         BE851.BNYMAN_NULL = '?'; /* BNYMAN KAN IKKE KOMME I.F.M. */    
+                                  /* OPRETTELSEN                  */    
+         BE851.CENKE     = DCLBE78000T.TILEVS_CENKE;                    
+         //BE851.CÆGTOPR= DCLBE78000T.TILEVS_CÆGTOPR; US1549422 JXT     
+         BE851.CGLSLUTEVS     = DCLBE78000T.TILEVS_CGLSLUTEVS;          
+         BE851.BGLSLUTEVS     = DCLBE78000T.TILEVS_BGLSLUTEVS;          
+         BE851.BGLPENSNED     = DCLBE78000T.TILEVS_BGLPENSNED;          
+         BE851.BSUM2          = DCLBE78000T.FRAEVS_FOR_BSUM2;           
+         BE851.COPR_CEJDTYPE  = DCLBE78000T.TILFORSK_COPR_CEJDTYPE;     
+         BE851.COPR_BBERGRL   = DCLBE78000T.TILFORSK_COPR_BBERGRL;      
+         BE851.COPR_BBER2FAM  = DCLBE78000T.TILFORSK_COPR_BBER2FAM;     
+         BE851.COPR_GPCTEJER  = DCLBE78000T.TILFORSK_COPR_GPCTEJER;     
+         BE851.COPR_DOVTG     = DCLBE78000T.TILFORSK_COPR_DOVTG;        
+         BE851.COPR_DAFSTAA   = DCLBE78000T.TILFORSK_COPR_DAFSTAA;      
+         BE851.COPR_CNEDSL1   = DCLBE78000T.TILFORSK_COPR_CNEDSL1;      
+         BE851.COPR_CPTYPFOR  = DCLBE78000T.TILFORSK_COPR_CPTYPFOR;     
+         BE851.COPR_CEJBEVS   = DCLBE78000T.TILFORSK_COPR_CEJBEVS;      
+         BE851.COPR_CFRED     = DCLBE78000T.TILFORSK_COPR_CFRED;        
+         BE851.COPR_GPCTUDLE  = DCLBE78000T.TILFORSK_COPR_GPCTUDLE;     
+         BE851.COPR_FDAGUDLE  = DCLBE78000T.TILFORSK_COPR_FDAGUDLE;     
+         BE851.COPR_GPCTERHV  = DCLBE78000T.TILFORSK_COPR_GPCTERHV;     
+         BE851.COPR_FDAGERHV  = DCLBE78000T.TILFORSK_COPR_FDAGERHV;     
+         BE851.COPR_BUDLSKC   = DCLBE78000T.TILFORSK_COPR_BUDLSKC;      
+         BE851.COPR_CENKE     = DCLBE78000T.TILFORSK_COPR_CENKE;        
+         BE851.DINDFLYT       = DCLBE78000T.TILEVS_DINDFLYT;            
+         BE851.DFRAFLYT       = DCLBE78000T.TILEVS_DFRAFLYT;            
+         BE851.FUBEBOELIG     = DCLBE78000T.TILEVS_FOR_FUBEBOELIG;      
+         BE851.CBERGRLANV     = DCLBE78000T.EJERSKAB_CBERGRLANV;        
+         BE851.CHELÅR         = DCLBE78000T.TILEVS_CHELÅR;              
+         BE851.CPENSNED1      = DCLBE78000T.TILEVS_FOR_CPENSNED1;       
+         BE851.COPR_CPENSNED1 = DCLBE78000T.TILFORSK_COPR_CPENSNED1;    
+         BE851.BEJBOLANV         = DCLBE78000T.EJERSKAB_BEJBOLANV;      
+         BE851.CANVEBOL          = DCLBE78000T.EJERSKAB_CANVEBOL;       
+         IF DCLBE78000T.EJERSKAB_BEJBOLANV_SW = -1                      
+         THEN                                                           
+            BE851.BEJBOLANV_NULL = '?';                                 
+         BE851.BUBEBOLRED        = DCLBE78000T.FRAEVS_FOR_BUBEBOLRED;   
+         BE851.CFORSKEL          = DCLBE78000T.EJENDOM_CFORSKEL;        
+         BE851.BSUM3             = DCLBE78000T.FRAEVS_FOR_BSUM3;        
+         BE851.BBER2FAM         = DCLBE78000T.EJERSKAB_BBER2FAM;        
+         BE851.BEVSFREM         = DCLBE78000T.TILEVS_FOR_BEVSFREM;      
+         IF DCLBE78000T.TILEVS_FOR_BEVSFREM_SW = -1                     
+         THEN                                                           
+            DO;                                                         
+               DCLBE78000T.TILEVS_FOR_BEVSFREM = 0;                     
+               BE851.BEVSFREM_NULL = '?';                               
+            END;                                                        
+         BE851.COPR_BEVSFREM    = DCLBE78000T.TILFORSK_COPR_BEVSFREM;   
+         BE851.CEJDTYPE_AKT     = DCLBE78000T.EJERSKAB_CEJDTYPE_AKT;    
+         BE851.CEKSEMP          = DCLBE78000T.TILEVS_FOR_CEKSEMP;       
+         BE851.COPR_EKSEMP      = DCLBE78000T.TILFORSK_COPR_EKSEMP;     
+         BE851.BBERGRL_AKT      = DCLBE78000T.VURD_A_BBERGRL_AKT;       
+         IF DCLBE78000T.VURD_A_BBERGRL_A_SW = -1                        
+         THEN                                                           
+            BE851.BBERGRL_AKT_NULL = '?';                               
+                                                                        
+        /* SLUT PÅ NY KODE TIL FLYTNING AF VÆRDIER*/                    
+                                                                        
+         IF DCLBE78000T.TILEVS_A_EJ_COMPLA = '2'                        
+         THEN                                                           
+            DO;                                                         
+               BE851.COMPLA = DCLBE78000T.TILEVS_A_EJ_COMPLA;           
+               BE851.DOMPLACPR = DCLBE78000T.TILEVS_A_EJ_DOMPLACPR;     
+            END;                                                        
+                                                                        
+        BE851.CFORSKEL = DCLBE78000T.TILEVS_A_V_CFORSKEL;               
+                                                                        
+        //IF DCLBE78000T.FEJLNR > 0                                     
+        IF BE851.FEJLNR > 0                                             
+        THEN                                                            
+           DO;                                                          
+              //BE851.FEJLNR = DCLBE78000T.FEJLNR;                      
+              INDEX = BE851.FEJLNR;                                     
+              SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;    
+           END;                                                         
+                                                                        
+        // Eventuel justering af vurmark                                
+        HJ_VURD_A_VURMARK_AKT  = DCLBE78000T.VURD_A_VURMARK_AKT;        
+        HJ_EJERSKAB_VURMARK    = DCLBE78000T.EJERSKAB_VURMARK;          
+        IF DCLBE78000T.EKOMNR = 999 THEN                                
+           DO;                                                          
+           HJ_VURD_A_VURMARK_AKT  = WS_VURMARK_UKENDT;                  
+           HJ_EJERSKAB_VURMARK    = WS_VURMARK_UKENDT;                  
+        END;                                                            
+        ELSE DO;                                                        
+           IF (DCLBE78000T.TILEVS_CDATAFRA = '1' !                      
+               DCLBE78000T.TILEVS_CDATAFRA = '2' !                      
+               DCLBE78000T.TILEVS_CDATAFRA = '4' !                      
+               DCLBE78000T.TILEVS_CDATAFRA = '5' !                      
+               DCLBE78000T.TILEVS_CDATAFRA = '6' !                      
+               DCLBE78000T.TILEVS_CDATAFRA = '7')  THEN                 
+              DO;                                                       
+              HJ_VURD_A_VURMARK_AKT  = WS_VURMARK_UKENDT;               
+              HJ_EJERSKAB_VURMARK    = WS_VURMARK_UKENDT;               
+           END;                                                         
+                                                                        
+           IF DCLBE78000T.VURD_A_BBERGRL_A_SW   = -1 THEN               
+              DO;                                                       
+              HJ_VURD_A_VURMARK_AKT = WS_VURMARK_UKENDT;                
+           END;                                                         
+                                                                        
+           IF DCLBE78000T.EJERSKAB_BBERGRL_SW = -1 THEN                 
+              DO;                                                       
+              HJ_EJERSKAB_VURMARK = WS_VURMARK_UKENDT;                  
+           END;                                                         
+        END;                                                            
+                                                                        
+        /* NYE FELT FORSKUD 2021 */                                     
+        BE851.VURMARK_AKT    = HJ_VURD_A_VURMARK_AKT;                   
+        BE851.VURMARK        = HJ_EJERSKAB_VURMARK;                     
+                                                                        
+        /* NYE FELT FORSKUD 2021 SLUT */                                
+                                                                        
+        /* NYE FELT FORSKUD 2022 mellemperiode */                       
+        BE851.JUR_KATEGO_AKT    = DCLBE78000T.VURD_A_JUR_KATEGO;        
+        BE851.JUR_KATEGO        = DCLBE78000T.EJERSKAB_JUR_KATEGO;      
+                                                                        
+        BE851.JUR_UKATEGO_AKT   = DCLBE78000T.VURD_A_JUR_UKATEGO;       
+        BE851.JUR_UKATEGO       = DCLBE78000T.EJERSKAB_JUR_UKATEGO;     
+                                                                        
+        BE851.VURDATO_AKT       = DCLBE78000T.VURD_A_VURDATO;           
+        BE851.VURDATO           = DCLBE78000T.EJERSKAB_JUR_VURDATO;     
+                                                                        
+        BE851.FORSIGT_EVS_AKT   = DCLBE78000T.VURD_A_FORSIGT_EVS;       
+        BE851.FORSIGT_EVS       = DCLBE78000T.EJERSKAB_FORSIGT_EVS;     
+                                                                        
+        BE851.BESKAT_EVS_AKT    = DCLBE78000T.VURD_A_BESKAT_EVS;        
+        BE851.BESKAT_EVS        = DCLBE78000T.EJERSKAB_BESKAT;          
+        /* NYE FELT FORSKUD 2022 mellemperiode SLUT */                  
+                                                                        
+        /* KS46 */                                                      
+        BE851.CRTEKORNS      = DCLBE78000T.EJERSKAB_CRTEKORNS;          
+        BE851.COPR_CRTEKORNS = DCLBE78000T.EJERSKAB_COPR_CRTEKORNS;     
+                                                                        
+        /* BF17 Nye felter                                            */
+        BE851.EJET20240101      = DCLBE78000T.EJET20240101;             
+        BE851.COPR_EJET20240101 = DCLBE78000T.COPR_EJET20240101;        
+                                                                        
+        BE851.RES_RABATGRDL_NYLOV  = DCLBE78000T.RES_RABATGRDL_NYLOV;   
+        IF BE780_SW.RES_RABATGRDL_NYLOV_SW = -1                         
+        THEN                                                            
+           BE851.RES_RAB_NYLOV_NULL = '?';                              
+                                                                        
+        BE851.RES_EVSFØRREDUKTION  = DCLBE78000T.RES_EVSFØRREDUKTION;   
+        IF BE780_SW.RES_EVSFØRREDUKTION_SW = -1                         
+        THEN                                                            
+           BE851.RES_EVSFØRRED_NULL = '?';                              
+                                                                        
+        BE851.RES_EJERANDEL        = DCLBE78000T.RES_EJERANDEL;         
+        IF BE780_SW.RES_EJERANDEL_SW = -1                               
+        THEN                                                            
+           BE851.RES_EJANDEL_NULL = '?';                                
+                                                                        
+        BE851.RES_FAKTISKRABAT     = DCLBE78000T.RES_FAKTISKRABAT;      
+        IF BE780_SW.RES_FAKTISKRABAT_SW =-1                             
+        THEN                                                            
+           BE851.RES_FAKRAB_NULL = '?';                                 
+                                                                        
+        BE851.RES_EVSEFTERREDUKTION = DCLBE78000T.RES_EVSEFTERREDUKTION;
+        IF BE780_SW.RES_EVSEFTERREDUKTION_SW = -1                       
+        THEN                                                            
+           BE851.RES_EVSEFTRED_NULL = '?';                              
+                                                                        
+        BE851.RABATEJERANDEL         = DCLBE78000T.RES_RABATEJERANDEL;  
+        IF BE780_SW.RES_RABATEJERANDEL_SW = -1                          
+        THEN                                                            
+           BE851.RABATEJERANDEL_NULL = '?';                             
+        BE851.COPR_RABATEJERANDEL = DCLBE78000T.COPR_RES_RABATEJERANDEL;
+                                                                        
+        BE851.RES_EVSEFTERRABAT    = DCLBE78000T.RES_EVSEFTERRABAT;     
+        IF BE780_SW.RES_EVSEFTERRABAT_SW = -1                           
+        THEN                                                            
+           BE851.RES_EVSEFTRAB_NULL = '?';                              
+                                                                        
+        BE851.RES_RABATGRDL_GLLOV  = DCLBE78000T.RES_RABATGRDL_GLLOV;   
+        IF BE780_SW.RES_RABATGRDL_GLLOV_SW = -1                         
+        THEN                                                            
+           BE851.RES_RABGLLOV_NULL = '?';                               
+                                                                        
+        BE851.RES_FAST_STIGNINGSBEGR_NEDSLAG =                          
+                           DCLBE78000T.RES_FAST_STIGNINGSBEGR_NEDSLAG;  
+        IF BE780_SW.RES_FAST_STIGNINGSBEGR_NED_SW = -1                  
+        THEN                                                            
+           BE851.RES_FSTSTI_NED_NULL = '?';                             
+                                                                        
+        BE851.RES_STIGNINGSBEGR_NEDSLAG =                               
+                           DCLBE78000T.RES_STIGNINGSBEGR_NEDSLAG;       
+        IF BE780_SW.RES_STIGNINGSBEGR_NEDSLAG_SW = -1                   
+        THEN                                                            
+           BE851.RES_STINED_NULL = '?';                                 
+        /* BF17 Nye Felter Slut                                       */
+                                                                        
+        /* Rettet 2020-10-28 EBD */                                     
+        IF DCLBE78000T.TILEVS_CEJBEVS >= '0' !                          
+           DCLBE78000T.TILEVS_CEJBEVS = 'A'  !                          
+           DCLBE78000T.TILEVS_CEJBEVS = 'B'  !                          
+           DCLBE78000T.TILEVS_CEJBEVS = 'C'                             
+        THEN                                                            
+           DO;                                                          
+             SELECT(DCLBE78000T.TILEVS_CEJBEVS);                        
+               WHEN('A')                                                
+                 DO;                                                    
+                   INDEX = 10;                                          
+                 END;                                                   
+               WHEN('B')                                                
+                 DO;                                                    
+                   INDEX = 11;                                          
+                 END;                                                   
+               WHEN('C')                                                
+                 DO;                                                    
+                   INDEX = 12;                                          
+                 END;                                                   
+               OTHER                                                    
+                 DO;                                                    
+                   HJ_CHAR1 = DCLBE78000T.TILEVS_CEJBEVS;               
+                   INDEX = HJ_PIC1;                                     
+                 END;                                                   
+             END; /*SELECT*/                                            
+             SKR_EJBEVS(INDEX).ANTAL = SKR_EJBEVS(INDEX).ANTAL + 1;     
+           END;                                                         
+                                                                        
+         IF DCLBE78000T.TILEVS_CEJBEVS = '0'                            
+         THEN                                                           
+            DO;                                                         
+              TV.BEREGNET = TV.BEREGNET + 1;                            
+              IF DCLBE78000T.TILEVS_CHELÅR > '3'                        
+              THEN                                                      
+                 TV.FANTSOM = TV.FANTSOM + 1;                           
+              IF DCLBE78000T.FRAEVS_FOR_BPROM1 > 0                      
+              THEN                                                      
+                 TV.BPROM1 = TV.BPROM1 + 1;                             
+              IF DCLBE78000T.FRAEVS_FOR_BPROM2 > 0                      
+              THEN                                                      
+                 TV.BPROM2 = TV.BPROM2 + 1;                             
+              IF DCLBE78000T.FRAEVS_FOR_BNEDSL1 > 0                     
+              THEN                                                      
+                 TV.BNEDSL1 = TV.BNEDSL1 + 1;                           
+              IF DCLBE78000T.FRAEVS_FOR_BNEDSL2 > 0                     
+              THEN                                                      
+                 TV.BNEDSL2 = TV.BNEDSL2 + 1;                           
+                                                                        
+              IF DCLBE78000T.FRAEVS_FOR_BPENSNED > 0                    
+              THEN                                                      
+                 DO;                                                    
+                    IF DCLBE78000T.TILEVS_FOR_CPENSNED1 = '1'           
+                    THEN                                                
+                       TV.CPENSN6000 = TV.CPENSN6000 + 1;               
+                    ELSE                                                
+                       TV.CPENSN2000 = TV.CPENSN2000 + 1;               
+                 END;                                                   
+                                                                        
+              IF DCLBE78000T.FRAEVS_FOR_BPROM1 > 0                      
+              THEN                                                      
+                 DO;                                                    
+                    IF DCLBE78000T.FRAEVS_FOR_BEJERAN = 0               
+                    THEN                                                
+                       TV.BEREJD = TV.BEREJD +                          
+                       DCLBE78000T.FRAEVS_FOR_B100;                     
+                    ELSE                                                
+                       TV.BEREJD = TV.BEREJD +                          
+                       DCLBE78000T.FRAEVS_FOR_BEJERAN;                  
+                 END;                                                   
+                                                                        
+              /* 14-09-2001 PBR */                                      
+              SELECT (DCLBE78000T.TILEVS_A_EJ_BOPÆLSKODE);              
+                WHEN ('1')                                              
+                  TV.BER_BOPÆL1 = TV.BER_BOPÆL1 + 1;                    
+                WHEN ('2')                                              
+                  TV.BER_BOPÆL2 = TV.BER_BOPÆL2 + 1;                    
+                WHEN ('3')                                              
+                  TV.BER_BOPÆL3 = TV.BER_BOPÆL3 + 1;                    
+                WHEN ('4')                                              
+                  TV.BER_BOPÆL4 = TV.BER_BOPÆL4 + 1;                    
+                WHEN ('5')                                              
+                  TV.BER_BOPÆL5 = TV.BER_BOPÆL5 + 1;                    
+                WHEN ('6')                                              
+                  TV.BER_BOPÆL6 = TV.BER_BOPÆL6 + 1;                    
+                OTHERWISE                                               
+                  TV.BER_BOPÆL0 = TV.BER_BOPÆL0 + 1;                    
+              END;                                                      
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+              TV.EJBEREGNET = TV.EJBEREGNET + 1;                        
+              /* 14-09-2001 PBR */                                      
+              SELECT (DCLBE78000T.TILEVS_A_EJ_BOPÆLSKODE);              
+                WHEN ('1')                                              
+                  TV.EJBER_BOPÆL1 = TV.EJBER_BOPÆL1 + 1;                
+                WHEN ('2')                                              
+                  TV.EJBER_BOPÆL2 = TV.EJBER_BOPÆL2 + 1;                
+                WHEN ('3')                                              
+                  TV.EJBER_BOPÆL3 = TV.EJBER_BOPÆL3 + 1;                
+                WHEN ('4')                                              
+                  TV.EJBER_BOPÆL4 = TV.EJBER_BOPÆL4 + 1;                
+                WHEN ('5')                                              
+                  TV.EJBER_BOPÆL5 = TV.EJBER_BOPÆL5 + 1;                
+                WHEN ('6')                                              
+                  TV.EJBER_BOPÆL6 = TV.EJBER_BOPÆL6 + 1;                
+                OTHERWISE                                               
+                  TV.EJBER_BOPÆL0 = TV.EJBER_BOPÆL0 + 1;                
+              END;                                                      
+            END;                                                        
+                                                                        
+         IF DCLBE78000T.TILEVS_FOR_BEVSFREM_SW = 0                      
+         THEN                                                           
+            DO;                                                         
+               TV.FREMSKREVET = TV.FREMSKREVET + 1;                     
+               TV.EJDFREM = TV.EJDFREM +                                
+               DCLBE78000T.TILEVS_FOR_BEVSFREM;                         
+            END;                                                        
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+                                                                        
+         WRITE FILE (BE8510O) FROM (BE851);                             
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *       FIND FEJLNUMRE TIL BN04000T PR. PERSON                       * 
+ *********************************************************************/ 
+ UDSØG_TIL_BN04000T: PROC;                                              
+                                                                        
+   /* #6.1  5010 SKAL NU VÆRE ADVIS, 5045 UDGÅET /*                     
+   /* #6.1  DER OPSÆTTES KUN FEJLNUMRE, NÅR CEJBEVS = 2 ELLER 3 */      
+         IF DCLBE78000T.TILEVS_CEJBEVS = '1' !                          
+            DCLBE78000T.TILEVS_CEJBEVS = 'A' !                          
+            DCLBE78000T.TILEVS_CEJBEVS = '7' !                          
+            DCLBE78000T.TILEVS_CEJBEVS = '8' !                          
+            DCLBE78000T.FEJLNR = 0                                      
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         I = DCLBE78000T.FEJLNR - 5000;                                 
+         FEJLTAB(I) = JA;                                               
+                                                                        
+ END UDSØG_TIL_BN04000T;                                                
+ /********************************************************************* 
+ *       SKRIV FEJLNUMRE TIL BN04000T PR. PERSON                      * 
+ *********************************************************************/ 
+ SKRIV_TIL_BN04000T:PROC;                                               
+                                                                        
+         DO I = 1 TO 1000;  /* fejlnummer 5001 til 6000 */              
+            IF FEJLTAB(I) = JA                                          
+            THEN                                                        
+               DO;                                                      
+                  BE8511.INDKOMSTÅR = WS_TIL_EVS_AAR;                   
+                  BE8511.DCPRN      = GEM_PNR;                          
+                  BE8511.FEJLNR     = 5000 + I;                         
+                  IF ADVIS_OK(BE8511.FEJLNR)                 /* #6.1 */ 
+                  THEN                                                  
+                     BE8511.FTYPE = 'A';                                
+                  ELSE                                                  
+                     BE8511.FTYPE = 'B';                                
+                  WRITE FILE (BE8511O) FROM (BE8511);                   
+                                                                        
+                  TV.SKRFEJL = TV.SKRFEJL + 1;                          
+                  FEJLTAB(I) = NEJ;                                     
+               END;                                                     
+         END;                                                           
+                                                                        
+ END SKRIV_TIL_BN04000T;                                                
+ /********************************************************************* 
+ *       OPTÆL STATUS FOR DENNE PERSON                                * 
+ *********************************************************************/ 
+ OPTÆL_PERSON:PROC;                                                     
+                                                                        
+         SELECT;                                                        
+           WHEN (FANTINDV = 1)                                          
+              INDEX = 2;                                                
+           WHEN (FANTINDV = 2)                                          
+              INDEX = 3;                                                
+           WHEN (FANTINDV = 3)                                          
+              INDEX = 4;                                                
+           WHEN (FANTINDV = 4)                                          
+              INDEX = 5;                                                
+           WHEN (FANTINDV = 5)                                          
+              INDEX = 6;                                                
+           WHEN (FANTINDV = 6)                                          
+              INDEX = 7;                                                
+           WHEN (FANTINDV = 7)                                          
+              INDEX = 8;                                                
+           WHEN (FANTINDV = 8)                                          
+              INDEX = 9;                                                
+           WHEN (FANTINDV = 9)                                          
+              INDEX = 10;                                               
+           WHEN (FANTINDV = 10)                                         
+              INDEX = 11;                                               
+           WHEN (FANTINDV >= 11 & FANTINDV  <= 20)                      
+              INDEX = 12;                                               
+           WHEN (FANTINDV >= 21 & FANTINDV  <= 30)                      
+              INDEX = 13;                                               
+           WHEN (FANTINDV >= 31 & FANTINDV  <= 40)                      
+              INDEX = 14;                                               
+           WHEN (FANTINDV >= 41 & FANTINDV  <= 50)                      
+              INDEX = 15;                                               
+           OTHERWISE                                                    
+              INDEX = 16;                                               
+         END;                                                           
+                                                                        
+         TAB_PERSON(1).ANTAL = TAB_PERSON(1).ANTAL + 1;                 
+         TAB_PERSON(INDEX).ANTAL = TAB_PERSON(INDEX).ANTAL + 1;         
+                                                                        
+         IF ERKLÆRBAR = JA                                              
+         THEN                                                           
+            DO;                                                         
+               TAB_PERSON(1).ERKL = TAB_PERSON(1).ERKL + 1;             
+               TAB_PERSON(INDEX).ERKL = TAB_PERSON(INDEX).ERKL + 1;     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               TAB_PERSON(1).EJERKL = TAB_PERSON(1).EJERKL + 1;         
+               TAB_PERSON(INDEX).EJERKL = TAB_PERSON(INDEX).EJERKL + 1; 
+            END;                                                        
+                                                                        
+         IF MAX_ANT_INDV < FANTINDV                                     
+         THEN                                                           
+            MAX_ANT_INDV = FANTINDV;                                    
+                                                                        
+ END OPTÆL_PERSON;                                                      
+                                                                        
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+ /*      DETLIN1.ANTAL = TV.LÆST_BE78000T;                         */   
+         DETLIN1.ANTAL = TV.FETCH_RESULT;                               
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ BE78000T';                     
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 0 TO 9;                                             
+            IF LÆST_EJDTYP(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED EJENDOMSTYPE ' !! HJ_CHAR1;          
+                  DETLIN1.ANTAL = LÆST_EJDTYP(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 0 TO 9;                                             
+            IF LÆST_BERGRL(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED BER.GRL.TYPE ' !! HJ_CHAR1;          
+                  DETLIN1.ANTAL = LÆST_BERGRL(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+                                                                        
+         /* FIA - HER udskrives de 4 nye tællere pr. 2021-06-17 */      
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 0 TO WS_MAX_VURMARK;                                
+            IF LÆST_VURMARK(INDEX).ANTAL > 0                            
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC2 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED EJERSKAB_VURMARK ' !! HJ_CHAR2;      
+                  DETLIN1.ANTAL = LÆST_VURMARK(INDEX).ANTAL;            
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         /* Index 2000 indeholder både OPL_VURDNY_DVURDÅR = 2000  */    
+         /* samt alle andre der enten ligger uden for intervallet */    
+         /* eller hvor feltet er blank.                           */    
+         DO INDEX = 2000 TO 2050;                                       
+            IF LÆST_DVURDÅR(INDEX).ANTAL > 0                            
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_CHAR_4_PIC = INDEX;                                
+                  IF INDEX > 2000                                       
+                  then                                                  
+                     DETLIN1.TEKST =                                    
+                     '      HERAF MED OPL_VURDNY_DVURDÅR ' !! HJ_CHAR_4;
+                  else                                                  
+                     DETLIN1.TEKST =                                    
+                     '      HERAF MED OPL_VURDNY_DVURDÅR ' !!           
+                     '0 ELLER UGYLDIG';                                 
+                                                                        
+                  DETLIN1.ANTAL = LÆST_DVURDÅR(INDEX).ANTAL;            
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 10 TO 12;                                           
+            IF LÆST_FORSIGT(INDEX).ANTAL > 0                            
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  IF INDEX = 10 THEN                                    
+                    HJ_CHAR1 = 'N'; /* Nej */                           
+                  ELSE IF INDEX = 11 THEN                               
+                    HJ_CHAR1 = 'J'; /* Ja */                            
+                  ELSE                                                  
+                    HJ_CHAR1 = 'U'; /* Ugyldig */                       
+                                                                        
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED EJERSKAB_FORSIGT_EVS ' !! HJ_CHAR1;  
+                  DETLIN1.ANTAL = LÆST_FORSIGT(INDEX).ANTAL;            
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 10 TO 12;                                           
+            IF LÆST_BESKAT(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  IF INDEX = 10 THEN                                    
+                    HJ_CHAR1 = 'N'; /* Nej */                           
+                  ELSE IF INDEX = 11 THEN                               
+                    HJ_CHAR1 = 'J'; /* Ja */                            
+                  ELSE                                                  
+                    HJ_CHAR1 = 'U'; /* Ugyldig */                       
+                                                                        
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED EJERSKAB_BESKAT ' !! HJ_CHAR1;       
+                  DETLIN1.ANTAL = LÆST_BESKAT(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+                                                                        
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 5000 TO 6000;                                       
+            IF LÆST_FEJLNR(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = LÆST_FEJLNR(INDEX).ANTAL;             
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.KUN_EJDTAB;                                 
+         DETLIN1.TEKST = 'HERAF INDIVIDER KUN TIL EVS-EJENDOMSTABEL  '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.SKRFEJL;                                    
+         DETLIN1.TEKST = 'ANTAL SKREVNE INDIV. TIL BN04000T B.E85110D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'ANTAL SKREVNE INDIVIDER           B.E85100D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 5000 TO 6000;                                       
+            IF SKR_FEJLNR(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC4 = INDEX;                                      
+                  DETLIN1.TEKST =                                       
+                  '      HERAF MED FEJLNR. ' !! HJ_CHAR4;               
+                  DETLIN1.ANTAL = SKR_FEJLNR(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+         DETLIN1.CCA = ZZIS1;                                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DO INDEX = 0 TO 12;                                            
+            IF SKR_EJBEVS(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN1.CCA = ZZWS1;                                  
+                  HJ_PIC1 = INDEX;                                      
+                  IF INDEX = 10                                         
+                  THEN                                                  
+                    HJ_CHAR1 = 'A';                                     
+                  IF INDEX = 11                                         
+                  THEN                                                  
+                    HJ_CHAR1 = 'B';                                     
+                  IF INDEX = 12                                         
+                  THEN                                                  
+                    HJ_CHAR1 = 'C';                                     
+                  DETLIN1.TEKST =                                       
+                     '      HERAF MED CEJBEVS ' !! HJ_CHAR1;            
+                  DETLIN1.ANTAL = SKR_EJBEVS(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN1,'01');                          
+               END;                                                     
+         END;                                                           
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(1).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(1).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '      HERAF ERKLÆRBARE';                      
+         DETLIN1.ANTAL = TAB_PERSON(1).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '      HERAF IKKE ERKLÆRBARE';                 
+         DETLIN1.ANTAL = TAB_PERSON(1).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(2).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(2).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(2).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(2).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(3).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(3).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(3).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(3).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(4).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(4).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(4).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(4).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(5).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(5).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(5).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(5).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(6).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(6).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(6).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(6).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(7).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(7).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(7).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(7).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(8).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(8).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(8).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(8).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(9).TEKST;                           
+         DETLIN1.ANTAL = TAB_PERSON(9).ANTAL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(9).ERKL;                            
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(9).EJERKL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(10).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(10).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(10).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(10).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(11).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(11).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(11).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(11).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(12).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(12).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(12).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(12).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(13).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(13).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(13).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(13).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(14).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(14).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(14).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(14).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(15).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(15).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(15).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(15).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = TAB_PERSON(16).TEKST;                          
+         DETLIN1.ANTAL = TAB_PERSON(16).ANTAL;                          
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.TEKST = '            HERAF ERKLÆRBARE';                
+         DETLIN1.ANTAL = TAB_PERSON(16).ERKL;                           
+         CALL ZZ20300 (DETLIN1,'01');                                   
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.TEKST = '            HERAF IKKE ERKLÆRBARE';           
+         DETLIN1.ANTAL = TAB_PERSON(16).EJERKL;                         
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = MAX_ANT_INDV;                                  
+         DETLIN1.TEKST = 'MAX. ANTAL EJENDOMME TIL SAMME PERSON';       
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN2.CCA = ZZWS2;                                           
+         DETLIN2.ANTAL = TV.FREMSKREVET;                                
+         DETLIN2.TEKST = 'ANTAL FREMSKREVNE EJENDOMME (EVS)          '; 
+         DETLIN2.BELØB = TV.EJDFREM;                     /*FORSKUD06 */ 
+         CALL ZZ20300 (DETLIN2,'01');                                   
+                                                                        
+         DETLIN2.CCA = ZZWS2;                                           
+         DETLIN2.ANTAL = TV.BEREGNET;                                   
+         DETLIN2.TEKST = 'ANTAL BEREGNEDE EJENDOMME (EVS)            '; 
+         DETLIN2.BELØB = TV.BEREJD;                       /*FORSKUD06*/ 
+         CALL ZZ20300 (DETLIN2,'01');                                   
+                                                                        
+         DETLIN2.CCA = ZZWS1;                                           
+         DETLIN2.ANTAL = TV.FANTSOM;                       /*FORSKUD06*/
+         DETLIN2.TEKST = '    HERAF HELÅRSSOMMERHUSE           ANTAL:'; 
+         DETLIN2.BELØB = 0;                                             
+         CALL ZZ20300 (DETLIN2,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BPROM1;                                     
+         DETLIN1.TEKST = '    HERAF MED 10 PROMILLE            ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BPROM2;                                     
+         DETLIN1.TEKST = '    HERAF MED 30 PROMILLE            ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BNEDSL1;                                    
+         DETLIN1.TEKST = '    HERAF MED 2 PROMILLE NEDSLAG     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BNEDSL2;                                    
+         DETLIN1.TEKST = '    HERAF MED 4 PROMILLE NEDSLAG     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.CPENSN6000;                                 
+         DETLIN1.TEKST = '    HERAF MED PENS NEDSLAG 6000 KR.  ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.CPENSN2000;                                 
+         DETLIN1.TEKST = '    HERAF MED PENS NEDSLAG 2000 KR.  ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL1;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 1           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL2;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 2           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL3;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 3           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL4;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 4           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL5;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 5           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL6;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 6           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.BER_BOPÆL0;                                 
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE BLANK/0     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.EJBEREGNET;                                 
+         DETLIN1.TEKST = 'ANTAL IKKE BEREGNEDE EJENDOMME (EVS)       '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL1;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 1           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL2;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 2           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL3;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 3           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL4;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 4           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL5;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 5           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL6;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE 6           ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1 = '';                                                  
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBER_BOPÆL0;                               
+         DETLIN1.TEKST = '    HERAF MED BOPÆLSKODE BLANK/0     ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /*      TERMINER LISTE                                               */
+ /*********************************************************************/
+ TERMINER_LISTE:  PROCEDURE (TEKST);                                    
+ DCL     TEKST            CHAR      (45);                               
+                                               /* Medd. til termine-  */
+ DCL     1 MEDDELELSE     STATIC,              /* ringslisten         */
+           3 MODULNAVN    CHAR      (07)    INIT ('BE85100'),           
+           3 FILLER1      CHAR      (01)    INIT (' '),                 
+           3 MEDDNR       PIC       '999'   INIT (6),                   
+           3 DATA         CHAR      (45)    INIT (' ');                 
+ DCL     MEDDELELSEN      CHAR      (56)    DEF MEDDELELSE;             
+                                                                        
+         MEDDELELSE.MEDDNR = MEDDELELSE.MEDDNR + 1;                     
+         MEDDELELSE.DATA   = TEKST;                                     
+                                                                        
+         CALL ZS30101 (2,                                               
+                       MEDDELELSEN,                                     
+                       2);                                              
+                                                                        
+ END TERMINER_LISTE;                                                    
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+ /*?*/   CALL OPTÆL_PERSON;                /* SIDSTE PERSON OPTÆLLES */ 
+ /*?*/   CALL SKRIV_TIL_BN04000T;          /* SIDSTE PERSON SKRIVES  */ 
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BE8510O),                                          
+               FILE (BE8511O);                                          
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+         %INCLUDE BE95100M; /* TJEK OM DET ER ADVIS      #6.1 */        
+         %INCLUDE BE85101M; /* SQL TIL LÆS AF TABELLER QEB 20170426*/   
+ END  BE85100;                                                          

@@ -1,0 +1,408 @@
+ PROCESS OPT(TIME);                                                     
+ BH50100: /* PROGRAM TIL DANNELSE AF MQ-TRANSAKTIONER                 */
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+         INIT ('COPYRIGHT KMD A/S');                                    
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL : PROGRAMMET LÆSER ET SEKVENTIELT DATASET OG SKRIVER         *
+ *                     TRANSAKTIONER PÅ MQ-KØ.                         *
+ *                                                                     *
+ * INPUT  : B.H50100D  TRANSAKTIONSDATA                                *
+ *                                                                     *
+ * OUTPUT : MQ-KØ                                                      *
+ *                                                                     *
+ * PROGRAMMØR: JØRGEN SAUGMANN, SAU      FEB 2016                      *
+ * STRUKTURER RULLET TIL SLUT 16 QEB                                   *
+ * STRUKTURER RULLET TIL SLUT 17 QEB                                   *
+ * STRUKTURER RULLET TIL SLUT 18 EBD                                   *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /**********************************************************************
+ *                       DECLARE AF REGISTRE                           *
+ **********************************************************************/
+ DCL     BH501I FILE RECORD INPUT;      /* TRANAKTIONSDATA            */
+ DCL     BH501K FILE RECORD INPUT;     /* STYREDATA                  */ 
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+                                                                        
+ /**********************************************************************
+ *       DECLARE AF INPUT                                              *
+ **********************************************************************/
+ DCL     1 STYR_REC,                                                    
+           2 CICSID      CHAR(8), /* ANGIVER HVILKEN CICS DER SKAL    */
+                                  /* KØRES OP IMOD, FX. CICSTA        */
+           2 FIL01       CHAR(1),                                       
+           2 SERVICEID   CHAR(24),                                      
+           2 FIL02       CHAR(1),                                       
+           2 TEST_SW     CHAR(1),                                       
+           2 FIL03       CHAR(1),                                       
+           2 FU          CHAR(44);/* FUTURE USE                       */
+                                                                        
+ DCL     BH501_AR        CHAR(1026) VAR;                                
+ DCL     1 BH501         BASED(ADDR(BH501_AR)),                         
+           2 LÆNGDE      BIN FIXED(15),                                 
+           2 DATA        CHAR(1024) VAR;                                
+ DCL     1 MAINDATA      BASED(ADDR(BH501.DATA)) UNAL,                  
+           3 INDVNR               BIN FIXED (15),                       
+           3 INDVLGD              BIN FIXED (15),                       
+           3 FELTLGD              BIN FIXED (15),                       
+           3 HEADER               CHAR(8),                              
+           3 DINDKAAR             CHAR(4); /* INDKOMSTÅR             */ 
+                                                                        
+ DCL     1 TRAN_811      BASED (ADDR(BH501.DATA)) UNAL,                 
+         %INCLUDE BQ18001N;;   /* FORESPØRGSEL MODTAGET FRA CSC       */
+ DCL     TRAN_811_OUT    BASED(ADDR(BH501.DATA))                        
+                         CHAR(STG(TRAN_811));                           
+ DCL     1 TRAN_814      BASED (ADDR(BH501.DATA)) UNAL,                 
+         %INCLUDE BQ18008N;;   /* OMPLACERINGSTRUKTUR CSC             */
+ DCL     TRAN_814_OUT    BASED(ADDR(BH501.DATA))                        
+                         CHAR(STG(TRAN_814));                           
+                                                                        
+ /*DCL     1 STYR_FELTER,                                               
+ /*        5 DCPRN          DEC FIXED (11), /* PERSONNUMMER           */
+ /*        5 DINDKAAR       BIN FIXED (15), /* INDKOMSTÅR             */
+ /*        5 EKOMNR         BIN FIXED (15), /* KOMMUNENUMMER          */
+ /*        5 EEJDNR         BIN FIXED (31), /* EJENDOMSNUMMER         */
+ /*        5 ELBNR          BIN FIXED (15), /* LØBENUMMER             */
+ /*        5 EGENNR         BIN FIXED (15), /* GENERATIONSNUMMER      */
+ /*        5 TYPE           BIN FIXED (15), /* TYPE                   */
+ /*        5 STATUS         BIN FIXED (15), /* STATUS                 */
+ /*        5 RETURKODE      BIN FIXED (15), /* RETURKODE              */
+ /*        5 RETURTEKST     CHAR      (70), /* RETURTEKST             */
+ /*        5 FEJLNR         PIC     '9999', /* FEJLNR                 */
+ /*        5 FEJLTEKST      CHAR      (70); /* FEJLTEKST              */
+                                                                        
+ /**********************************************************************
+ *       DECLARE AF BUILTIN'S                                          *
+ **********************************************************************/
+ DCL     (PLIDUMP,ADDR,SUBSTR,STG,BINARYVALUE,PROCNAME) BUILTIN;        
+                                                                        
+ /**********************************************************************
+ *       DECLARE AF ENTRY'S                                            *
+ **********************************************************************/
+ DCL     ZS61900         ENTRY;                     /* SSI DATO       */
+ DCL     ZS67000         ENTRY;                     /* DB2 FEJL       */
+ DCL     ZS30101         ENTRY;                     /* Standard Abend */
+ /**********************************************************************
+ *               DECLARE AF DIV. HJÆLPEFELTER                          *
+ **********************************************************************/
+ DCL     PLIXOPT         CHAR(40)       VAR STATIC                      
+                                        EXTERNAL INIT('NOTEST(ALL,,;)');
+ DCL     EOF_BH501K      BIT(1)         INIT('0'B);                     
+ DCL     EOF_BH501I      BIT(1)         INIT('0'B);                     
+ DCL     FORTSÆT         BIT(1)         INIT('1'B);                     
+ DCL     SW_FEJL         BIT(1)         INIT('0'B);                     
+ DCL     JA              BIT(1)         STATIC INIT ('1'B);             
+ DCL     NEJ             BIT(1)         STATIC INIT ('0'B);             
+ DCL     I               FIXED BIN(15)  INIT(0);                        
+ DCL     TESTSW          BIT(1)         INIT('0'B);                     
+                                                                        
+ DCL     TAL_INP         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_811         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_813         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_814         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_816         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_OUT         FIXED BIN(15)  INIT(0);                        
+ DCL     TAL_FEJL        FIXED BIN(15)  INIT(0);                        
+                                                                        
+ DCL     MODUL_NAVN      CHAR(8)    STATIC INIT ('YM43400');            
+ DCL     1 MEDD,                                                        
+           2 MODNAVN     CHAR(8)    INIT ('YM43400'),                   
+           2 MEDNR       CHAR(2)    INIT ('**'),                        
+           2 MEDTXT      CHAR(46);                                      
+ DCL     MEDDEL          CHAR(56);                                      
+                                                                        
+ DCL     IN_COUNTER      FIXED BIN(31)  INIT(0);                        
+                                                                        
+ DCL     PIC_4           PIC '(4)9';                                    
+ DCL     PIC_8           PIC '(8)9';                                    
+ DCL     UDDATO          CHAR(10);                                      
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       Declares af entry og kommunikationsarealer til MQAPI         * 
+ *********************************************************************/ 
+ DCL     YM40000             ENTRY;           /* MQ STD rutine       */ 
+ DCL     1 YM40000N,                                                    
+         %INCLUDE(YM40000N);                                            
+ DCL     1 YM40002N,                                                    
+         %INCLUDE(YM40002N);                                            
+                                                                        
+ DCL     MQ_OUTPUTAREA  CHAR(1024);  /* Areal hvorfra messages puttes */
+                                                                        
+ /**********************************************************************
+ *       HOUSEKEEPING                                                  *
+ **********************************************************************/
+         FETCH YM40000;                                                 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BH501I = NEJ;                                              
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+               ON ERROR SYSTEM;                                         
+               PUT SKIP LIST ('PROGRAMFEJL');                           
+               CALL PLIDUMP  ('SNHOB','MODUL BH97100');                 
+            END;                                                        
+                                                                        
+         ON ENDFILE (BH501K)                                            
+            EOF_BH501K = JA;                                            
+         ON ENDFILE (BH501I)                                            
+            EOF_BH501I = JA;                                            
+                                                                        
+ /**********************************************************************
+ *       HOVEDSTYRING                                                  *
+ **********************************************************************/
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** HOVEDSTYRING ***');          
+                                                                        
+         IF SKAF_STYRE_INFO() THEN DO;                                  
+            IF INIT_MQ() THEN DO;                                       
+               CALL LÆS_TRANSAKTIONER();                                
+               DO WHILE(FORTSÆT);                                       
+                  CALL DAN_TRANSAKTION();                               
+                  CALL SKRIV_MQ();                                      
+                  CALL LÆS_TRANSAKTIONER();                             
+               END;                                                     
+            END;                                                        
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /**********************************************************************
+ *       SKAF STYRE INFORMATIONER                                      *
+ *       CICS RETTET TIL BZ                                            *
+ **********************************************************************/
+ SKAF_STYRE_INFO: PROC RETURNS(BIT(1));                                 
+ DCL SSI_RTC           BIT(1)        INIT('0'B);                        
+                                                                        
+         OPEN FILE(BH501K) TITLE('BH50100K');                           
+         READ FILE(BH501K) INTO(STYR_REC);                              
+         IF ^EOF_BH501K THEN DO;                                        
+            IF STYR_REC.TEST_SW = 'J' THEN                              
+               TESTSW = JA;                                             
+            IF STYR_REC.CICSID = 'BZCICST3'                             
+             ! STYR_REC.CICSID = 'BZCICSTN'                             
+             ! STYR_REC.CICSID = 'BZCICSTS' THEN DO;                    
+               IF STYR_REC.SERVICEID > ' ' THEN DO;                     
+                  OPEN FILE (BH501I) TITLE ('BH50100I');                
+                  SSI_RTC = JA;                                         
+               END;                                                     
+               ELSE DO;                                                 
+                  PUT SKIP LIST('*** INGEN SERVICE ID ANGIVET');        
+               END;                                                     
+            END;                                                        
+            ELSE DO;                                                    
+               PUT SKIP LIST('*** ANGIVET CICS ID IKKE UNDERSTØTTET: '!!
+                             STYR_REC.CICSID);                          
+            END;                                                        
+         END;                                                           
+         IF TESTSW THEN DO;                                             
+            PUT SKIP LIST('*** '!!PROCNAME!!' ***');                    
+            PUT SKIP LIST(STYR_REC.CICSID!!'  '!!STYR_REC.SERVICEID!!   
+                          '  '!!STYR_REC.TEST_SW);                      
+         END;                                                           
+                                                                        
+         RETURN(SSI_RTC);                                               
+                                                                        
+ END SKAF_STYRE_INFO;                                                   
+                                                                        
+ /**********************************************************************
+ *       INITIER MQ                                                    *
+ **********************************************************************/
+ INIT_MQ: PROC RETURNS(BIT(1));                                         
+ DCL IM_RTC            BIT(1)         INIT('0'B);                       
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         YM40000N.KALD = MQ_START;                                      
+         CALL YM40000(YM40000N);                                        
+         CALL CHECK_YM40000_KALD;                                       
+         PUT SKIP LIST('YM43400 har connected til queue manager ..: ' !!
+                        YM40000N.MQ_MANAGER);                           
+                                                                        
+         YM40000N.KALD               = MQ_OPEN;                         
+         YM40000N.ADRESSE_TIL_OBJECT = ADDR(YM40002N);                  
+         YM40002N.MQ_SERVICE         = STYR_REC.SERVICEID;              
+         CALL YM40000(YM40000N);                                        
+         CALL CHECK_YM40000_KALD;                                       
+         PUT SKIP LIST('YM43400 har åbnet MQSeries køen ..........: ' !!
+                       YM40002N.QUEUE);                                 
+         PUT SKIP LIST('Følgende program-parametre er tilgængelige: ' !!
+                       YM40002N.PROGRAM_PARAMETRE);                     
+         IF FORTSÆT THEN                                                
+            IM_RTC = JA;                                                
+                                                                        
+         RETURN(IM_RTC);                                                
+                                                                        
+ END INIT_MQ;                                                           
+ /**********************************************************************
+ *       LÆS TRANSAKTIONER                                             *
+ **********************************************************************/
+ LÆS_TRANSAKTIONER: PROC;                                               
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         READ FILE(BH501I) INTO(BH501_AR);                              
+         IF ^EOF_BH501I THEN                                            
+            TAL_INP = TAL_INP + 1;                                      
+         ELSE DO;                                                       
+            FORTSÆT = NEJ;                                              
+            IF TAL_INP = 0 THEN                                         
+               PUT SKIP LIST('*** INGEN TRANAKTIONER ');                
+            IF TESTSW THEN PUT SKIP LIST('FORTSÆT='!!FORTSÆT!!'  '!!    
+                                         'TAL_INP='!!TAL_INP);          
+         END;                                                           
+                                                                        
+ END LÆS_TRANSAKTIONER;                                                 
+                                                                        
+ /**********************************************************************
+ *       DAN TRANSAKTIONER                                             *
+ **********************************************************************/
+ DAN_TRANSAKTION: PROC;                                                 
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         SELECT(MAINDATA.INDVNR);                                       
+            WHEN(811) DO;                                               
+               MQ_OUTPUTAREA = TRAN_811_OUT;                            
+               TAL_811       = TAL_811 + 1;                             
+            END;                                                        
+            WHEN(814) DO;                                               
+               MQ_OUTPUTAREA = TRAN_814_OUT;                            
+               TAL_814       = TAL_814 + 1;                             
+            END;                                                        
+            OTHERWISE DO;                                               
+               TAL_FEJL      = TAL_FEJL + 1;                            
+            END;                                                        
+         END;                                                           
+                                                                        
+ END DAN_TRANSAKTION;                                                   
+                                                                        
+ /**********************************************************************
+ *       SKRIV MQ KØ                                                   *
+ **********************************************************************/
+ SKRIV_MQ: PROC;                                                        
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         YM40000N.KALD       = MQ_PUT;                                  
+         YM40002N.BUFFER_LGD = MAINDATA.INDVLGD;                        
+         YM40002N.BUFFER_PTR = ADDR(MQ_OUTPUTAREA);                     
+         CALL YM40000(YM40000N);                                        
+         CALL CHECK_YM40000_KALD;                                       
+         TAL_OUT = TAL_OUT + 1;                                         
+                                                                        
+ END SKRIV_MQ;                                                          
+                                                                        
+ /**********************************************************************
+ *      UDSKRIV SQL FEJL                                               *
+ **********************************************************************/
+ /*                                                                     
+ SQL_FEJL: PROC;                                                        
+ DCL     PSQLKODE   PIC  '-----9';                                      
+ DCL     CSQLKODE   CHAR (6)      DEF PSQLKODE;                         
+                                                                        
+         EXEC SQL INCLUDE SQLCA;                                        
+                                                                        
+         EXEC SQL ROLLBACK;                                             
+         IF SQLCODE ^= 0                                                
+         THEN                                                           
+            CALL ZS67000 (SQLCA);                                       
+                                                                        
+         PSQLKODE = KOM_AREAL.SQLKODE;                                  
+                                                                        
+         CALL ZS30101(5,'BH50100  ** 250 - SQL_FEJL' !! CSQLKODE,2);    
+                                                                        
+ END SQL_FEJL;                                                          
+ */                                                                     
+ /**********************************************************************
+ *       AFSLUT PROGRAM                                                *
+ **********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         YM40000N.KALD = MQ_CLOSE;                                      
+         CALL YM40000(YM40000N);                                        
+         CALL CHECK_YM40000_KALD;                                       
+                                                                        
+         YM40000N.KALD = MQ_SLUT;                                       
+         CALL YM40000(YM40000N);                                        
+         CALL CHECK_YM40000_KALD;                                       
+                                                                        
+         PUT SKIP LIST ('BH50100 er afsluttet med følgende resultat:'); 
+         PUT SKIP LIST ('.. Antal læste records .....: ' !! IN_COUNTER);
+         PUT SKIP LIST ('.. Antal puttede messages ..: ' !!             
+                        YM40000N.COUNTER.PUT);                          
+         PUT SKIP LIST (' ');                                           
+                                                                        
+         PUT SKIP LIST('ANTAL LÆSTE PÅ FIL : '!!TAL_INP);               
+         PUT SKIP LIST('ANTAL 811          : '!!TAL_811);               
+         PUT SKIP LIST('ANTAL 813          : '!!TAL_813);               
+         PUT SKIP LIST('ANTAL 814          : '!!TAL_814);               
+         PUT SKIP LIST('ANTAL 816          : '!!TAL_816);               
+         PUT SKIP LIST('ANTAL SENDT TIL MQ : '!!TAL_OUT);               
+         PUT SKIP LIST('ANTAL FEJL         : '!!TAL_FEJL);              
+         PUT SKIP LIST(' ');                                            
+                                                                        
+         CLOSE FILE (BH501I),                                           
+               FILE (BH501K);                                           
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /********************************************************************* 
+ *       Check returkoder fra YM40000                                 * 
+ *********************************************************************/ 
+ CHECK_YM40000_KALD: PROC;                                              
+                                                                        
+         IF TESTSW THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');        
+         SELECT (YM40000N.API_RETURKODE);                               
+            WHEN (0)   DO;                                              
+               /* Kald er udført */                                     
+            END;                                                        
+            WHEN (800) DO;                                              
+               MEDDEL = MODUL_NAVN !!                                   
+                       '10 Ingen svar fra modtager program (heartbeat)';
+               CALL ZS30101(2,MEDDEL,2);                                
+               FORTSÆT = NEJ;                                           
+            END;                                                        
+            OTHERWISE  DO;                                              
+               CALL UDSKRIV_KMDMQ(YM40000N);                            
+               MEDDEL = MODUL_NAVN !!                                   
+                       '01 Fejl ifm. YM40000 MQ-kald ' !!               
+                       YM40000N.KALD;                                   
+               CALL ZS30101(2,MEDDEL,2);                                
+               PIC_4  = YM40000N.API_RETURKODE;                         
+               MEDDEL = MODUL_NAVN !!                                   
+                       '02 Returkode fra YM40000 = ' !! PIC_4;          
+               CALL ZS30101(2,MEDDEL,2);                                
+               PIC_8  = YM40000N.API_REASON;                            
+               MEDDEL = MODUL_NAVN !!                                   
+                       '03 Reasonkode fra YM40000 = ' !! PIC_8;         
+               CALL ZS30101(2,MEDDEL,2);                                
+               PIC_4  = YM40000N.MQ_REASON;                             
+               MEDDEL = MODUL_NAVN !!                                   
+                       '04 Reasonkode fra MQSeries = ' !! PIC_4;        
+               CALL ZS30101(2,MEDDEL,2);                                
+               MEDD.MEDTXT = ' 350 Fejl efter MQ-kald via YM40000';     
+               /* Hvis der køres under syncpoint kontrol vil     */     
+               /* nedenstående abend forårsage rollback af alle  */     
+               /* puttede og endnu ikke committede messages      */     
+               CALL ZS30101(5,MEDD,2);  /* Abend uden dump */           
+               FORTSÆT = NEJ;                                           
+            END;                                                        
+         END; /* End select */                                          
+                                                                        
+ END CHECK_YM40000_KALD;                                                
+                                                                        
+ /********************************************************************* 
+ *       Standard includes til MQAPI                                  * 
+ *********************************************************************/ 
+ %INCLUDE YM40010M;               /* UDSKRIV_KMDMQ                    */
+                                                                        
+ END BH50100;                                                           

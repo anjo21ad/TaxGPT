@@ -1,0 +1,604 @@
+  BH38700: PROCEDURE OPTIONS (MAIN);                                    
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2015                                       *
+ * PROGRAMNAVN: BH38700.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Finder hvem der er blevet opkrævet dobbelt EVS ifm.    *
+ *              ægtefælles død i løbet af året.                        *
+ *                                                                     *
+ * INDDATA:     BH38701I - Beregningsbåndet.                           *
+ * UDDATA:      BQ30000T/BQ31000T - EVS PERSONTABEL.                   *
+ *              BH35001Y          - KONTROLLISTE.                      *
+ *                                                                     *
+ * KONSTRUKTØR: Claus Marcussen, CMC, KMO               December 2015. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2015');            
+                                                                        
+ DCL     BH38700I FILE RECORD INPUT;     /* Parm                      */
+ DCL     BH38701I FILE RECORD INPUT;     /* Beregningsbåndet          */
+ DCL     BH38702O FILE RECORD OUTPUT;    /* CSV Output                */
+ DCL     BH38703O FILE RECORD OUTPUT;    /* Rettede CPRNR             */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+                                                                        
+ DCL     BH945_BEREGN    CHAR      (6000) VAR;                          
+ DCL     1 BH945_B       BASED     (ADDR(BH945_BEREGN)),                
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90000N;;                                          
+ DCL     1 BH94599_B     BASED     (ADDR(BH945_BEREGN)),                
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90099N;                                           
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */        
+ EXEC SQL INCLUDE BQ30000K;     /* */                                   
+ EXEC SQL INCLUDE BQ31000K;     /* */                                   
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL ZS30101        ENTRY;                                              
+ DCL ZS67000        ENTRY;                                              
+ DCL ZS61900        ENTRY;                        /* KST/SSI INFO */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL JA             BIT(1)           VALUE('1'B);                       
+ DCL NEJ            BIT(1)           VALUE('0'B);                       
+                                                                        
+ DCL FELTKODE_CSLET  FIXED BIN(15)   INIT(89);                          
+ DCL FELTKODE_DHENVN FIXED BIN(15)   INIT(100);                         
+                                                                        
+ DCL PARM_EOF       BIT(1)           INIT(NEJ);                         
+ DCL BH38701I_EOF   BIT(1)           INIT(NEJ);                         
+ DCL SLUT_FEJLRAMTE BIT(1)           INIT(NEJ);                         
+                                                                        
+ DCL OPDAT_SW       BIT(1)           INIT(NEJ);                         
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PARAMETER                                         */
+ /*********************************************************************/
+ DCL     IPARM    FILE  RECORD  INPUT;                                  
+ DCL     1 PARMI,                                                       
+          2 KØRSW    CHAR(1),                                           
+          2 FILLER   CHAR(79);                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+ DCL     (ADDR,DATETIME,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆSCURSOR      BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTPÅBEREGN       BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTEJBEREGN       BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTEJDATO         BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTTIDLIGERE      BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTRETTET         BIN FIXED (31) INIT(0);/*                    */
+                                                                        
+ DCL   ÆGTEFÆLLE_CPRNR   PIC '9999999999';                              
+                                                                        
+ DCL   ARRAY_MIN_ÅR      FIXED BIN(15);                                 
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN1          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 *           CHAR (66);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR(1),                                       
+           2 CPRNR       PIC '9999999999',                              
+           2 *           CHAR(2),                                       
+           2 DHENV       PIC '9999999999',                              
+           2 *           CHAR(2),                                       
+           2 KOMNR       PIC 'ZZZ9',                                    
+           2 *           CHAR(2),                                       
+           2 EEJDNR      PIC 'ZZZZZZ9',                                 
+           2 *           CHAR(2),                                       
+           2 ELBNR       PIC 'ZZ9',                                     
+           2 *           CHAR(2),                                       
+           2 TEXT        CHAR(88);                                      
+                                                                        
+ %INCLUDE ZZ20301M;                          /* PRINT STYREKARAKTERER */
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+    ON ENDFILE (IPARM)                                                  
+       PARM_EOF = JA;                                                   
+                                                                        
+    ON ENDFILE (BH38701I)                                               
+       BH38701I_EOF = JA;                                               
+                                                                        
+    ON ERROR                                                            
+       BEGIN;                                                           
+          ON ERROR SYSTEM;                                              
+          FLUSH FILE (*);                                               
+          PUT SKIP LIST ('PROGRAMFEJL');                                
+          CALL PLIDUMP  ('SBHO','MODUL BH38700');                       
+       END;                                                             
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+    CALL INITIERING();                                                  
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+    CALL OPEN_CURSOR();                                                 
+    CALL LÆS_CURSOR();                                                  
+    CALL LÆS_BEREGN();                                                  
+                                                                        
+    DO WHILE (^SLUT_FEJLRAMTE);                                         
+       ÆGTEFÆLLE_CPRNR = DCLGENBQ31000T.INDHOLD_D;                      
+       SELECT;                                                          
+          WHEN ( BH945_B.SORT_CPR < DCLGENBQ31000T.INDHOLD_D &          
+                ^BH38701I_EOF)                                          
+             DO;                                                        
+                CALL LÆS_BEREGN();                                      
+             END;                                                       
+          WHEN ( BH945_B.SORT_CPR = DCLGENBQ31000T.INDHOLD_D )          
+             DO;                                                        
+                ANTPÅBEREGN = ANTPÅBEREGN + 1;                          
+                CALL BEHANDEL_EVT_FEJL();                               
+                CALL LÆS_CURSOR();                                      
+             END;                                                       
+          WHEN ( BH945_B.SORT_CPR > DCLGENBQ31000T.INDHOLD_D )          
+             DO;                                                        
+                ANTEJBEREGN = ANTEJBEREGN + 1;                          
+                CALL SKRIV_KONTROL( DCLGENBQ30000T.DCPRN                
+                                  , ÆGTEFÆLLE_CPRNR                     
+                                  , DCLGENBQ30000T.EKOMNR               
+                                  , DCLGENBQ30000T.EEJDNR               
+                                  , DCLGENBQ30000T.ELBNR                
+                                  , 'Ikke fundet på beregningsbånd');   
+                CALL LÆS_CURSOR();                                      
+             END;                                                       
+       END;                                                             
+    END;                                                                
+                                                                        
+    CALL CLOSE_CURSOR();                                                
+                                                                        
+    CALL AFSLUT;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ INITIERING: PROC();                                                    
+                                                                        
+ DCL CSV_TEXT       CHAR(200) VAR;                                      
+                                                                        
+    CALL SKAF_PARM();                                                   
+                                                                        
+    CALL ZZ20390('*OPEN','BH38701Y');          /* ÅBEN KONTROLLISTE */  
+    LINIE = ZZWS3 !! ' EVS 2015 Dobbelt uskiftet bo - D74'              
+                  !! '                          ' !! 'DATO: '           
+                  !!   DATETIME('YYYY-MM-DD');                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS3 !! ' PROGRAMID: BH38700 ';                            
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZS61900;                               /* KST/SSI INFO   */    
+                                                                        
+    OPEN FILE (BH38701I) TITLE ('BH38701I');                            
+    OPEN FILE (BH38702O) TITLE ('BH38702O');                            
+    OPEN FILE (BH38703O) TITLE ('BH38703O');                            
+                                                                        
+    CSV_TEXT = '"Cprnr";"Henvisnr.";"Komunnenummer";' !!                
+               '"Ejendomsnr";"Løbenr";"Bemærkning"';                    
+    WRITE FILE (BH38702O) FROM(CSV_TEXT);                               
+                                                                        
+    ARRAY_MIN_ÅR = LBOUND(BH945_B.HIST_OPL.DCIÆN);                      
+                                                                        
+ END INITIERING;                                                        
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ SKAF_PARM: PROC;                                                       
+                                                                        
+    OPEN FILE(IPARM) TITLE('BH38700I');                                 
+    READ FILE(IPARM) INTO(PARMI);                                       
+    IF ^PARM_EOF THEN DO;                                               
+       IF PARMI.KØRSW ^= ' ' THEN                                       
+          OPDAT_SW = JA;                                                
+       ELSE                                                             
+          OPDAT_SW = NEJ;                                               
+    END;                                                                
+    ELSE DO;                                                            
+       OPDAT_SW = NEJ;                                                  
+    END;                                                                
+                                                                        
+    IF OPDAT_SW THEN                                                    
+       PUT SKIP LIST('Der sker opdatering');                            
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering');                               
+                                                                        
+    CLOSE FILE(IPARM);                                                  
+                                                                        
+ END SKAF_PARM;                                                         
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ BEHANDEL_EVT_FEJL: PROC();                                             
+                                                                        
+ DCL  ANV_DCIÆN       FIXED(9);                                         
+                                                                        
+    EXEC SQL                                                            
+        SAVEPOINT ALT_OK ON ROLLBACK RETAIN CURSORS;                    
+                                                                        
+    ANV_DCIÆN = BH945_B.HIST_OPL.DCIÆN(ARRAY_MIN_ÅR + 1);               
+                                                                        
+    IF ANV_DCIÆN >= 20150101 & ANV_DCIÆN <= 20150122 THEN               
+    DO;                                                                 
+       IF CSLET_FINDES() THEN                                           
+       DO;                                                              
+          ANTTIDLIGERE = ANTTIDLIGERE + 1;                              
+          CALL SKRIV_KONTROL( DCLGENBQ30000T.DCPRN                      
+                            , ÆGTEFÆLLE_CPRNR                           
+                            , DCLGENBQ30000T.EKOMNR                     
+                            , DCLGENBQ30000T.EEJDNR                     
+                            , DCLGENBQ30000T.ELBNR                      
+                            , 'Er tidligere rettet');                   
+       END;                                                             
+       ELSE DO;                                                         
+          CALL GENOPRET_FEJLEN();                                       
+       END;                                                             
+    END;                                                                
+    ELSE DO;                                                            
+       ANTEJDATO = ANTEJDATO + 1;                                       
+       CALL SKRIV_KONTROL( DCLGENBQ30000T.DCPRN                         
+                         , ÆGTEFÆLLE_CPRNR                              
+                         , DCLGENBQ30000T.EKOMNR                        
+                         , DCLGENBQ30000T.EEJDNR                        
+                         , DCLGENBQ30000T.ELBNR                         
+                         , 'DCÆIN ikke i interval = ' !! ANV_DCIÆN);    
+    END;                                                                
+                                                                        
+    IF ^OPDAT_SW THEN                                                   
+    DO;                                                                 
+       EXEC SQL                                                         
+          ROLLBACK TO SAVEPOINT ALT_OK;                                 
+    END;                                                                
+                                                                        
+ END BEHANDEL_EVT_FEJL;                                                 
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ CSLET_FINDES: PROC()     RETURNS(BIT(1));                              
+                                                                        
+ DCL  DUMMY_FELT   CHAR(1);                                             
+                                                                        
+    EXEC SQL                                                            
+       SELECT DISTINCT 'X'                                              
+       INTO :DUMMY_FELT                                                 
+       FROM BQ31000T                                                    
+       WHERE DINDKAAR    = :DCLGENBQ30000T.DINDKAAR                     
+         AND DCPRN       = :DCLGENBQ30000T.DCPRN                        
+         AND EKOMNR      = :DCLGENBQ30000T.EKOMNR                       
+         AND EEJDNR      = :DCLGENBQ30000T.EEJDNR                       
+         AND FELTKODE    = :FELTKODE_CSLET                              
+       WITH UR;                                                         
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          RETURN(JA);                                                   
+       END;                                                             
+    WHEN (100)                                                          
+       DO;                                                              
+          RETURN(NEJ);                                                  
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED SELECT CSLET_FINDES');                
+       END;                                                             
+    END;                                                                
+                                                                        
+ END CSLET_FINDES;                                                      
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ GENOPRET_FEJLEN: PROC();                                               
+                                                                        
+ DCL  ANV_DCIÆN       FIXED(9);                                         
+                                                                        
+    EXEC SQL                                                            
+       SELECT ELBNR                                                     
+            , EGENNR                                                    
+       INTO   :DCLGENBQ30000T.ELBNR                                     
+            , :DCLGENBQ30000T.EGENNR                                    
+       FROM BQ30000T                                                    
+       WHERE DINDKAAR    = :DCLGENBQ30000T.DINDKAAR                     
+         AND DCPRN       = :DCLGENBQ30000T.DCPRN                        
+         AND EKOMNR      = :DCLGENBQ30000T.EKOMNR                       
+         AND EEJDNR      = :DCLGENBQ30000T.EEJDNR                       
+       ORDER BY ELBNR DESC                                              
+              , EGENNR DESC                                             
+       FETCH FIRST 1 ROW ONLY;                                          
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED FETCH MAX BQ31000T');                 
+       END;                                                             
+    END;                                                                
+                                                                        
+    EXEC SQL                                                            
+       INSERT INTO BQ31000T                                             
+              ( DINDKAAR                                                
+              , EKOMNR                                                  
+              , EEJDNR                                                  
+              , DCPRN                                                   
+              , ELBNR                                                   
+              , EGENNR                                                  
+              , FELTKODE                                                
+              , FELTKODETYPE                                            
+              , INDHOLD_C                                               
+              , INDHOLD_D )                                             
+       VALUES ( :DCLGENBQ30000T.DINDKAAR                                
+              , :DCLGENBQ30000T.EKOMNR                                  
+              , :DCLGENBQ30000T.EEJDNR                                  
+              , :DCLGENBQ30000T.DCPRN                                   
+              , :DCLGENBQ30000T.ELBNR                                   
+              , :DCLGENBQ30000T.EGENNR                                  
+              , :FELTKODE_CSLET                                         
+              , 3                                                       
+              , '1'                                                     
+              , 0 );                                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          ANTRETTET = ANTRETTET + 1;                                    
+          CALL SKRIV_RETTET_CPRNR(DCLGENBQ30000T.DCPRN);                
+          CALL SKRIV_KONTROL( DCLGENBQ30000T.DCPRN                      
+                            , ÆGTEFÆLLE_CPRNR                           
+                            , DCLGENBQ30000T.EKOMNR                     
+                            , DCLGENBQ30000T.EEJDNR                     
+                            , DCLGENBQ30000T.ELBNR                      
+                            , 'Rettelse foretaget');                    
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED INSERT BQ31000T');                    
+       END;                                                             
+    END;                                                                
+                                                                        
+ END GENOPRET_FEJLEN;                                                   
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ SKRIV_KONTROL: PROC(DCPRN, DHENV, EKOMNR, EEJDNR, ELBNR, TEXT_MEDD);   
+                                                                        
+ DCL   DCPRN                 DECIMAL(11,0);                             
+ DCL   DHENV                 DECIMAL(11,0);                             
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+ DCL   ELBNR                 BIN FIXED(15);                             
+ DCL   TEXT_MEDD             CHAR(88);                                  
+ DCL   CSV_TEXT              CHAR(200) VAR;                             
+                                                                        
+    LINIE       = ZZWS2;                                                
+    LIN2.CPRNR  = DCPRN;                                                
+    LIN2.DHENV  = DHENV;                                                
+    LIN2.KOMNR  = EKOMNR;                                               
+    LIN2.EEJDNR = EEJDNR;                                               
+    LIN2.ELBNR  = ELBNR;                                                
+    LIN2.TEXT   = TEXT_MEDD;                                            
+    CALL ZZ20300(LINIE,'01');                                           
+                                                                        
+    CSV_TEXT = '"' !! DCPRN !! '";"' !! DHENV!! '";"' !! EKOMNR !!      
+               '";"' !! EEJDNR !! '";"' !! ELBNR !!                     
+               '";"' !! TEXT_MEDD !! '"';                               
+    WRITE FILE (BH38702O) FROM(CSV_TEXT);                               
+                                                                        
+ END SKRIV_KONTROL;                                                     
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ SKRIV_RETTET_CPRNR: PROC(DCPRN);                                       
+                                                                        
+ DCL   DCPRN                 PIC '9999999999';                          
+                                                                        
+    WRITE FILE (BH38703O) FROM(DCPRN);                                  
+                                                                        
+ END SKRIV_RETTET_CPRNR;                                                
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ OPEN_CURSOR: PROC;                                                     
+                                                                        
+    EXEC SQL DECLARE ENKE_CURSOR CURSOR WITH HOLD FOR                   
+       SELECT DISTINCT                                                  
+              T1.DINDKAAR                                               
+            , T1.DCPRN                                                  
+            , T1.EKOMNR                                                 
+            , T1.EEJDNR                                                 
+            , T1.ELBNR                                                  
+            , T1.EGENNR                                                 
+            , T1.CDATAFRA                                               
+            , T2.INDHOLD_D AS DHENV                                     
+       FROM BQ30000T T1                                                 
+          , BQ31000T T2                                                 
+       WHERE T1.DINDKAAR = 2014                                         
+         AND T1.CDATAFRA = '4'                                          
+         AND T1.EGENNR = 1                                              
+         AND T1.DINDKAAR = T2.DINDKAAR                                  
+         AND T1.DCPRN = T2.DCPRN                                        
+         AND T1.EKOMNR = T2.EKOMNR                                      
+         AND T1.EEJDNR = T2.EEJDNR                                      
+         AND T1.ELBNR = T2.ELBNR                                        
+         AND T1.EGENNR = T2.EGENNR                                      
+         AND T2.FELTKODE = :FELTKODE_DHENVN                             
+         AND T2.INDHOLD_D <> 0                                          
+       ORDER BY DHENV                                                   
+       WITH UR;                                                         
+                                                                        
+    EXEC SQL                                                            
+       OPEN ENKE_CURSOR;                                                
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0);                                                           
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED OPEN CURSOR');                        
+       END;                                                             
+    END;                                                                
+                                                                        
+ END OPEN_CURSOR;                                                       
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ LÆS_CURSOR: PROC;                                                      
+                                                                        
+    EXEC SQL                                                            
+       FETCH ENKE_CURSOR                                                
+       INTO  :DCLGENBQ30000T.DINDKAAR                                   
+           , :DCLGENBQ30000T.DCPRN                                      
+           , :DCLGENBQ30000T.EKOMNR                                     
+           , :DCLGENBQ30000T.EEJDNR                                     
+           , :DCLGENBQ30000T.ELBNR                                      
+           , :DCLGENBQ30000T.EGENNR                                     
+           , :DCLGENBQ30000T.CDATAFRA                                   
+           , :DCLGENBQ31000T.INDHOLD_D;                                 
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          ANTLÆSCURSOR = ANTLÆSCURSOR + 1;                              
+       END;                                                             
+    WHEN (100)                                                          
+       DO;                                                              
+          SLUT_FEJLRAMTE = JA;                                          
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED FETCH CURSOR');                       
+       END;                                                             
+    END;                                                                
+                                                                        
+ END LÆS_CURSOR;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ CLOSE_CURSOR: PROC;                                                    
+                                                                        
+    EXEC SQL                                                            
+       CLOSE ENKE_CURSOR;                                               
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0);                                                           
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED CLOSE CURSOR');                       
+       END;                                                             
+    END;                                                                
+                                                                        
+ END CLOSE_CURSOR;                                                      
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ LÆS_BEREGN: PROC;                                                      
+                                                                        
+    READ FILE(BH38701I) INTO (BH945_BEREGN);                            
+                                                                        
+    IF BH38701I_EOF THEN                                                
+    DO;                                                                 
+       BH945_B.SORT_CPR = 99999999999;                                  
+    END;                                                                
+                                                                        
+ END LÆS_BEREGN;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ SQL_FEJL: PROC(FEJLTEKST);                                             
+                                                                        
+ DCL FEJLTEKST      CHAR (40);                                          
+ DCL ABENDMEDD      CHAR (56)        INIT(' ');                         
+                                                                        
+    PUT SKIP LIST('SQL_FEJL.....');                                     
+    PUT SKIP LIST('SQLCA',SQLCA);                                       
+    CALL ZS67000(SQLCA);                                                
+    ABENDMEDD =  'BH38700 ** 550 SQLFEJL: ' !! FEJLTEKST;               
+    CALL ZS30101 (5, ABENDMEDD, 2);                                     
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL LÆSTE RECORDS BQ30/BQ31..................';     
+    LIN1.ANT   = ANTLÆSCURSOR;                                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJ PÅ BEREGNINGSBÅND.....................';     
+    LIN1.ANT   = ANTEJBEREGN;                                           
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL FUNDET PÅ PÅ BEREGNINGSBÅND..............';     
+    LIN1.ANT   = ANTPÅBEREGN;                                           
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJ I DATOINTERVAL........................';     
+    LIN1.ANT   = ANTEJDATO;                                             
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL RETTET TIDLIGERE.........................';     
+    LIN1.ANT   = ANTTIDLIGERE;                                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL RETTELSER FORETAGET......................';     
+    LIN1.ANT   = ANTRETTET;                                             
+    CALL ZZ20300(LINIE,'01');                                           
+                                                                        
+    CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */     
+                                                                        
+    CLOSE FILE (BH38702O);                                              
+    CLOSE FILE (BH38703O);                                              
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+                                                                        
+ END BH38700;                                                           

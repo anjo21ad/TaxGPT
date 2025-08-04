@@ -1,0 +1,444 @@
+ BH93800: PROC OPTIONS (MAIN) REORDER;                                  
+ /********************************************************************* 
+ *                                                                    * 
+ * INDATA :     CSR-P FIL FRA CSC                                     * 
+ *                                                                    * 
+ * UDDATA :     TABEL: BQ70000T                                       * 
+ *                     BQ71000T                                       * 
+ *                                                                    * 
+ *  UDVIKLER:   LARS KAAE HARRITSHØJ                                  * 
+ *                                                                    * 
+ *  OPRETTET:   11-07-2012                                            * 
+ *                                                                    * 
+ *  Rettet:     25-01-2022 Per Brunk                                  * 
+ *              Løbende supplement:                                   * 
+ *              TIL_EVS_AAR og AFVIKLINGS_ID på BQ70000T og BQ71000T  * 
+ *  SLUT 2024   PEN                                     12-02-2024    * 
+ *              Logik rettet omkring recordtyper - Header/Trailer     * 
+ *              valideres nu.                                         * 
+ *              Fejler nu ved SQL fejl fra insert på BE70000T/BE71000T* 
+ *              Trailer indsættes ikke længere som CPR på tabeller.   * 
+ *  SLUT 2024   JJJ BH55600M erstatter BH55300M         20-06-2024    * 
+ /********************************************************************/ 
+         DEFAULT RANGE (*) STATIC;                                      
+                                                                        
+ /*********************************************************************/
+ /*      FILE DECLARE                                                 */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH938I   FILE RECORD INPUT;                                    
+                                                                        
+ DCL     KOMREC     CHAR      (796);                                    
+                                                                        
+ DCL     1 DKOM     BASED     (ADDR(KOMREC)),                           
+         % INCLUDE BH93800N;                                            
+                                                                        
+ DCL     TAEL_ANTAL_HIST FIXED DEC (7) INIT(0);                         
+ DCL     HJAELP_ANTAL_HIST FIXED DEC (7) INIT(0);                       
+ DCL     TÆL_DETAIL_LÆST       BIN FIXED(31) INIT(0);                   
+ DCL     TÆL_HIST       BIN FIXED(31) INIT(0);                          
+ DCL     TÆL_FEJL_BQ70  BIN FIXED(31) INIT(0);                          
+ DCL     TÆL_FEJL_BQ71  BIN FIXED(31) INIT(0);                          
+                                                                        
+ DCL     SWEOF           BIT       (1) INIT ('0'B);  /* END OF FILE   */
+                                                                        
+ DCL     PUT_SKIP        BIT       (1) INIT ('0'B);  /* PUT SKIP LOG  */
+ DCL     1 CONSTANTS,                                                   
+           2 DKOM_0068_HEADER     PIC '(4)9' VALUE (0),                 
+           2 DKOM_0068_DETAIL     PIC '(4)9' VALUE (68),                
+           2 DKOM_0068_TRAILER    PIC '(4)9' VALUE (9999),              
+           2 TRUE                 BIT(1)     VALUE ('1'B),              
+           2 FALSE                BIT(1)     VALUE ('0'B);              
+                                                                        
+ DCL     SW_0068_HEADER_RECEIVED  BIT       (1) INIT ('0'B);            
+ DCL     SW_0068_TRAILER_RECEIVED BIT       (1) INIT ('0'B);            
+                                                                        
+ DCL     ZS30101         ENTRY;              /* ABENDRUTINE          */ 
+ DCL     ABENDKODE    FIXED       (2) INIT(5);                          
+ DCL     1 ABENDMEDD,                                                   
+           2 ABENDMODUL CHAR      (7) INIT ('BH93800'),                 
+           2 ABENDFILL1 CHAR      (1) INIT (' '),                       
+           2 ABENDMEDNR CHAR      (2) INIT ('**'),                      
+           2 ABENDFILL2 CHAR      (1) INIT (' '),                       
+           2 ABENDTXT   CHAR      (45)INIT (' ');                       
+ DCL     ABENDRTKODE    FIXED     (1)    INIT (2);                      
+ DCL     ZS67000         ENTRY;                       /* SQL-ABEND    */
+                                                                        
+ EXEC SQL INCLUDE BQ70000T;                                             
+ EXEC SQL INCLUDE BQ71000T;                                             
+ EXEC SQL INCLUDE SQLCA;                                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF DATO -RUTINE                                      */
+ /*********************************************************************/
+                                                                        
+         %INCLUDE ZS38000N;                                             
+         %INCLUDE ZS38002N;                                             
+                                                                        
+ /********************************************************************* 
+ *                                                                    * 
+ *                  DIV DCL.                                          * 
+ *                                                                    * 
+ *********************************************************************/ 
+ DCL    (ADDR,                                                          
+         TRANSLATE,                                                     
+         SUBSTR)    BUILTIN;                                            
+                                                                        
+ DCL     1 BH55600M,                                                    
+           %INCLUDE BH55600M;                                           
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /*      HOUSE-KEEPING                                                */
+ /*********************************************************************/
+                                                                        
+         OPEN FILE (BH938I) TITLE ('BH93800I');                         
+                                                                        
+         ON ENDFILE (BH938I) SWEOF = '1'B;                              
+                                                                        
+         SELECT (BH55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SLUT kørsel');         
+              END;                                                      
+            WHEN ('OPRET_EVS_FORSK')                                    
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS FORSKUD kørsel');      
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                 PUT SKIP LIST ('Afviklings_id skal være ' !!           
+                                'OPRET_EVS_FORSK eller OPRET_EVS_SLUT');
+              END;                                                      
+         END;                                                           
+                                                                        
+         SELECT (BH55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BH55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BH55600M.FORSKÅR;                    
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BH55600M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BH55600M.SLUTÅR;                     
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+                                                                        
+         END; /* select */                                              
+                                                                        
+         PUT SKIP LIST('TIL_EVS_AAR: '!! WS_TIL_EVS_AAR);               
+                                                                        
+ /*********************************************************************/
+ /*                                 MAIN                              */
+ /*********************************************************************/
+       READ FILE (BH938I) INTO (KOMREC); /* LÆS */                      
+       TÆL_DETAIL_LÆST = 0;                                             
+                                                                        
+       DO WHILE (^SWEOF);                                               
+         SELECT(DKOM.INDVNR);                                           
+           WHEN(DKOM_0068_HEADER) DO;                                   
+             IF SW_0068_HEADER_RECEIVED = TRUE THEN DO;                 
+                ABENDTXT = '102 HEADER allerede indlæst';               
+                CALL PROGRAM_FEJL;                                      
+             END;                                                       
+             ELSE                                                       
+               SW_0068_HEADER_RECEIVED = TRUE;                          
+           END;                                                         
+           WHEN(DKOM_0068_TRAILER) DO;                                  
+             SELECT;                                                    
+               WHEN(SW_0068_TRAILER_RECEIVED = TRUE) DO;                
+                 ABENDTXT = '103 TRAILER allerede indlæst';             
+                 CALL PROGRAM_FEJL;                                     
+               END;                                                     
+               WHEN(SW_0068_HEADER_RECEIVED = FALSE) DO;                
+                 ABENDTXT = '104 TRAILER modtaget ingen HEADER';        
+                 CALL PROGRAM_FEJL;                                     
+               END;                                                     
+               OTHERWISE                                                
+                 SW_0068_TRAILER_RECEIVED = TRUE;                       
+             END;                                                       
+           END;                                                         
+           WHEN(DKOM_0068_DETAIL) DO;                                   
+             SELECT;                                                    
+               WHEN(SW_0068_TRAILER_RECEIVED = TRUE) DO;                
+                 ABENDTXT = '105 DETAIL modtaget - TRAILER indlæst';    
+                 CALL PROGRAM_FEJL;                                     
+               END;                                                     
+               WHEN(SW_0068_HEADER_RECEIVED = FALSE) DO;                
+                 ABENDTXT =                                             
+                     '106 DETAIL modtaget - ingen HEADER indlæst';      
+                 CALL PROGRAM_FEJL;                                     
+               END;                                                     
+               OTHER DO;                                                
+                 TÆL_DETAIL_LÆST += 1;                                  
+                 CALL CTRL_0068_DETAIL;                                 
+               END;                                                     
+             END;                                                       
+           END;                                                         
+           OTHERWISE DO;                                                
+             ABENDTXT = '107 Forket recordtype modtaget:'!!             
+                        DKOM.INDVNR;                                    
+             CALL PROGRAM_FEJL;                                         
+           END;                                                         
+         END;                                                           
+         READ FILE (BH938I) INTO (KOMREC); /* NEXT */                   
+       END;    /*DO WHILE*/                                             
+                                                                        
+                                                                        
+       PUT SKIP LIST('ANTAL PERSONER LÆST:   ',TÆL_DETAIL_LÆST);        
+       PUT SKIP LIST('ANTAL HISTORIKER LÆST: ',TÆL_HIST);               
+       PUT SKIP LIST('ANTAL_SQLFEJL BQ70000T:',TÆL_FEJL_BQ70);          
+       PUT SKIP LIST('ANTAL_SQLFEJL BQ71000T:',TÆL_FEJL_BQ71);          
+       CLOSE FILE (BH938I);                                             
+ /**********************************************************/           
+ /* CONTROL 0068 DETAIL                                    */           
+ /**********************************************************/           
+ CTRL_0068_DETAIL:PROC;                                                 
+                                                                        
+       TAEL_ANTAL_HIST = 0;                                             
+       HJAELP_ANTAL_HIST = 0;                                           
+       CALL INSERT_BQ70000T;                                            
+                                                                        
+       IF HJAELP_ANTAL_HIST > 0  & SQLCODE = 0                          
+         THEN                                                           
+         DO;                                                            
+         DO WHILE (TAEL_ANTAL_HIST < HJAELP_ANTAL_HIST);                
+             TAEL_ANTAL_HIST = TAEL_ANTAL_HIST + 1;                     
+             TÆL_HIST = TÆL_HIST + 1;                                   
+             CALL INSERT_BQ71000T;                                      
+         END; /*DO WHILE ANTAL_HIST */                                  
+       END;   /*DO IF */                                                
+                                                                        
+                                                                        
+ END CTRL_0068_DETAIL;                                                  
+                                                                        
+ /**********************************************************/           
+ /* INSERT PÅ TABEL BQ70000T                               */           
+ /**********************************************************/           
+ INSERT_BQ70000T:PROC;                                                  
+                                                                        
+   DCLBQ70000T = '';                                                    
+                                                                        
+   DCLBQ70000T.PNR          = DKOM.PNR;                                 
+   DCLBQ70000T.TIL_EVS_AAR   = WS_TIL_EVS_AAR;                          
+   DCLBQ70000T.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                     
+   DCLBQ70000T.AEGTFPNR     = DKOM.AEGTFPNR;                            
+   DCLBQ70000T.CIVISKOD     = DKOM.CIVISKOD;                            
+   DCLBQ70000T.CVISFRADTO   = SUBSTR(DKOM.CIVISFRADTO,1,4) !!           
+                              SUBSTR(DKOM.CIVISFRADTO,6,2) !!           
+                              SUBSTR(DKOM.CIVISFRADTO,9,2);             
+   DCLBQ70000T.ADRFRADTO    = SUBSTR(DKOM.ADRFRADTO,1,4) !!             
+                              SUBSTR(DKOM.ADRFRADTO,6,2) !!             
+                              SUBSTR(DKOM.ADRFRADTO,9,2);               
+   DCLBQ70000T.BOPAEKMNR    = DKOM.BOPAEKMNR;                           
+   DCLBQ70000T.VEJKOD       = DKOM.VEJKOD;                              
+   DCLBQ70000T.HUSNR        = DKOM.HUSNR;                               
+   DCLBQ70000T.HUSBOGSTAADR = DKOM.HUSBOSTAADR;                         
+   DCLBQ70000T.ETAGENR      = DKOM.ETAGENR;                             
+   DCLBQ70000T.SIDEDOERNR   = DKOM.SIDEDOERNR;                          
+   DCLBQ70000T.ANTAL_HIST   = DKOM.ANTAL_HIST;                          
+   IF (PUT_SKIP) THEN                                                   
+     DO;                                                                
+       PUT SKIP LIST('INDVNR: ' !! DKOM.INDVNR);                        
+       PUT SKIP LIST('INDVLGD: ' !! DKOM.INDVLGD);                      
+       PUT SKIP LIST('PNR: ' !! DCLBQ70000T.PNR);                       
+       PUT SKIP LIST('AEGTFPNR: ' !! DCLBQ70000T.AEGTFPNR);             
+       PUT SKIP LIST('CIVISKOD: ' !! DCLBQ70000T.CIVISKOD);             
+       PUT SKIP LIST('CIVISFRADTO: ' !! DCLBQ70000T.CVISFRADTO);        
+       PUT SKIP LIST('ADRFRADTO: ' !! DCLBQ70000T.ADRFRADTO);           
+       PUT SKIP LIST('BOPAEKMNR: ' !! DCLBQ70000T.BOPAEKMNR);           
+       PUT SKIP LIST('VEJKOD: ' !! DCLBQ70000T.VEJKOD);                 
+       PUT SKIP LIST('HUSNR: ' !! DCLBQ70000T.HUSNR);                   
+       PUT SKIP LIST('HUSBOSTAADR: ' !! DCLBQ70000T.HUSBOGSTAADR);      
+       PUT SKIP LIST('ETAGENR: ' !! DCLBQ70000T.ETAGENR);               
+       PUT SKIP LIST('SIDEDOERNR: ' !! DCLBQ70000T.SIDEDOERNR);         
+       PUT SKIP LIST('ANTAL_HIST: ' !! DCLBQ70000T.ANTAL_HIST);         
+     END;                                                               
+   HJAELP_ANTAL_HIST = DKOM.ANTAL_HIST;                                 
+                                                                        
+   EXEC SQL                                                             
+     INSERT INTO BQ70000T                                               
+            (PNR,                                                       
+             TIL_EVS_AAR,                                               
+             AFVIKLINGS_ID,                                             
+             AEGTFPNR,                                                  
+             CIVISKOD,                                                  
+             CVISFRADTO,                                                
+             ADRFRADTO,                                                 
+             BOPAEKMNR,                                                 
+             VEJKOD,                                                    
+             HUSNR,                                                     
+             HUSBOGSTAADR,                                              
+             ETAGENR,                                                   
+             SIDEDOERNR,                                                
+             ANTAL_HIST,                                                
+             KMDTID)                                                    
+             VALUES (:DCLBQ70000T.PNR                                   
+                    ,:DCLBQ70000T.TIL_EVS_AAR                           
+                    ,:DCLBQ70000T.AFVIKLINGS_ID                         
+                    ,:DCLBQ70000T.AEGTFPNR                              
+                    ,:DCLBQ70000T.CIVISKOD                              
+                    ,:DCLBQ70000T.CVISFRADTO                            
+                    ,:DCLBQ70000T.ADRFRADTO                             
+                    ,:DCLBQ70000T.BOPAEKMNR                             
+                    ,:DCLBQ70000T.VEJKOD                                
+                    ,:DCLBQ70000T.HUSNR                                 
+                    ,:DCLBQ70000T.HUSBOGSTAADR                          
+                    ,:DCLBQ70000T.ETAGENR                               
+                    ,:DCLBQ70000T.SIDEDOERNR                            
+                    ,:DCLBQ70000T.ANTAL_HIST                            
+                    ,CURRENT TIMESTAMP);                                
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+       WHEN (0)                                                         
+          DO;                                                           
+            IF (PUT_SKIP) THEN                                          
+              DO;                                                       
+                PUT SKIP LIST('ALT OK VED INSERT PÅ BQ70000T');         
+                PUT SKIP LIST('SQLCODE: ' !! SQLCA.SQLCODE);            
+              END;                                                      
+          END;                                                          
+       OTHERWISE                                                        
+          DO;                                                           
+            TÆL_FEJL_BQ70  = TÆL_FEJL_BQ70 + 1;                         
+            PUT SKIP LIST('FEJL VED INSERT PÅ BQ70000T',                
+                           DCLBQ70000T.PNR);                            
+            PUT SKIP LIST('SQLCODE: ' !! SQLCA.SQLCODE);                
+            ABENDTXT = '110 FEJL VED INSERT PÅ BQ70000T';               
+            CALL SQL_FEJL;                                              
+                                                                        
+          END;                                                          
+    END; /* END SELECT */                                               
+                                                                        
+ END INSERT_BQ70000T;                                                   
+ /**********************************************************/           
+ /* INSERT PÅ TABEL BQ71000T                               */           
+ /**********************************************************/           
+ INSERT_BQ71000T: PROC;                                                 
+   DCLBQ71000T              =  '';                                      
+   DCLBQ71000T.PNR          = DKOM.PNR;                                 
+   DCLBQ71000T.TIL_EVS_AAR   = WS_TIL_EVS_AAR;                          
+   DCLBQ71000T.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                     
+   DCLBQ71000T.HISTNR      =                                            
+               DKOM.HISTORIK.HISTORIK_NR(TAEL_ANTAL_HIST);              
+   DCLBQ71000T.ADRFRADTO   =                                            
+     SUBSTR(DKOM.HISTORIK.ADRFRADTO(TAEL_ANTAL_HIST),1,4) !!            
+     SUBSTR(DKOM.HISTORIK.ADRFRADTO(TAEL_ANTAL_HIST),6,2) !!            
+     SUBSTR(DKOM.HISTORIK.ADRFRADTO(TAEL_ANTAL_HIST),9,2);              
+   DCLBQ71000T.ADRTILDTO   =                                            
+     SUBSTR(DKOM.HISTORIK.ADRTILDTO(TAEL_ANTAL_HIST),1,4) !!            
+     SUBSTR(DKOM.HISTORIK.ADRTILDTO(TAEL_ANTAL_HIST),6,2) !!            
+     SUBSTR(DKOM.HISTORIK.ADRTILDTO(TAEL_ANTAL_HIST),9,2);              
+   DCLBQ71000T.BOPAEKMNR   =                                            
+               DKOM.HISTORIK.BOPAEKMNR(TAEL_ANTAL_HIST);                
+   DCLBQ71000T.VEJKOD      =                                            
+               DKOM.HISTORIK.VEJKOD(TAEL_ANTAL_HIST);                   
+   DCLBQ71000T.HUSNR       =                                            
+               DKOM.HISTORIK.HUSNR(TAEL_ANTAL_HIST);                    
+   DCLBQ71000T.HUSBOGSTAADR=                                            
+               DKOM.HISTORIK.HUSBOSTAADR(TAEL_ANTAL_HIST);              
+   DCLBQ71000T.ETAGENR     =                                            
+               DKOM.HISTORIK.ETAGENR(TAEL_ANTAL_HIST);                  
+   DCLBQ71000T.SIDEDOERNR  =                                            
+               DKOM.HISTORIK.SIDEDOERNR(TAEL_ANTAL_HIST);               
+                                                                        
+   IF (PUT_SKIP) THEN                                                   
+     DO;                                                                
+       PUT SKIP LIST('PNR' !! DCLBQ71000T.PNR);                         
+       PUT SKIP LIST('HISTORIK_NR: ' !! DCLBQ71000T.HISTNR);            
+       PUT SKIP LIST('ADRFRADTO: ' !! DCLBQ71000T.ADRFRADTO);           
+       PUT SKIP LIST('ADRTILDTO: ' !! DCLBQ71000T.ADRTILDTO);           
+       PUT SKIP LIST('BOPAEKMNR: ' !! DCLBQ71000T.BOPAEKMNR);           
+       PUT SKIP LIST('VEJKOD: ' !! DCLBQ71000T.VEJKOD);                 
+       PUT SKIP LIST('HUSNR: ' !! DCLBQ71000T.HUSNR);                   
+       PUT SKIP LIST('HUSBOSTAADR: ' !! DCLBQ71000T.HUSBOGSTAADR);      
+       PUT SKIP LIST('ETAGENR: ' !! DCLBQ71000T.ETAGENR);               
+       PUT SKIP LIST('SIDEDOERNR: ' !! DCLBQ71000T.SIDEDOERNR);         
+     END;                                                               
+                                                                        
+      EXEC SQL                                                          
+        INSERT INTO BQ71000T                                            
+               (PNR,                                                    
+                TIL_EVS_AAR,                                            
+                AFVIKLINGS_ID,                                          
+                HISTNR,                                                 
+                ADRFRADTO,                                              
+                ADRTILDTO,                                              
+                BOPAEKMNR,                                              
+                VEJKOD,                                                 
+                HUSNR,                                                  
+                HUSBOGSTAADR,                                           
+                ETAGENR,                                                
+                SIDEDOERNR)                                             
+                 VALUES (:DCLBQ71000T.PNR                               
+                        ,:DCLBQ70000T.TIL_EVS_AAR                       
+                        ,:DCLBQ70000T.AFVIKLINGS_ID                     
+                        ,:DCLBQ71000T.HISTNR                            
+                        ,:DCLBQ71000T.ADRFRADTO                         
+                        ,:DCLBQ71000T.ADRTILDTO                         
+                        ,:DCLBQ71000T.BOPAEKMNR                         
+                        ,:DCLBQ71000T.VEJKOD                            
+                        ,:DCLBQ71000T.HUSNR                             
+                        ,:DCLBQ71000T.HUSBOGSTAADR                      
+                        ,:DCLBQ71000T.ETAGENR                           
+                        ,:DCLBQ71000T.SIDEDOERNR);                      
+                                                                        
+       SELECT (SQLCA.SQLCODE);                                          
+          WHEN (0)                                                      
+            DO;                                                         
+              IF (PUT_SKIP) THEN                                        
+              DO;                                                       
+                PUT SKIP LIST('ALT OK VED INSERT PÅ BQ71000T');         
+                PUT SKIP LIST('SQLCODE: ' !! SQLCA.SQLCODE);            
+              END;                                                      
+            END;                                                        
+          OTHERWISE                                                     
+            DO;                                                         
+              TÆL_FEJL_BQ71 = TÆL_FEJL_BQ71 + 1;                        
+              PUT SKIP LIST('FEJL VED INSERT PÅ BQ71000T',              
+                             DCLBQ71000T.PNR);                          
+              PUT SKIP LIST('SQLCODE: ' !! SQLCA.SQLCODE);              
+              ABENDTXT = '111 FEJL VED INSERT PÅ BQ71000T';             
+              CALL SQL_FEJL;                                            
+            END;                                                        
+       END; /* END SELECT */                                            
+                                                                        
+ END INSERT_BQ71000T;                                                   
+ /**********************************************************************
+ * HER UDSKRIVES SQL FEJL VED HJÆLP AF STANDARD RUTINE          RUTINE *
+ **********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ END BH93800;                                                           

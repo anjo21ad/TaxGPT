@@ -1,0 +1,638 @@
+ BH38600: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS SLUT 2013                                         **
+ * PROGRAMNAVN: BH38600.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Formål: Finde ejerforhold som ikke var med fra ESR,    *
+ *              men fremført fra tidligere forskudår og derefter finde *
+ *              deres årshistorik (flere indkomstår). Ejerforhold for  *
+ *              Forskud findes i BN00600T.                             *
+ *                                                                     *
+ * KONSTRUKTØR: Claus Marcussen, KMO                     Oktober 2015. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2006');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */        
+ EXEC SQL INCLUDE BN00600T;     /* EVS EJERSKABSFELTTABEL*/             
+                                                                        
+ EXEC SQL                                                               
+    DECLARE EVT_FREMFORT CURSOR FOR                                     
+       SELECT T1.PERSONNUMMER                                           
+            , T1.EKOMNR                                                 
+            , T1.EEJDNR                                                 
+            , T1.ELBNR                                                  
+            , T1.DINDKAAR                                               
+            , T1.CDATAFRA                                               
+            , T1.CSLET                                                  
+            , T1.CICSID                                                 
+            , T1.DTILGLD                                                
+       FROM BN00600T T1                                                 
+       WHERE T1.DFRAGLD < '2015-10-01-00.00.00.000000'                  
+         AND T1.DINDKAAR = 2016                                         
+         AND T1.EKOMNR <> 999                                           
+         AND T1.CDATAFRA = '2'                                          
+       ORDER BY T1.EKOMNR                                               
+              , T1.EEJDNR                                               
+              , T1.ELBNR                                                
+              , T1.PERSONNUMMER                                         
+              , T1.DINDKAAR                                             
+       WITH UR;                                                         
+                                                                        
+  /*  PUT SKIP LIST ('RET CURSOR TIL 2016 !!!');                        
+      CALL PLIRETC(2015);  */                                           
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL ZS30101        ENTRY;                                              
+ DCL ZS67000        ENTRY;                                              
+ DCL ZS61900        ENTRY;                        /* KST/SSI INFO */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF KONSTANTER                                             */
+ /*********************************************************************/
+                                                                        
+ DCL JA                  BIT(1)           VALUE('1'B);                  
+ DCL NEJ                 BIT(1)           VALUE('0'B);                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL ESR_EOF             BIT(1)           INIT (NEJ);                   
+ DCL EVS_EOF             BIT(1)           INIT (NEJ);                   
+ DCL PARM_EOF            BIT(1)           INIT (NEJ);                   
+ DCL OPDAT_SW            BIT(1);                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH38601I FILE RECORD INPUT;     /* ESR Udtræk                */
+ DCL     BH38602O FILE RECORD OUTPUT;    /* CSV med resultat          */
+                                                                        
+ DCL    1 ESR_RECORD,                                                   
+       %INCLUDE CN57000N;                                               
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+ DCL     (ADDR,DATETIME,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;        
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PARAMETER                                         */
+ /*********************************************************************/
+                                                                        
+ DCL     IPARM    FILE  RECORD  INPUT;                                  
+ DCL     1 PARMI,                                                       
+          2 KØRSW    CHAR(1),                                           
+          2 FILLER   CHAR(79);                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   FINDES_EJ_ESR            BIN FIXED (31) INIT(0);                 
+ DCL   FINDES_EJ_EVS          BIN FIXED (31) INIT(0);                   
+ DCL   FINDES_BEGGE         BIN FIXED (31) INIT(0);                     
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN1          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL1        CHAR (66);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR(1),                                       
+           2 CPRNR       PIC '9999999999',                              
+           2 FIL1        CHAR(5),                                       
+           2 KOMNR       PIC '999',                                     
+           2 FIL2        CHAR(5),                                       
+           2 EEJDNR      PIC '9999999',                                 
+           2 FIL3        CHAR(5),                                       
+           2 ELBNR       CHAR(3),                                       
+           2 FIL4        CHAR(5),                                       
+           2 TEXT        CHAR(88);                                      
+                                                                        
+ %INCLUDE ZZ20301M;                          /* PRINT STYREKARAKTERER */
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+    ON ENDFILE (IPARM)                                                  
+       PARM_EOF = JA;                                                   
+                                                                        
+    ON ENDFILE (BH38601I)                                               
+       ESR_EOF = JA;                                                    
+                                                                        
+    ON ERROR                                                            
+       BEGIN;                                                           
+          ON ERROR SYSTEM;                                              
+          PUT SKIP LIST ('PROGRAMFEJL');                                
+          CALL PLIDUMP  ('SBHO','MODUL BH38600');                       
+       END;                                                             
+                                                                        
+    ON ENDPAGE;                                                         
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+    CALL INITIERING();                                                  
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+    CALL OPEN_CURSOR();                                                 
+                                                                        
+    CALL FETCH_CURSOR();                                                
+    CALL LÆS_ESR_RECORD();                                              
+                                                                        
+    DO WHILE (^EVS_EOF ! ^ESR_EOF);                                     
+       SELECT (TEST_RECORD());                                          
+       WHEN ('ENS')                                                     
+          DO;                                                           
+             CALL RECORD_BEGGE_STEDER();                                
+             CALL LÆS_ESR_RECORD();                                     
+             CALL FETCH_CURSOR();                                       
+          END;                                                          
+       WHEN ('ESR')                                                     
+          DO;                                                           
+             CALL IKKE_FUNDET_I_EVS();                                  
+             CALL LÆS_ESR_RECORD();                                     
+          END;                                                          
+       WHEN ('EVS')                                                     
+          DO;                                                           
+             CALL IKKE_FUNDET_I_ESR();                                  
+             CALL FETCH_CURSOR();                                       
+          END;                                                          
+       OTHERWISE;                                                       
+       END;                                                             
+    END;                                                                
+                                                                        
+    CALL DAN_LISTER();                                                  
+                                                                        
+    CALL AFSLUT;                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*     INITIERING                                                    */
+ /*********************************************************************/
+ INITIERING: PROC;                                                      
+                                                                        
+ DCL  CSV_TEXT       CHAR(100);                                         
+                                                                        
+    CALL SKAF_PARM();                                                   
+                                                                        
+    CALL ZZ20390('*OPEN','BH38601Y');       /* ÅBEN KONTROLLISTE */     
+    LINIE = ZZWS3 !! ' USER STORY 2971:EJENDOM 2 KOMMU'                 
+                  !! 'NER (15)                   ' !! 'DATO: '          
+                  !!   DATETIME('YYYY-MM-DD');                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS3 !! ' PROGRAMID: BH38600 ';                            
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZS61900;                              /* KST/SSI INFO   */     
+                                                                        
+    OPEN FILE(BH38601I) TITLE ('BH38601I');                             
+    OPEN FILE(BH38602O) TITLE ('BH38602O');                             
+                                                                        
+    CSV_TEXT = '"CPRNR";"Komunnenr.";"Ejendomsnr";"Status"';            
+    WRITE FILE (BH38602O) FROM(CSV_TEXT);                               
+                                                                        
+    EXEC SQL                                                            
+       DECLARE GLOBAL TEMPORARY TABLE RESULTAT                          
+          ( CPRNR                DECIMAL(11,0) NOT NULL                 
+          , KOMMUNENUMMER        SMALLINT      NOT NULL                 
+          , EJENDOMSNR           INTEGER       NOT NULL                 
+          , TEXT_MEDD            CHAR(88)      NOT NULL                 
+          , DOKUMENTER_LISTE     CHAR(1)       NOT NULL                 
+          , DOKUMENTER_CSV       CHAR(1)       NOT NULL                 
+          ) ON COMMIT PRESERVE ROWS;                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('GLOBAL TEMPORARY TABLE');                      
+       END;                                                             
+    END;                                                                
+                                                                        
+ END INITIERING;                                                        
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ TEST_RECORD: PROC()   RETURNS(CHAR (3));                               
+                                                                        
+ /*   'ENS'  --> RECORD ER ENS                                          
+      'ESR'  --> LÆS ESR                                                
+      'EVS'  --> LÆS EVS                                              */
+                                                                        
+    IF ESR_EOF THEN                                                     
+    DO;                                                                 
+       RETURN('EVS');                                                   
+    END;                                                                
+                                                                        
+    IF EVS_EOF THEN                                                     
+    DO;                                                                 
+       RETURN('ESR');                                                   
+    END;                                                                
+                                                                        
+    IF PERSONEJENDOMSOPL.PERSONNUMMER = ESR_RECORD.DCPRCIR &            
+       PERSONEJENDOMSOPL.EKOMNR       = ESR_RECORD.EKOMNR  &            
+       PERSONEJENDOMSOPL.EEJDNR       = ESR_RECORD.EEJDNR THEN          
+    DO;                                                                 
+       RETURN('ENS');                                                   
+    END;                                                                
+                                                                        
+    IF (PERSONEJENDOMSOPL.PERSONNUMMER > ESR_RECORD.DCPRCIR)            
+     ! (PERSONEJENDOMSOPL.PERSONNUMMER = ESR_RECORD.DCPRCIR &           
+        PERSONEJENDOMSOPL.EKOMNR       > ESR_RECORD.EKOMNR )            
+     ! (PERSONEJENDOMSOPL.PERSONNUMMER = ESR_RECORD.DCPRCIR &           
+        PERSONEJENDOMSOPL.EKOMNR       = ESR_RECORD.EKOMNR  &           
+        PERSONEJENDOMSOPL.EEJDNR       > ESR_RECORD.EEJDNR  ) THEN      
+    DO;                                                                 
+       RETURN('ESR');                                                   
+    END;                                                                
+                                                                        
+    RETURN('EVS');                                                      
+                                                                        
+ END TEST_RECORD;                                                       
+                                                                        
+ /*********************************************************************/
+ /*      RECORD_BEGGE_STEDER                                          */
+ /*********************************************************************/
+ RECORD_BEGGE_STEDER: PROC;                                             
+                                                                        
+    FINDES_BEGGE = FINDES_BEGGE + 1;                                    
+    CALL GEM_RESULTAT ( 'J'                                             
+                      , 'J'                                             
+                      , PERSONEJENDOMSOPL.PERSONNUMMER                  
+                      , PERSONEJENDOMSOPL.EKOMNR                        
+                      , PERSONEJENDOMSOPL.EEJDNR                        
+                      , 'Findes både i EVS og ESR');                    
+                                                                        
+ END RECORD_BEGGE_STEDER;                                               
+                                                                        
+ /*********************************************************************/
+ /*      IKKE_FUNDET_I_ESR                                            */
+ /*********************************************************************/
+ IKKE_FUNDET_I_ESR: PROC;                                               
+                                                                        
+    FINDES_EJ_ESR = FINDES_EJ_ESR + 1;                                  
+    CALL GEM_RESULTAT ( 'J'                                             
+                      , 'J'                                             
+                      , PERSONEJENDOMSOPL.PERSONNUMMER                  
+                      , PERSONEJENDOMSOPL.EKOMNR                        
+                      , PERSONEJENDOMSOPL.EEJDNR                        
+                      , 'Findes ikke i ESR');                           
+                                                                        
+ END IKKE_FUNDET_I_ESR;                                                 
+                                                                        
+ /*********************************************************************/
+ /*      IKKE_FUNDET_I_EVS                                            */
+ /*********************************************************************/
+ IKKE_FUNDET_I_EVS: PROC;                                               
+                                                                        
+    FINDES_EJ_EVS = FINDES_EJ_EVS + 1;                                  
+    CALL GEM_RESULTAT ( 'J'                                             
+                      , 'J'                                             
+                      , ESR_RECORD.DCPRCIR                              
+                      , ESR_RECORD.EKOMNR                               
+                      , ESR_RECORD.EEJDNR                               
+                      , 'Findes ikke i EVS');                           
+                                                                        
+ END IKKE_FUNDET_I_EVS;                                                 
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ SKAF_PARM: PROC;                                                       
+                                                                        
+    OPEN FILE(IPARM) TITLE('BH38600I');                                 
+    READ FILE(IPARM) INTO(PARMI);                                       
+    IF ^PARM_EOF THEN DO;                                               
+       IF PARMI.KØRSW ^= ' ' THEN                                       
+          OPDAT_SW = JA;                                                
+       ELSE                                                             
+          OPDAT_SW = NEJ;                                               
+    END;                                                                
+    ELSE DO;                                                            
+       OPDAT_SW = NEJ;                                                  
+    END;                                                                
+    IF OPDAT_SW THEN                                                    
+       PUT SKIP LIST('Der sker opdatering');                            
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering');                               
+                                                                        
+ END SKAF_PARM;                                                         
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV KONTROL                                                */
+ /*********************************************************************/
+  GEM_RESULTAT: PROC(DOKUMENTER_LISTE,                                  
+                     DOKUMENTER_CSV,                                    
+                     PERSONNUMMER,                                      
+                     EKOMNR,                                            
+                     EEJDNR,                                            
+                     TEXT_MEDD);                                        
+                                                                        
+  DCL  DOKUMENTER_LISTE     CHAR(1);                                    
+  DCL  DOKUMENTER_CSV       CHAR(1);                                    
+  DCL  PERSONNUMMER         DEC FIXED(11,0);                            
+  DCL  EKOMNR               BIN FIXED(15);                              
+  DCL  EEJDNR               BIN FIXED(31);                              
+  DCL  TEXT_MEDD            CHAR(88);                                   
+                                                                        
+     EXEC SQL                                                           
+        INSERT INTO SESSION.RESULTAT                                    
+             ( CPRNR                                                    
+             , KOMMUNENUMMER                                            
+             , EJENDOMSNR                                               
+             , TEXT_MEDD                                                
+             , DOKUMENTER_LISTE                                         
+             , DOKUMENTER_CSV                                           
+             )                                                          
+         VALUES                                                         
+             ( :PERSONNUMMER                                            
+             , :EKOMNR                                                  
+             , :EEJDNR                                                  
+             , :TEXT_MEDD                                               
+             , :DOKUMENTER_LISTE                                        
+             , :DOKUMENTER_CSV                                          
+             );                                                         
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('GEM_RESULTAT');                                
+       END;                                                             
+    END;                                                                
+                                                                        
+ END GEM_RESULTAT;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      DAN_LISTER                                                   */
+ /*********************************************************************/
+  DAN_LISTER: PROC();                                                   
+                                                                        
+  DCL  DOKUMENTER_LISTE     CHAR(1);                                    
+  DCL  DOKUMENTER_CSV       CHAR(1);                                    
+  DCL  PERSONNUMMER         DEC FIXED(11,0);                            
+  DCL  EKOMNR               BIN FIXED(15);                              
+  DCL  EEJDNR               BIN FIXED(31);                              
+  DCL  TEXT_MEDD            CHAR(88);                                   
+                                                                        
+    EXEC SQL                                                            
+       DECLARE RESULTATLISTE CURSOR FOR                                 
+          SELECT CPRNR                                                  
+               , KOMMUNENUMMER                                          
+               , EJENDOMSNR                                             
+               , TEXT_MEDD                                              
+               , DOKUMENTER_LISTE                                       
+               , DOKUMENTER_CSV                                         
+          FROM SESSION.RESULTAT                                         
+          ORDER BY CPRNR                                                
+                 , KOMMUNENUMMER                                        
+                 , EJENDOMSNR;                                          
+                                                                        
+    EXEC SQL                                                            
+       OPEN RESULTATLISTE;                                              
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('OPEN RESULTAT');                               
+       END;                                                             
+    END;                                                                
+                                                                        
+    DO UNTIL (SQLCA.SQLCODE ^= 0);                                      
+       EXEC SQL                                                         
+          FETCH RESULTATLISTE                                           
+          INTO :PERSONNUMMER                                            
+             , :EKOMNR                                                  
+             , :EEJDNR                                                  
+             , :TEXT_MEDD                                               
+             , :DOKUMENTER_LISTE                                        
+             , :DOKUMENTER_CSV;                                         
+                                                                        
+       SELECT (SQLCA.SQLCODE);                                          
+       WHEN(0)                                                          
+          DO;                                                           
+             CALL SKRIV_KONTROL(DOKUMENTER_LISTE,                       
+                                DOKUMENTER_CSV,                         
+                                PERSONNUMMER,                           
+                                EKOMNR,                                 
+                                EEJDNR,                                 
+                                TEXT_MEDD);                             
+          END;                                                          
+       WHEN(100);                                                       
+       OTHERWISE                                                        
+          DO;                                                           
+             CALL SQL_FEJL('FETCH RESULTAT');                           
+          END;                                                          
+       END;                                                             
+    END;                                                                
+                                                                        
+    EXEC SQL                                                            
+       CLOSE RESULTATLISTE;                                             
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('CLOSE RESULTAT');                              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END DAN_LISTER;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ SKRIV_KONTROL: PROC(DOKUMENTER_LISTE,                                  
+                     DOKUMENTER_CSV,                                    
+                     PERSONNUMMER,                                      
+                     EKOMNR,                                            
+                     EEJDNR,                                            
+                     TEXT_MEDD);                                        
+                                                                        
+  DCL  DOKUMENTER_LISTE     CHAR(1);                                    
+  DCL  DOKUMENTER_CSV       CHAR(1);                                    
+  DCL  PERSONNUMMER         DEC FIXED(11,0);                            
+  DCL  EKOMNR               BIN FIXED(15);                              
+  DCL  EEJDNR               BIN FIXED(31);                              
+  DCL  TEXT_MEDD            CHAR(88);                                   
+  DCL  CSV_TEXT             CHAR(100);                                  
+                                                                        
+    IF DOKUMENTER_LISTE = 'J' THEN                                      
+    DO;                                                                 
+       LINIE       = ZZWS2;                                             
+       LIN2.CPRNR  = PERSONNUMMER;                                      
+       LIN2.KOMNR  = EKOMNR;                                            
+       LIN2.EEJDNR = EEJDNR;                                            
+ /*    LIN2.ELBNR  = ELBNR_UD; */                                       
+       LIN2.TEXT   = TEXT_MEDD;                                         
+       CALL ZZ20300(LINIE,'01');                                        
+    END;                                                                
+                                                                        
+    IF DOKUMENTER_CSV = 'J' THEN                                        
+    DO;                                                                 
+       CSV_TEXT = '"'    !! PERSONNUMMER !!                             
+                  '";"'  !! EKOMNR !!                                   
+                  '";"'  !! EEJDNR !!                                   
+                  '";"'  !! TRIM(TEXT_MEDD, ' ', ' ') !!                
+                  '"';                                                  
+       WRITE FILE (BH38602O) FROM(CSV_TEXT);                            
+    END;                                                                
+                                                                        
+ END SKRIV_KONTROL;                                                     
+                                                                        
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    CALL CLOSE_CURSOR;                                                  
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJENDOMME FINDES BEGGE STEDER............';     
+    LIN1.ANT   = FINDES_BEGGE;                                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJENDOMME MANGLER I ESR..................';     
+    LIN1.ANT   = FINDES_EJ_ESR;                                         
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJENDOMME MANGLER I EVS..................';     
+    LIN1.ANT   = FINDES_EJ_EVS;                                         
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */     
+                                                                        
+    CLOSE FILE(BH38601I);                                               
+    CLOSE FILE(BH38602O);                                               
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /*  OPEN CURSOR                                               RUTINE */
+ /*********************************************************************/
+ LÆS_ESR_RECORD: PROC;                                                  
+                                                                        
+    READ FILE (BH38601I) INTO (ESR_RECORD);                             
+                                                                        
+    IF ^ESR_EOF                         &                               
+       ESR_RECORD.DCPRCIR = 9999999999  &                               
+       ESR_RECORD.EKOMNR  = 999         &                               
+       ESR_RECORD.EEJDNR  = 8888888  THEN                               
+    DO;                                                                 
+ /* Optællingsrecord                                                  */
+       ESR_EOF = JA;                                                    
+    END;                                                                
+                                                                        
+ END LÆS_ESR_RECORD;                                                    
+                                                                        
+ /*********************************************************************/
+ /*  OPEN CURSOR                                               RUTINE */
+ /*********************************************************************/
+ OPEN_CURSOR: PROC;                                                     
+                                                                        
+    EXEC SQL                                                            
+       OPEN EVT_FREMFORT;                                               
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED OPEN AF EVT_FREMFORT');               
+       END;                                                             
+    END;                                                                
+                                                                        
+ END OPEN_CURSOR;                                                       
+                                                                        
+ /*********************************************************************/
+ /*  FETCH CURSOR                                              RUTINE */
+ /*********************************************************************/
+ FETCH_CURSOR: PROC;                                                    
+                                                                        
+    EXEC SQL                                                            
+       FETCH EVT_FREMFORT                                               
+       INTO :PERSONEJENDOMSOPL.PERSONNUMMER                             
+          , :PERSONEJENDOMSOPL.EKOMNR                                   
+          , :PERSONEJENDOMSOPL.EEJDNR                                   
+          , :PERSONEJENDOMSOPL.ELBNR                                    
+          , :PERSONEJENDOMSOPL.DINDKAAR                                 
+          , :PERSONEJENDOMSOPL.CDATAFRA                                 
+          , :PERSONEJENDOMSOPL.CSLET                                    
+          , :PERSONEJENDOMSOPL.CICSID                                   
+          , :PERSONEJENDOMSOPL.DTILGLD;                                 
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    WHEN(100)                                                           
+       DO;                                                              
+          EVS_EOF = JA;                                                 
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED FETCH AF EVT_FREMFORT');              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END FETCH_CURSOR;                                                      
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR                                               RUTINE */
+ /*********************************************************************/
+ CLOSE_CURSOR: PROC;                                                    
+                                                                        
+    EXEC SQL                                                            
+       CLOSE EVT_FREMFORT;                                              
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('FEJL VED CLOSE AF EVT_FREMFORT');              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END CLOSE_CURSOR;                                                      
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+                                                                        
+ SQL_FEJL: PROC(FEJLTEKST);                                             
+                                                                        
+ DCL  FEJLTEKST        CHAR(30);                                        
+ DCL  ABENDMEDD        CHAR(56);                                        
+                                                                        
+    PUT SKIP LIST('SQL_FEJL.....');                                     
+    PUT SKIP LIST('SQLCA',SQLCA);                                       
+    CALL ZS67000(SQLCA);                                                
+    ABENDMEDD =  'BH38600 ** 550 SQLFEJL: ' !! FEJLTEKST;               
+    CALL ZS30101 (5, ABENDMEDD, 2);                                     
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+                                                                        
+ END BH38600;                                                           

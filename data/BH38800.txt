@@ -1,0 +1,312 @@
+ BH38800: PROCEDURE OPTIONS (MAIN);                                     
+ /********************************************************************/ 
+ /* Projekt:     EVS Forskud / EVS Slut                              */ 
+ /* Programnavn: BH38800                                             */ 
+ /* Programtype: Batch                                               */ 
+ /* Funktion:    Årsrul datofelter i et BH31800N datasæt             */ 
+ /*                                                                  */ 
+ /* Input:       BH388I   - Grund- eller supplementsleverancen       */ 
+ /*                         fra ESR/VUR (CN57000)                    */ 
+ /*                                                                  */ 
+ /*              DEBUGI   - Skal programmet debugge (put skip):      */ 
+ /*                                                                  */ 
+ /*                            Hvis  (filen DEBUGI ikke findes     ) */ 
+ /*                            eller (DEBUG_FROM = 0 og DEBU_TO = 0) */ 
+ /*                               Ingen debug                        */ 
+ /*                            ellers                                */ 
+ /*                               Debug alt for de valgte            */ 
+ /*                               record numre i BH388I              */ 
+ /*                                                                  */ 
+ /* Output:      BH388O   - Indhold lig BH388I                       */ 
+ /*                                                                  */ 
+ /*------------------------------------------------------------------*/ 
+ /*                                                                  */ 
+ /* 2018.11.16   Gitte Jensen, GJN                                   */ 
+ /*              Nyt program                                         */ 
+ /********************************************************************/ 
+                                                                        
+ DCL   COPYRIGHT       CHAR(30)       INIT ('(C) KMD A/S 2018');        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT KALD AF EKSTERNE MODULER */ 
+                                                                        
+ /********************************************************************/ 
+ /* Builtin functions                                                */ 
+ /********************************************************************/ 
+ DCL   ADDR            BUILTIN;                                         
+ DCL   NULL            BUILTIN;                                         
+ DCL   PLIDUMP         BUILTIN;                                         
+                                                                        
+ /********************************************************************/ 
+ /* BH388I - Grund- eller supplementsleverancen fra ESR/VUR (CN57000)*/ 
+ /*                                                                  */ 
+ /* BH338O - Indhold lig BH388I                                      */ 
+ /********************************************************************/ 
+ DCL   BH388I          FILE RECORD INPUT;                               
+ DCL   BH388O          FILE RECORD OUTPUT;                              
+                                                                        
+ DCL   BH388_AREA      CHAR(2000) VAR;                                  
+                                                                        
+ DCL 1 BH388        BASED(ADDR(BH388_AREA)),                            
+       4 BH388_LENGTH  FIXED BIN(15),                                   
+       %INCLUDE BH31800N;                                               
+                                                                        
+                                                                        
+ /********************************************************************/ 
+ /* DEBUGI - Skal programmet debugge (put skip)                      */ 
+ /********************************************************************/ 
+ DCL   DEBUGI          FILE RECORD INPUT;                               
+                                                                        
+ DCL 1 DEBUG_REC,                                                       
+       3 DEBUG_FROM    PIC'(7)9',                                       
+       3 DEBUG_FILL1   CHAR(1),                                         
+       3 DEBUG_TO      PIC'(7)9',                                       
+       3 DEBUG_FILL2   CHAR(65);                                        
+                                                                        
+ /********************************************************************/ 
+ /* Interne arbejdsfelter                                            */ 
+ /********************************************************************/ 
+ DCL JA                BIT(01)        INIT('1'B);                       
+ DCL NEJ               BIT(01)        INIT('0'B);                       
+ DCL FLERE_BH388I      BIT(01)        INIT('1'B);                       
+ DCL PUTSKIP_THIS      BIT(01)        INIT('0'B);                       
+                                                                        
+ DCL PROGRAM_TXT       CHAR(15)       INIT('Program BH38800');          
+ DCL START_TXT         CHAR(08)       INIT(' startet');                 
+ DCL SLUT_TXT          CHAR(08)       INIT(' sluttet');                 
+                                                                        
+ DCL BH388I_READ       PIC'(7)9'      INIT(0);                          
+ DCL BH388O_WRITE      PIC'(7)9'      INIT(0);                          
+                                                                        
+ /********************************************************************/ 
+ /* Standard rutiner                                                 */ 
+ /********************************************************************/ 
+ DCL   ZS61900         ENTRY;          /* Udskrivning af SSI         */ 
+ DCL   ZS30101         ENTRY;          /* Abendrutine                */ 
+ DCL   ZS67000         ENTRY;          /* Hent sql tekster           */ 
+                                                                        
+ DCL   1 BH65300M,                     /* Ajourfør mini MT-fil til   */ 
+         %INCLUDE BH65300M;            /* EVS forskud eller EVS slut */ 
+                                                                        
+ DCL  SYSPRINT FILE;                                                    
+                                                                        
+ /********************************************************************/ 
+ /* On Conditions                                                    */ 
+ /********************************************************************/ 
+ CALL ZS61900;                                                          
+                                                                        
+ ON ERROR BEGIN;                                                        
+   ON ERROR SYSTEM;                                                     
+   PUT SKIP LIST('PROGRAMFEJL');                                        
+   CALL PLIDUMP('SNHOB','PROGRAM BH38800L');                            
+ END;                                                                   
+                                                                        
+ ON ENDFILE(BH388I) BEGIN;                                              
+   FLERE_BH388I = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ /********************************************************************/ 
+ /* Main proces                                                      */ 
+ /********************************************************************/ 
+ CALL HOUSEKEEPING;                                                     
+ CALL READ_BH388I;                                                      
+                                                                        
+ DO WHILE(FLERE_BH388I);                                                
+   CALL BEH_DATA;                                                       
+   CALL WRITE_BH388O;                                                   
+                                                                        
+   CALL READ_BH388I;                                                    
+ END;                                                                   
+                                                                        
+ CALL AFSLUT;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Housekeeping                                                     */ 
+ /********************************************************************/ 
+ HOUSEKEEPING: PROC;                                                    
+                                                                        
+ DCL PUTSKIP_FROM    CHAR(17) INIT('   PUTSKIP_FROM: ');                
+ DCL PUTSKIP_TO      CHAR(17) INIT('   PUTSKIP_TO  : ');                
+                                                                        
+ DCL DISP_FROM       PIC'Z.ZZZ.ZZ9';                                    
+ DCL DISP_TO         PIC'Z.ZZZ.ZZ9';                                    
+                                                                        
+ PUT SKIP LIST(PROGRAM_TXT !! START_TXT);                               
+ PUT SKIP LIST('');                                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Skal programmet fortage debug (put skip)                         */ 
+ /*------------------------------------------------------------------*/ 
+ ON UNDEFINEDFILE(DEBUGI) BEGIN;                                        
+   DEBUG_REC.DEBUG_FROM = 0;                                            
+   DEBUG_REC.DEBUG_TO   = 0;                                            
+   GO TO HOUSEKEEPING_PUTSKIP_FOUND;                                    
+ END;                                                                   
+                                                                        
+ OPEN FILE(DEBUGI) TITLE('DEBUG00I');                                   
+                                                                        
+ ON ENDFILE(DEBUGI) BEGIN;                                              
+   DEBUG_REC.DEBUG_FROM = 0;                                            
+   DEBUG_REC.DEBUG_TO   = 0;                                            
+   GO TO HOUSEKEEPING_PUTSKIP_FOUND;                                    
+ END;                                                                   
+                                                                        
+ READ FILE(DEBUGI) INTO(DEBUG_REC);                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* HOUSEKEEPING_PUTSKIP_FOUND                                       */ 
+ /*------------------------------------------------------------------*/ 
+ HOUSEKEEPING_PUTSKIP_FOUND:                                            
+                                                                        
+ PUT SKIP LIST('BH38800 parametre:');                                   
+                                                                        
+ DISP_FROM = DEBUG_REC.DEBUG_FROM;                                      
+ DISP_TO   = DEBUG_REC.DEBUG_TO;                                        
+                                                                        
+ PUT SKIP LIST(PUTSKIP_FROM !! DISP_FROM);                              
+ PUT SKIP LIST(PUTSKIP_TO !! DISP_TO);                                  
+ PUT SKIP LIST('');                                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Open filer                                                       */ 
+ /*------------------------------------------------------------------*/ 
+ OPEN FILE(BH388I) TITLE('BH38800I');                                   
+ OPEN FILE(BH388O) TITLE('BH38800O');                                   
+                                                                        
+ END HOUSEKEEPING;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Læs næste CN570I record                                          */ 
+ /********************************************************************/ 
+ READ_BH388I: PROC;                                                     
+                                                                        
+ READ FILE(BH388I) INTO(BH388_AREA);                                    
+                                                                        
+ PUTSKIP_THIS = NEJ;                                                    
+                                                                        
+ IF FLERE_BH388I THEN DO;                                               
+   BH388I_READ = BH388I_READ + 1;                                       
+                                                                        
+   IF (DEBUG_REC.DEBUG_TO > 0                   )                       
+    & (  BH388I_READ      > DEBUG_REC.DEBUG_FROM                        
+       ! BH388I_READ      = DEBUG_REC.DEBUG_FROM)                       
+    & (  BH388I_READ      < DEBUG_REC.DEBUG_TO                          
+       ! BH388I_READ      = DEBUG_REC.DEBUG_TO  ) THEN DO;              
+     PUTSKIP_THIS = JA;                                                 
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END READ_BH388I;                                                       
+                                                                        
+ /********************************************************************/ 
+ /* Årsrul datofelter                                                */ 
+ /********************************************************************/ 
+ BEH_DATA: PROC;                                                        
+                                                                        
+ DCL CHAR_4    CHAR(04);                                                
+ DCL NUM_4  BASED(ADDR(CHAR_4))                                         
+               PIC'(4)9';                                               
+                                                                        
+ DCL CHAR_8    CHAR(08);                                                
+ DCL NUM_8  BASED(ADDR(CHAR_8))                                         
+               PIC'(8)9';                                               
+                                                                        
+ DCL FRA_1     PIC'(8)9';                                               
+ DCL FRA_2     PIC'(8)9';                                               
+ DCL FRA_3     CHAR(04);                                                
+ DCL FRA_4     CHAR(04);                                                
+ DCL TIL_1     PIC'(8)9';                                               
+ DCL TIL_2     PIC'(8)9';                                               
+ DCL TIL_3     CHAR(04);                                                
+ DCL TIL_4     CHAR(04);                                                
+                                                                        
+ IF PUTSKIP_THIS THEN DO;                                               
+   FRA_1 = BH388.DOVTG;                                                 
+   FRA_2 = BH388.DAFSTÅ;                                                
+   FRA_3 = BH388.VURDOPLNY.DVURDÅR;                                     
+   FRA_4 = BH388.VURDOPLGL.DVURDÅR;                                     
+ END;                                                                   
+                                                                        
+ IF BH388.DOVTG              > 0                                        
+  & BH388.VURDOPLNY.DVURDÅR <> ' ' THEN DO;                             
+   NUM_8 = BH388.DOVTG;                                                 
+                                                                        
+   IF SUBSTR(CHAR_8,1,4) = SUBSTR(BH388.VURDOPLNY.DVURDÅR,1,4) THEN DO; 
+     NUM_8       = NUM_8 + 10000;     /* Add 1 år til */                
+     BH388.DOVTG = NUM_8;                                               
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ IF BH388.DAFSTÅ             > 0                                        
+  & BH388.VURDOPLNY.DVURDÅR <> ' ' THEN DO;                             
+   NUM_8 = BH388.DAFSTÅ;                                                
+                                                                        
+   IF SUBSTR(CHAR_8,1,4) = SUBSTR(BH388.VURDOPLNY.DVURDÅR,1,4) THEN DO; 
+     NUM_8        = NUM_8 + 10000;     /* Add 1 år til */               
+     BH388.DAFSTÅ = NUM_8;                                              
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ IF BH388.VURDOPLNY.DVURDÅR <> ' ' THEN DO;                             
+   CHAR_4                  = BH388.VURDOPLNY.DVURDÅR;                   
+   NUM_4                   = NUM_4 + 1;                                 
+   BH388.VURDOPLNY.DVURDÅR = CHAR_4;                                    
+ END;                                                                   
+                                                                        
+ IF BH388.VURDOPLGL.DVURDÅR <> ' ' THEN DO;                             
+   CHAR_4                  = BH388.VURDOPLGL.DVURDÅR;                   
+   NUM_4                   = NUM_4 + 1;                                 
+   BH388.VURDOPLGL.DVURDÅR = CHAR_4;                                    
+ END;                                                                   
+                                                                        
+ IF PUTSKIP_THIS THEN DO;                                               
+   TIL_1 = BH388.DOVTG;                                                 
+   TIL_2 = BH388.DAFSTÅ;                                                
+   TIL_3 = BH388.VURDOPLNY.DVURDÅR;                                     
+   TIL_4 = BH388.VURDOPLGL.DVURDÅR;                                     
+                                                                        
+   PUT SKIP LIST('*** DEBUG Fra/Til: '                                  
+                 !! FRA_1 !! '/' !! TIL_1 !! ' - '                      
+                 !! FRA_2 !! '/' !! TIL_2 !! ' - '                      
+                 !! FRA_3 !! '/' !! TIL_3 !! ' - '                      
+                 !! FRA_4 !! '/' !! TIL_4);                             
+ END;                                                                   
+                                                                        
+ END BEH_DATA;                                                          
+                                                                        
+ /********************************************************************/ 
+ /* Skriv BH388O record                                              */ 
+ /********************************************************************/ 
+ WRITE_BH388O: PROC;                                                    
+                                                                        
+ WRITE FILE(BH388O) FROM(BH388_AREA);                                   
+                                                                        
+ BH388O_WRITE = BH388O_WRITE + 1;                                       
+                                                                        
+ END WRITE_BH388O;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Put skip tællere                                                 */ 
+ /********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+ DCL DISP_CNT_1 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_2 PIC'Z.ZZZ.ZZ9';                                         
+                                                                        
+ CLOSE FILE(BH388I),                                                    
+       FILE(BH388O),                                                    
+       FILE(DEBUGI);                                                    
+                                                                        
+ PUT SKIP LIST('');                                                     
+ PUT SKIP LIST('Resultat for BH38800:');                                
+                                                                        
+ DISP_CNT_1 = BH388I_READ;                                              
+ DISP_CNT_2 = BH388O_WRITE;                                             
+                                                                        
+ PUT SKIP LIST('   Read  BH388I: ' !! DISP_CNT_1);                      
+ PUT SKIP LIST('   Write BH388O: ' !! DISP_CNT_2);                      
+                                                                        
+ PUT SKIP LIST('');                                                     
+ PUT SKIP LIST(PROGRAM_TXT !! SLUT_TXT);                                
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END BH38800;                                                           

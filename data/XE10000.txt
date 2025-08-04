@@ -1,0 +1,917 @@
+  XE10000: PROC OPTIONS (MAIN) REORDER;                                 
+ /**********************************************************************
+ **                                                                     
+ **     NAVN              -   XE10000                                   
+ **                                                                     
+ **     FUNKTION          -   ANALYSER SOURCE                           
+ **                                                                     
+ **     PROGRAMMØR        -   CLAUS MARCUSSEN, KMO, FEBRUAR 2016        
+ **                                                                     
+ **********************************************************************/
+                                                                        
+         DFT RANGE (*) STATIC;                                          
+                                                                        
+ /**********************************************************************
+ * ØVRIGE FELTER                                                        
+ **********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     STG             BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     LENGTH          BUILTIN;                                       
+ DCL     PLIRETC         BUILTIN;                                       
+ DCL     BPXWDYN EXTERNAL ENTRY OPTIONS(ASM INTER RETCODE);             
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+                                                                        
+ DCL     PGNAVN          CHAR (7) INIT ('XE10000');                     
+                                                                        
+ DCL     TMP  FILE RECORD INPUT;     /* Dynamisk allokering           */
+                                                                        
+ /**********************************************************************
+ *      DB2 INCLUDES                                                    
+ **********************************************************************/
+                                                                        
+     EXEC SQL INCLUDE SQLCA;                                            
+     EXEC SQL INCLUDE XE10000T;                                         
+     EXEC SQL INCLUDE XE10100T;                                         
+     EXEC SQL INCLUDE XE10200T;                                         
+                                                                        
+ /**********************************************************************
+ *      DCL DIVERSE                                                     
+ **********************************************************************/
+                                                                        
+ DCL TRUE                    BIT(1) INIT('1'B);                         
+ DCL FALSE                   BIT(1) INIT('0'B);                         
+                                                                        
+       %INCLUDE ZX66600M; /* INTERFACE + DCL AF MEMBER-LÆSERUTINER */   
+                                                                        
+ /**********************************************************************
+ *      DCL DIVERSE                                                     
+ **********************************************************************/
+                                                                        
+ DCL  PDS_MEMBER             CHAR(255)  VAR;                            
+ DCL  EOF_FILE               BIN FIXED(1);                              
+ DCL  KOMMENTAR_STATUS       BIN FIXED(1);                              
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL 1   MEDD,                                                          
+      2  FILL1          CHAR  (07) INIT ('XE10000'),                    
+      2  *              CHAR  (01) INIT (' '),                          
+      2  MEDDNR         CHAR  (02),                                     
+      2  *              CHAR  (01) INIT (' '),                          
+      2  KODE           CHAR  (04) INIT ('550'),                        
+      2  TXT            CHAR  (41);                                     
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*                     ON UNITS                                      */
+ /*********************************************************************/
+                                                                        
+     ON ERROR BEGIN;                                                    
+        ON ERROR SYSTEM;                                                
+           FLUSH FILE (*);                                              
+           CALL PLIDUMP ('SHBO');                                       
+     END;                                                               
+                                                                        
+     ON ENDFILE(TMP) BEGIN;                                             
+        EOF_FILE = TRUE;                                                
+     END;                                                               
+                                                                        
+     ON ENDPAGE;                                                        
+                                                                        
+ /**********************************************************************
+ **     HOVEDSTYRING                                                    
+ **********************************************************************/
+     CALL ZS61900;                          /* UDSKRIVNING AF SSI */    
+                                                                        
+     RC = BEHANDL_SOURCE('INC');                                        
+     RC = BEHANDL_SOURCE('SRB');                                        
+     RC = BEHANDL_SOURCE('SRC');                                        
+     RC = BEHANDL_SOURCE('SRX');                                        
+     IF RC = 100 THEN RC = 0;                                           
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ BEHANDL_SOURCE: PROC(SOURCETYPE)  RETURNS(BIN FIXED (31));             
+                                                                        
+ DCL  SOURCETYPE      CHAR(3);                                          
+ DCL  RC              BIN FIXED (31)  INIT(0);                          
+                                                                        
+     DCLXE10100T.MEMBER_TYP = SOURCETYPE;                               
+     DDNAME = SOURCETYPE;                                               
+                                                                        
+     RC = OPEN_DATASET();                                               
+     IF RC = 0 THEN                                                     
+     DO;                                                                
+        RC = RYD_OP_DATABASE();                                         
+        IF RC ^= 0 THEN RETURN(RC);                                     
+        RC = READ_DIRECTORY(SOURCETYPE);                                
+        IF RC ^= 0 THEN RETURN(RC);                                     
+        RC = CLOSE_DATASET();                                           
+        IF RC ^= 0 THEN RETURN(RC);                                     
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END BEHANDL_SOURCE;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ READ_DIRECTORY: PROC(SOURCETYPE)  RETURNS(BIN FIXED (31));             
+                                                                        
+ DCL  SOURCETYPE      CHAR(3);                                          
+ DCL  RC              BIN FIXED (31)  INIT(0);                          
+ DCL  RC_GEM          BIT(1);                                           
+                                                                        
+     RC = 0;                                                            
+     CALL STATUS_MEMBER_UKENDT(SOURCETYPE);                             
+     CALL OPRYD_KOMMENTARER(SOURCETYPE);                                
+                                                                        
+     DO UNTIL (RETUR > 0);                                              
+        CALL ZX66601 (MEMBER, SSI, RETUR);                              
+        IF RETUR = 0 THEN                                               
+        DO;                                                             
+           PDS_MEMBER = TRIM(DSNAME, ' ', ' ')                          
+                        !! '('                                          
+                        !! TRIM(MEMBER, ' ', ' ')                       
+                        !! ')';                                         
+           PUT SKIP LIST ('Member  : ' !! PDS_MEMBER);                  
+           RC_GEM = GEM_MEMBER_INFORMATION(SOURCETYPE);                 
+           IF RC_GEM THEN                                               
+           DO;                                                          
+              CALL ALLOCATE_MEMBER(PDS_MEMBER);                         
+              CALL BEHANDL_MEMBER();                                    
+              CALL CLOSE_MEMBER();                                      
+           END;                                                         
+        END;                                                            
+        ELSE                                                            
+           PUT SKIP LIST ('EOF');                                       
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END READ_DIRECTORY;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ BEHANDL_MEMBER: PROC();                                                
+                                                                        
+ DCL PGM_RECORD      CHAR(255) VAR;                                     
+ DCL PGM_LINIE       CHAR(32767) VAR;                                   
+ DCL LANG_KODE       CHAR(32767) VAR;                                   
+ DCL KODE            CHAR(80);                                          
+ DCL KOMMENTAR       CHAR(80);                                          
+ DCL LÆNGDE          BIN FIXED(15);                                     
+                                                                        
+     EOF_FILE = FALSE;                                                  
+     KOMMENTAR_STATUS = FALSE;                                          
+     DCLXE10200T.LINJENR = 0;                                           
+                                                                        
+     LANG_KODE = '';                                                    
+                                                                        
+     DO UNTIL ((EOF_FILE = TRUE) & (LANG_KODE = ''));                   
+        IF EOF_FILE = FALSE THEN                                        
+        DO;                                                             
+           READ FILE(TMP) INTO(PGM_RECORD);                             
+           IF ^EOF_FILE THEN                                            
+           DO;                                                          
+              CALL SPLIT_I_KODE_OG_KOMMENTAR(PGM_RECORD,                
+                                             KODE,                      
+                                             KOMMENTAR);                
+              LANG_KODE = LANG_KODE !! COMPRESS(KODE);                  
+              IF LENGTH(LANG_KODE) = MAXLENGTH(LANG_KODE) THEN          
+              DO;                                                       
+                 PUT SKIP LIST('Kan ikke klare ' !! MEMBER);            
+                 PUT SKIP LIST('Statement > ' !! MAXLENGTH(LANG_KODE)); 
+                 RETURN;                                                
+              END;                                                      
+              IF KOMMENTAR > '' THEN                                    
+              DO;                                                       
+                 CALL GEM_KOMMENTAR(KOMMENTAR);                         
+              END;                                                      
+           END;                                                         
+           ELSE DO;                                                     
+              LANG_KODE = LANG_KODE !! ';';                             
+           END;                                                         
+        END;                                                            
+        IF LENGTH(LANG_KODE) > 0 THEN                                   
+        DO;                                                             
+           CALL UDTAG_STATEMENT(LANG_KODE, PGM_LINIE);                  
+           IF PGM_LINIE > '' THEN                                       
+           DO;                                                          
+              PGM_LINIE = UPPERCASE(PGM_LINIE);                         
+              CALL ANALYSER_KODELINIE(PGM_LINIE);                       
+           END;                                                         
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN ;                                                           
+                                                                        
+  END BEHANDL_MEMBER ;                                                  
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ UDTAG_STATEMENT: PROC(LANG_KODE, PGM_LINIE)  RETURNS(BIT(1));;         
+                                                                        
+ DCL PGM_LINIE       CHAR(32767) VAR;                                   
+ DCL PGM_LINIE_TEST  CHAR(32767) VAR;                                   
+ DCL LANG_KODE       CHAR(32767) VAR;                                   
+                                                                        
+ DCL POSITION_SEMI   BIN FIXED(15);                                     
+ DCL POSITION_START  BIN FIXED(15);                                     
+ DCL PINGER_FJERNET  BIT(1);                                            
+                                                                        
+     PGM_LINIE = '';                                                    
+     POSITION_START = 1;                                                
+     DO FOREVER;                                                        
+        POSITION_SEMI = INDEX(LANG_KODE, ';', POSITION_START);          
+        IF POSITION_SEMI = 0 THEN                                       
+        DO;                                                             
+           PGM_LINIE = '';                                              
+           RETURN(FALSE);                                               
+        END;                                                            
+                                                                        
+        PGM_LINIE = SUBSTR(LANG_KODE, 1, POSITION_SEMI);                
+        PGM_LINIE_TEST = PGM_LINIE;                                     
+                                                                        
+        IF ^LIGE_PINGER(PGM_LINIE_TEST) THEN                            
+        DO;                                                             
+           POSITION_START = POSITION_SEMI + 1;                          
+        END;                                                            
+        ELSE DO;                                                        
+           LANG_KODE = SUBSTR(LANG_KODE, POSITION_SEMI + 1);            
+           RETURN(TRUE);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+ END UDTAG_STATEMENT;                                                   
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ SPLIT_I_KODE_OG_KOMMENTAR: PROC(PGM_LINIE, KODE, KOMMENTAR);           
+                                                                        
+ DCL PGM_LINIE       CHAR(255) VAR BYVALUE;                             
+ DCL KODE            CHAR(80);                                          
+ DCL KOMMENTAR       CHAR(80);                                          
+                                                                        
+ DCL KODE_LINIE_TEST CHAR(32767)   VAR;                                 
+ DCL KODE_LINIE_COPY CHAR(80);                                          
+ DCL POSITION_START  BIN FIXED(15);                                     
+ DCL POSITION_SLUT   BIN FIXED(15);                                     
+ DCL LÆNGDE          BIN FIXED(15);                                     
+                                                                        
+    KODE_LINIE_COPY = SUBSTR(PGM_LINIE, 2, 71);                         
+    KODE_LINIE_TEST = KODE_LINIE_COPY;                                  
+    CALL PING_FJERNER(KODE_LINIE_TEST);                                 
+    KODE = '';                                                          
+    KOMMENTAR = '';                                                     
+    POSITION_START = 1;                                                 
+                                                                        
+    DO WHILE (POSITION_START < LENGTH(KODE_LINIE_TEST));                
+       IF KOMMENTAR_STATUS THEN                                         
+       DO;                                                              
+          POSITION_SLUT = INDEX(KODE_LINIE_TEST, '*/', POSITION_START); 
+          IF POSITION_SLUT > 0 THEN                                     
+          DO;                                                           
+             KOMMENTAR_STATUS = FALSE;                                  
+             POSITION_SLUT = POSITION_SLUT + 2;                         
+          END; ELSE                                                     
+          DO;                                                           
+             POSITION_SLUT = LENGTH(KODE_LINIE_TEST);                   
+          END;                                                          
+          LÆNGDE = POSITION_SLUT - POSITION_START;                      
+          SUBSTR(KOMMENTAR, POSITION_START, LÆNGDE) =                   
+                   SUBSTR(KODE_LINIE_COPY, POSITION_START, LÆNGDE);     
+       END;                                                             
+       ELSE DO;                                                         
+          POSITION_SLUT = INDEX(KODE_LINIE_TEST, '/*', POSITION_START); 
+          IF POSITION_SLUT > 0 THEN                                     
+          DO;                                                           
+             KOMMENTAR_STATUS = TRUE;                                   
+          END; ELSE                                                     
+          DO;                                                           
+             POSITION_SLUT = LENGTH(KODE_LINIE_TEST);                   
+          END;                                                          
+          LÆNGDE = POSITION_SLUT - POSITION_START;                      
+          SUBSTR(KODE, POSITION_START, LÆNGDE) =                        
+                   SUBSTR(KODE_LINIE_COPY, POSITION_START, LÆNGDE);     
+       END;                                                             
+       POSITION_START = POSITION_SLUT;                                  
+    END;                                                                
+                                                                        
+    RETURN;                                                             
+                                                                        
+ END SPLIT_I_KODE_OG_KOMMENTAR;                                         
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ PING_FJERNER: PROC(KODE_LINIE)  RETURNS(BIT(1));                       
+                                                                        
+ DCL KODE_LINIE      CHAR(32767) VAR  BYADDR;                           
+ DCL KODE_LINIE_GEM  CHAR(32767) VAR;                                   
+                                                                        
+ DCL CHAR_1PING      CHAR (1)   VALUE("'");                             
+ DCL CHAR_2PING      CHAR (1)   VALUE('"');                             
+                                                                        
+ DCL POSITION_1PING  BIN FIXED(15);                                     
+ DCL POSITION_2PING  BIN FIXED(15);                                     
+ DCL SØGETEGN        CHAR (1);                                          
+ DCL POSITION_START  BIN FIXED(15);                                     
+ DCL POSITION_SLUT   BIN FIXED(15);                                     
+                                                                        
+    KODE_LINIE_GEM = KODE_LINIE;                                        
+                                                                        
+    POSITION_1PING = INDEX(KODE_LINIE, CHAR_1PING);                     
+    POSITION_2PING = INDEX(KODE_LINIE, CHAR_2PING);                     
+    POSITION_START = LENGTH(KODE_LINIE);                                
+                                                                        
+    DO WHILE (POSITION_1PING > 0 ! POSITION_2PING > 0);                 
+       IF POSITION_1PING > 0 THEN                                       
+       DO;                                                              
+          POSITION_START = POSITION_1PING;                              
+          SØGETEGN = CHAR_1PING;                                        
+       END;                                                             
+       IF POSITION_2PING > 0 & POSITION_2PING < POSITION_START THEN     
+       DO;                                                              
+          POSITION_START = POSITION_2PING;                              
+          SØGETEGN = CHAR_2PING;                                        
+       END;                                                             
+                                                                        
+       POSITION_SLUT  = INDEX(KODE_LINIE, SØGETEGN, POSITION_START + 1);
+       IF POSITION_SLUT = 0 THEN                                        
+       DO;                                                              
+          KODE_LINIE = KODE_LINIE_GEM;                                  
+          RETURN(FALSE);                                                
+       END;                                                             
+       KODE_LINIE = SUBSTR(KODE_LINIE, 1, POSITION_START - 1) !!        
+                    COPY(' ', POSITION_SLUT - POSITION_START + 1) !!    
+                    SUBSTR(KODE_LINIE, POSITION_SLUT + 1);              
+                                                                        
+       POSITION_1PING = INDEX(KODE_LINIE, CHAR_1PING);                  
+       POSITION_2PING = INDEX(KODE_LINIE, CHAR_2PING);                  
+       POSITION_START = LENGTH(KODE_LINIE);                             
+    END;                                                                
+                                                                        
+    RETURN(TRUE);                                                       
+                                                                        
+ END PING_FJERNER ;                                                     
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ LIGE_PINGER: PROC(KODE_LINIE)  RETURNS(BIT(1));                        
+                                                                        
+ DCL KODE_LINIE      CHAR(32767) VAR  BYADDR;                           
+                                                                        
+ DCL CHAR_1PING      CHAR (1)   VALUE("'");                             
+ DCL CHAR_2PING      CHAR (1)   VALUE('"');                             
+                                                                        
+ DCL POSITION_1PING  BIN FIXED(15);                                     
+ DCL POSITION_2PING  BIN FIXED(15);                                     
+ DCL POSITION_MIN    BIN FIXED(15);                                     
+ DCL POSITION_PING   BIN FIXED(15);                                     
+ DCL TEGN_MIN        CHAR (1);                                          
+ DCL PING_LIGE       BIT(1);                                            
+                                                                        
+    PING_LIGE = TRUE;                                                   
+                                                                        
+    POSITION_1PING = INDEX(KODE_LINIE, CHAR_1PING);                     
+    POSITION_2PING = INDEX(KODE_LINIE, CHAR_2PING);                     
+    POSITION_MIN   = 0;                                                 
+    TEGN_MIN       = ' ';                                               
+                                                                        
+    IF POSITION_1PING > 0 THEN                                          
+    DO;                                                                 
+       POSITION_MIN = POSITION_1PING;                                   
+       TEGN_MIN = CHAR_1PING;                                           
+    END;                                                                
+                                                                        
+    IF POSITION_2PING > 0 &                                             
+       (POSITION_MIN = 0 ! POSITION_MIN > POSITION_2PING) THEN          
+    DO;                                                                 
+       POSITION_MIN = POSITION_2PING;                                   
+       TEGN_MIN = CHAR_2PING;                                           
+    END;                                                                
+                                                                        
+    IF POSITION_MIN <> 0 THEN                                           
+    DO;                                                                 
+       POSITION_PING = 0;                                               
+       DO UNTIL (POSITION_PING = 0);                                    
+          POSITION_PING = INDEX(KODE_LINIE, POSITION_PING);             
+          IF POSITION_PING > 0 THEN                                     
+          DO;                                                           
+             PING_LIGE = ^PING_LIGE;                                    
+          END;                                                          
+       END;                                                             
+    END;                                                                
+                                                                        
+    RETURN(PING_LIGE);                                                  
+                                                                        
+ END LIGE_PINGER;                                                       
+                                                                        
+ /*********************************************************************/
+ /*                          OPEN DATASET                             */
+ /*********************************************************************/
+ ANALYSER_KODELINIE: PROC(KODE_LINIE)  RETURNS(BIN FIXED (31));         
+                                                                        
+ DCL KODE_LINIE      CHAR(32767) VAR;                                   
+ DCL RC              BIN FIXED (31)  INIT(0);                           
+                                                                        
+ DCL FUNDET_POS      BIN FIXED (31);                                    
+ DCL FUNDET_SLUT     BIN FIXED (31);                                    
+ DCL LÆNDGE          BIN FIXED (31);                                    
+ DCL KODE_STUMP      CHAR(200);                                         
+                                                                        
+ /* Test om CICS LINK */                                                
+    IF INDEX(KODE_LINIE, ' CICS ') > 0 THEN                             
+    DO;                                                                 
+       FUNDET_POS = INDEX(KODE_LINIE, ' PROGRAM');                      
+       IF FUNDET_POS > 0 THEN                                           
+       DO;                                                              
+          FUNDET_POS = INDEX(KODE_LINIE, "('", FUNDET_POS + 1);         
+          FUNDET_SLUT = INDEX(KODE_LINIE, "')", FUNDET_POS + 2);        
+          LÆNDGE = FUNDET_SLUT - (FUNDET_POS + 2);                      
+          KODE_STUMP = SUBSTR(KODE_LINIE, FUNDET_POS + 2, LÆNDGE);      
+          CALL BEHANDL_RELATION(KODE_STUMP, 'CICSLINK');                
+       END;                                                             
+    END;                                                                
+                                                                        
+    CALL PING_FJERNER(KODE_LINIE);                                      
+ /* Test om %INCLUDE */                                                 
+    FUNDET_POS = INDEX(KODE_LINIE, '%INCLUDE');                         
+    IF FUNDET_POS > 0 THEN                                              
+    DO;                                                                 
+       FUNDET_SLUT = INDEX(KODE_LINIE, ';', FUNDET_POS + 8);            
+       LÆNDGE = FUNDET_SLUT - (FUNDET_POS + 8);                         
+       KODE_STUMP = SUBSTR(KODE_LINIE, FUNDET_POS + 8, LÆNDGE);         
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, '%INCLUDE', '');       
+       CALL BEHANDL_RELATION(KODE_STUMP, 'INCLUDE');                    
+    END;                                                                
+                                                                        
+ /* Test om SQL INCLUDE */                                              
+    IF INDEX(KODE_LINIE, ' SQL ') > 0 THEN                              
+    DO;                                                                 
+       FUNDET_POS = INDEX(KODE_LINIE, ' INCLUDE ');                     
+       IF FUNDET_POS > 0 THEN                                           
+       DO;                                                              
+          FUNDET_SLUT = INDEX(KODE_LINIE, ';', FUNDET_POS + 9);         
+          LÆNDGE = FUNDET_SLUT - (FUNDET_POS + 9);                      
+          KODE_STUMP = SUBSTR(KODE_LINIE, FUNDET_POS + 9, LÆNDGE);      
+          CALL BEHANDL_RELATION(KODE_STUMP, 'SQL INC');                 
+       END;                                                             
+    END;                                                                
+                                                                        
+ /* Test om ENTRY (CALL PROGRAM) */                                     
+    FUNDET_SLUT = INDEX(KODE_LINIE, ' ENTRY ');                         
+    IF FUNDET_SLUT = 0 THEN                                             
+    DO;                                                                 
+       FUNDET_SLUT = INDEX(KODE_LINIE, ' ENTRY;');                      
+    END;                                                                
+    IF FUNDET_SLUT > 0 THEN                                             
+    DO;                                                                 
+       FUNDET_POS = INDEX(KODE_LINIE, 'DCL ');                          
+       LÆNDGE = FUNDET_SLUT - (FUNDET_POS + 4);                         
+       KODE_STUMP = SUBSTR(KODE_LINIE, FUNDET_POS + 4, LÆNDGE);         
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ';', ' ');             
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, '(', ' ');             
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ')', ' ');             
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' EXT ', '');          
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' EXTERNAL ', '');     
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' INT ', '');          
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' INTER ', '');        
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' INTERNAL ', '');     
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' OPTIONS ', '');      
+       EXEC SQL                                                         
+          SET :KODE_STUMP = REPLACE(:KODE_STUMP, ' ASM ', '');          
+ /* Her mangler sikkert flere OPTINOS ord                             */
+       CALL BEHANDL_RELATION(KODE_STUMP, 'ENTRY');                      
+    END;                                                                
+                                                                        
+    RETURN(RC);                                                         
+                                                                        
+ END ANALYSER_KODELINIE;                                                
+                                                                        
+ /*********************************************************************/
+ /*                          OPEN DATASET                             */
+ /*********************************************************************/
+ COMPRESS: PROC(KODE_IND)  RETURNS(CHAR(80) VAR);                       
+                                                                        
+ DCL KODE_IND         CHAR(80);                                         
+ DCL KODE_UD          CHAR(81)  VAR;                                    
+ DCL REMOVE           CHAR(8)  VAR;                                     
+                                                                        
+    IF KODE_IND > '' THEN                                               
+    DO;                                                                 
+       KODE_UD = ' ' !!TRIM(KODE_IND, ' ', ' ');                        
+                                                                        
+       REMOVE = COPY(' ', 8);                                           
+       EXEC SQL                                                         
+          SET :KODE_UD = REPLACE(:KODE_UD, :REMOVE, ' ');               
+                                                                        
+       REMOVE = COPY(' ', 4);                                           
+       EXEC SQL                                                         
+          SET :KODE_UD = REPLACE(:KODE_UD, :REMOVE, ' ');               
+                                                                        
+       REMOVE = COPY(' ', 2);                                           
+       EXEC SQL                                                         
+          SET :KODE_UD = REPLACE(:KODE_UD, :REMOVE, ' ');               
+                                                                        
+       REMOVE = COPY(' ', 2);                                           
+       EXEC SQL                                                         
+          SET :KODE_UD = REPLACE(:KODE_UD, :REMOVE, ' ');               
+    END;                                                                
+    ELSE DO;                                                            
+       KODE_UD = '';                                                    
+    END;                                                                
+                                                                        
+    RETURN(KODE_UD);                                                    
+                                                                        
+ END COMPRESS;                                                          
+                                                                        
+ /*********************************************************************/
+ /*                          OPEN DATASET                             */
+ /*********************************************************************/
+ BEHANDL_RELATION: PROC(KODE_LINIE, TYPE)  RETURNS(BIN FIXED (31));     
+                                                                        
+ DCL KODE_LINIE      CHAR(200)   BYVALUE;                               
+ DCL MEMBER          CHAR(8);                                           
+ DCL RC              BIN FIXED (31)  INIT(0);                           
+ DCL TYPE            CHAR(8);                                           
+                                                                        
+ DCL FUNDET_POS      BIN FIXED (31)  INIT(0);                           
+                                                                        
+    KODE_LINIE = TRIM(KODE_LINIE, ' ', ' ');                            
+                                                                        
+    EXEC SQL                                                            
+       SET :KODE_LINIE = REPLACE(:KODE_LINIE, '(', ' ');                
+    EXEC SQL                                                            
+       SET :KODE_LINIE = REPLACE(:KODE_LINIE, ')', ' ');                
+    EXEC SQL                                                            
+       SET :KODE_LINIE = REPLACE(:KODE_LINIE, ',', ' ');                
+                                                                        
+    KODE_LINIE = TRIM(KODE_LINIE, ' ', ' ');                            
+    DO WHILE (KODE_LINIE > '');                                         
+       FUNDET_POS = INDEX(KODE_LINIE, ' ');                             
+       IF FUNDET_POS = 0 THEN                                           
+       DO;                                                              
+          FUNDET_POS = LENGTH(KODE_LINIE);                              
+       END;                                                             
+       MEMBER = SUBSTR(KODE_LINIE, 1, FUNDET_POS);                      
+       CALL GEM_RELATION(MEMBER, TYPE);                                 
+       KODE_LINIE = SUBSTR(KODE_LINIE, FUNDET_POS, 200);                
+       KODE_LINIE = TRIM(KODE_LINIE, ' ', ' ');                         
+    END;                                                                
+    RETURN(RC);                                                         
+                                                                        
+ END BEHANDL_RELATION;                                                  
+                                                                        
+ /*********************************************************************/
+ /*                          OPEN DATASET                             */
+ /*********************************************************************/
+ OPEN_DATASET: PROC()  RETURNS(BIN FIXED (31));                         
+                                                                        
+ DCL  RC              BIN FIXED (31)  INIT(0);                          
+ DCL  PUNKTUM_POS_1   BIN FIXED (15);                                   
+ DCL  PUNKTUM_POS_2   BIN FIXED (15);                                   
+                                                                        
+     VOLSER = ' ';                                                      
+     DSNAME = ' ';                                                      
+     RECFM = ' ';                                                       
+     MAXREC = 0;                                                        
+     RETUR = 0;                                                         
+     RC = 0;                                                            
+                                                                        
+     CALL ZX66600 (DDNAME, VOLSER, DSNAME, RECFM, MAXREC, RETUR);       
+     IF RETUR > 0 THEN                                                  
+     DO;                                                                
+         PUT SKIP LIST ('DDNAME ' !! DDNAME !! ' FINDES IKKE');         
+         RC = 100;                                                      
+         RETURN(RC);                                                    
+     END;                                                               
+                                                                        
+     PUNKTUM_POS_1 = INDEX(DSNAME, '.', 1) + 1;                         
+     PUNKTUM_POS_2 = INDEX(DSNAME, '.', PUNKTUM_POS_1 + 1);             
+                                                                        
+     DCLXE10100T.ZMF_APPL = SUBSTR(DSNAME,                              
+                                   PUNKTUM_POS_1,                       
+                                   PUNKTUM_POS_2 - PUNKTUM_POS_1);      
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END OPEN_DATASET;                                                      
+                                                                        
+ /*********************************************************************/
+ /*                          OPEN DATASET                             */
+ /*********************************************************************/
+ CLOSE_DATASET: PROC()  RETURNS(BIN FIXED (31));                        
+                                                                        
+ DCL  RC              BIN FIXED (31)  INIT(0);                          
+                                                                        
+     RETUR = 0;                                                         
+     CALL ZX66610 ();                                                   
+     IF RETUR > 0 THEN                                                  
+     DO;                                                                
+        PUT SKIP LIST ('DDNAME ' !! DDNAME                              
+                       !! ' IKKE CLOSED ('                              
+                       !! RETUR !! ')');                                
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END CLOSE_DATASET;                                                     
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ ALLOCATE_MEMBER: PROC(PARMIND);                                        
+                                                                        
+ DCL PARMIND    CHAR(255) VAR;                                          
+ DCL DYNSTR  CHAR(255) VAR;                                             
+                                                                        
+     DYNSTR = 'ALLOC FI(TMP) DA(''' !! PARMIND !! ''') SHR REUSE';      
+     EOF_FILE = FALSE;                                                  
+                                                                        
+     CALL BPXWDYN(DYNSTR);                                              
+                                                                        
+  NEVER_CALL_ME: PROC;                                                  
+     RELEASE BPXWDYN;                                                   
+  END NEVER_CALL_ME;                                                    
+                                                                        
+  END ALLOCATE_MEMBER;                                                  
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ CLOSE_MEMBER: PROC();                                                  
+                                                                        
+ DCL DYNSTR  CHAR(255) VAR;                                             
+                                                                        
+     CLOSE FILE(TMP);                                                   
+     DYNSTR = 'FREE  FI(TMP)' ;                                         
+     CALL BPXWDYN(DYNSTR);                                              
+     RETURN;                                                            
+                                                                        
+  END CLOSE_MEMBER ;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ STATUS_MEMBER_UKENDT: PROC(MEMBER_TYP);                                
+                                                                        
+ DCL  MEMBER_TYP    CHAR(3);                                            
+                                                                        
+     EXEC SQL                                                           
+        UPDATE XE10000T                                                 
+        SET AKTIVT = 'N'                                                
+          , AENDR_TIME = CURRENT TIMESTAMP                              
+        WHERE ZMF_APPL   = :DCLXE10100T.ZMF_APPL                        
+          AND MEMBER_TYP = :DCLXE10100T.MEMBER_TYP;                     
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0, 100);                                                     
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+        END;                                                            
+     END;                                                               
+                                                                        
+                                                                        
+     RETURN;                                                            
+                                                                        
+  END STATUS_MEMBER_UKENDT ;                                            
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ GEM_MEMBER_INFORMATION: PROC(MEMBER_TYP)   RETURNS(BIT(1));            
+                                                                        
+ DCL  MEMBER_TYP      CHAR(3);                                          
+ DCL  RC              BIT(1);                                           
+                                                                        
+     RC = TRUE;                                                         
+                                                                        
+     EXEC SQL                                                           
+        MERGE INTO XE10000T OLD                                         
+        USING                                                           
+            ( VALUES ( :DCLXE10100T.ZMF_APPL                            
+                     , :MEMBER                                          
+                     , :DCLXE10100T.MEMBER_TYP                          
+                     , CURRENT TIMESTAMP ) ) AS NEW                     
+                                                                        
+            ( ZMF_APPL                                                  
+            , MEMBER                                                    
+            , MEMBER_TYP                                                
+            , AENDR_TIME )                                              
+        ON    OLD.ZMF_APPL    = NEW.ZMF_APPL                            
+          AND OLD.MEMBER      = NEW.MEMBER                              
+        WHEN MATCHED THEN                                               
+           UPDATE                                                       
+              SET AKTIVT     = 'J'                                      
+                , MEMBER_TYP = :DCLXE10100T.MEMBER_TYP                  
+                , AENDR_TIME = CURRENT TIMESTAMP                        
+        WHEN NOT MATCHED THEN                                           
+           INSERT                                                       
+              ( ZMF_APPL                                                
+              , MEMBER                                                  
+              , MEMBER_TYP                                              
+              , AKTIVT                                                  
+              , AENDR_TIME )                                            
+           VALUES                                                       
+              ( :DCLXE10100T.ZMF_APPL                                   
+              , :MEMBER                                                 
+              , :DCLXE10100T.MEMBER_TYP                                 
+              , 'J'                                                     
+              , CURRENT TIMESTAMP );                                    
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+        END;                                                            
+     END;                                                               
+                                                                        
+     RC = GEM_RELATION('', 'MEMBER');                                   
+                                                                        
+     RETURN(RC);                                                        
+                                                                        
+ END GEM_MEMBER_INFORMATION ;                                           
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ OPRYD_KOMMENTARER: PROC(MEMBER_TYP);                                   
+                                                                        
+ DCL  MEMBER_TYP    CHAR(3);                                            
+                                                                        
+     EXEC SQL                                                           
+        DELETE FROM XE10200T                                            
+        WHERE ZMF_APPL    = :DCLXE10100T.ZMF_APPL                       
+          AND MEMBER_TYP  = :DCLXE10100T.MEMBER_TYP;                    
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0, 100);                                                     
+     OTHERWISE                                                          
+        DO;                                                             
+           RC = 1000;                                                   
+           PUT SKIP DATA(SQLCA);                                        
+        END;                                                            
+     END;                                                               
+                                                                        
+ END OPRYD_KOMMENTARER;                                                 
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ GEM_KOMMENTAR: PROC(KOMMENTAR);                                        
+                                                                        
+ DCL KOMMENTAR       CHAR(72);                                          
+                                                                        
+     DCLXE10200T.LINJENR = DCLXE10200T.LINJENR + 1;                     
+                                                                        
+     EXEC SQL                                                           
+        INSERT INTO XE10200T                                            
+           ( ZMF_APPL                                                   
+           , MEMBER                                                     
+           , MEMBER_TYP                                                 
+           , LINJENR                                                    
+           , KOMMENTAR)                                                 
+        VALUES                                                          
+           ( :DCLXE10100T.ZMF_APPL                                      
+           , :MEMBER                                                    
+           , :DCLXE10100T.MEMBER_TYP                                    
+           , :DCLXE10200T.LINJENR                                       
+           , :KOMMENTAR);                                               
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(DCLXE10100T.ZMF_APPL                           
+           , MEMBER                                                     
+           , DCLXE10100T.MEMBER_TYP                                     
+           , DCLXE10200T.LINJENR                                        
+           , KOMMENTAR);                                                
+           PUT SKIP DATA(SQLCA);                                        
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN;                                                            
+                                                                        
+ END GEM_KOMMENTAR ;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ GEM_RELATION: PROC(REL_MEMBER, REL_ART)   RETURNS(BIT(1));             
+                                                                        
+ DCL  REL_MEMBER    CHAR(8);                                            
+ DCL  REL_ART       CHAR(8);                                            
+ DCL  DUMMYFELT     CHAR(1);                                            
+                                                                        
+     EXEC SQL                                                           
+        SELECT 'X'                                                      
+        INTO :DUMMYFELT                                                 
+        FROM XE10100T                                                   
+        WHERE ZMF_APPL    = :DCLXE10100T.ZMF_APPL                       
+          AND MEMBER      = :MEMBER                                     
+          and MEMBER_TYP  = :DCLXE10100T.MEMBER_TYP                     
+          AND REL_MEMBER  = :REL_MEMBER                                 
+          and REL_ART     = :REL_ART;                                   
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0)                                                           
+        DO;                                                             
+           RETURN(TRUE);                                                
+        END;                                                            
+     WHEN (100);                                                        
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(FALSE);                                               
+        END;                                                            
+     END;                                                               
+                                                                        
+     EXEC SQL                                                           
+        INSERT INTO XE10100T                                            
+            ( ZMF_APPL                                                  
+            , MEMBER                                                    
+            , MEMBER_TYP                                                
+            , REL_MEMBER                                                
+            , REL_ART )                                                 
+        VALUES                                                          
+            ( :DCLXE10100T.ZMF_APPL                                     
+            , :MEMBER                                                   
+            , :DCLXE10100T.MEMBER_TYP                                   
+            , :REL_MEMBER                                               
+            , :REL_ART );                                               
+                                                                        
+     SELECT;                                                            
+     WHEN (SQLCA.SQLCODE = 0);                                          
+     WHEN (SQLCA.SQLCODE = -803 & REL_ART = 'MEMBER')                   
+        DO;                                                             
+           MEDD.MEDDNR = '01';                                          
+           MEDD.KODE = '550';                                           
+           MEDD.TXT  = 'MEMBER ' !! MEMBER !! ' FINDES FLERE GANGE';    
+           CALL ZS30101(2,MEDD,2);                                      
+           RETURN(FALSE);                                               
+        END;                                                            
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(FALSE);                                               
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN(TRUE);                                                      
+                                                                        
+  END GEM_RELATION ;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+ RYD_OP_DATABASE: PROC()  RETURNS(BIN FIXED (31));                      
+                                                                        
+ DCL  RC            BIN FIXED (31)  INIT(0);                            
+                                                                        
+     RC = 0;                                                            
+                                                                        
+     EXEC SQL                                                           
+        DELETE FROM XE10100T                                            
+        WHERE ZMF_APPL    = :DCLXE10100T.ZMF_APPL                       
+          AND MEMBER_TYP  = :DCLXE10100T.MEMBER_TYP;                    
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0, 100);                                                     
+     OTHERWISE                                                          
+        DO;                                                             
+           RC = 1000;                                                   
+           PUT SKIP DATA(SQLCA);                                        
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN(RC);                                                        
+                                                                        
+  END RYD_OP_DATABASE ;                                                 
+                                                                        
+ /*********************************************************************/
+     CALL PLIRETC(RC);                                                  
+                                                                        
+ END XE10000;                                                           

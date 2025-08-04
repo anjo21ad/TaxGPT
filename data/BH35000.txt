@@ -1,0 +1,357 @@
+ BH35000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS SLUT 2006                                         **
+ * PROGRAMNAVN: BH35000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE AKTIVE OG VALIDE EJENDOMME   *
+ *              FRA EVS SLUT 2005 MED FEJLAGTIG FASTFROSSENT NEDSLAG   *
+ * INDDATA:     BQ30000T/BQ31000T - EVS PERSONTABEL.                   *
+ *              BQ40000T/BQ41000T - EVS RESULTATTABEL.                 *
+ * UDDATA:      BH35000O - UDTRÆK FRA EVS SLUT 2005 MED FEJLAGTIG      *
+ *                         FASTFROSSENT NEDSLAG.                       *
+ *              BH35001Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: BO SCHMIDT            BOB,    PKF BALLERUP 03.11.2006. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2006');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */
+         EXEC SQL INCLUDE BQ30000T;     /* EVS SLUT EJERSKABSTABEL    */
+         EXEC SQL INCLUDE BQ31000T;     /* EVS SLUT EJERSKABSFELTTABEL*/
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+                                                                        
+ DCL     DCPRN_NGL      DEC FIXED (11,0);                               
+ DCL     KOM_NGL        BIN FIXED (15);                                 
+ DCL     EJD_NGL        BIN FIXED (31);                                 
+ DCL     FETCH_SQLKODE  FIXED BIN(15)    INIT(0);                       
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     HJ_DATOEN       CHAR (8);                                      
+ DCL     1 HJ_DATO       BASED(ADDR(HJ_DATOEN)),                        
+           2 AAR         PIC  '9999',                                   
+           2 MD          PIC  '99',                                     
+           2 DG          PIC  '99';                                     
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ DCL     BH350O FILE OUTPUT RECORD; /* EVS UDTRÆK                     */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_SLUT,                                                 
+           %INCLUDE BH35000N;;                                          
+                                                                        
+ DCL     1 PERSON,                    /* EVS EJERSKABSTABELEN       */  
+           %INCLUDE BQ05200N;;                                          
+                                                                        
+ DCL     1 INDK_PERS,                 /* INDIKATOR EJERSKAB OPLYSN. */  
+           %INCLUDE BQ05006N;;                                          
+                                                                        
+ DCL     1 PERSON_2004,                                                 
+           5 BFASTSTIGBGR    DEC FIXED(15,2),                           
+           5 BFASTSTIGBGR_SW BIN FIXED (15) UNAL;                       
+                                                                        
+ DCL     1 EVS_ESK,                     /* EVS EJERSKABSTABELEN       */
+           %INCLUDE BQ30000N;;                                          
+ DCL     1 EVS_ESK_FELT,                /* EVS EJERSKABSFELTTABELEN   */
+           %INCLUDE BQ31000N;;                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆS_PERSON     BIN FIXED (31) INIT(0);/* LÆSTE PERSONTABEL  */
+ DCL   ANTSKRIV_PERSON   BIN FIXED (31) INIT(0);/* SKREVET UDTRÆKSFIL */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL1        CHAR (66);                                     
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH35000');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+         UDTRÆK_SLUT = '';                                              
+         PERSON      = '';                                              
+         EVS_ESK     = '';                                              
+                                                                        
+         DT = DATE;                                                     
+         CALL INIT_INDK;                                                
+                                                                        
+         OPEN FILE (BH350O) TITLE ('BH35000O');                         
+                                                                        
+         CALL ZZ20390('*OPEN','BH35001Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' UDTRÆK FRA EVS SLUT 2005    ' !! 'DATO: '   
+                       !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;  
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH35000 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+         CALL DECLARE_CURSOR;                                           
+         CALL OPEN_PERSONEJENDOMSOPL;                                   
+         CALL FETCH_PERSONEJENDOMSOPL;                                  
+                                                                        
+         SELECT (FETCH_SQLKODE);  /*GEMT SQLCODE FRA FETCH_PERSONEJ. */ 
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               DO WHILE (FETCH_SQLKODE = 0);                            
+                  CALL BEHANDL;                                         
+                  CALL INIT_INDK;                                       
+                  CALL FETCH_PERSONEJENDOMSOPL;                         
+               END;                                                     
+             END;                                                       
+                                                                        
+           WHEN (100)                                                   
+               PUT SKIP LIST ('INGEN RÆKKER LÆST');                     
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH PERSON_CURSOR ';                     
+               FEJLTEKST  = 'BH35000 ** 251 ' !! FEJLTEKST;             
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+         CALL INIT_INDK;                                                
+         CALL SIDSTE_PERSONEJENDOMSOPL;                                 
+         IF SQLCA.SQLCODE = 0                                           
+         THEN                                                           
+            DO;                                                         
+              IF INDK_PERS.BFASTSTIGBGR_I = 0                           
+               & (PERSON.CEJBEVS = '0' !                                
+                  PERSON.CEJBEVS = '1' !                                
+                  PERSON.CEJBEVS = '2' !                                
+                  PERSON.CEJBEVS = '3' !                                
+                  PERSON.CEJBEVS = '4')                                 
+              THEN                                                      
+                 DO;                                                    
+                   CALL SKAF_BFASTSTIG_2004;                            
+                                                                        
+                   IF PERSON.DHENVN > 0                                 
+                    & PERSON_2004.BFASTSTIGBGR_SW = -1                  
+                   THEN                                                 
+                      CALL SKAF_ÆGT_BFASTSTIG_2004;                     
+                                                                        
+                   IF PERSON_2004.BFASTSTIGBGR_SW = -1                  
+                   THEN                                                 
+                      CALL SKRIV_UDTRÆK;                                
+                 END;                                                   
+            END;                                                        
+                                                                        
+         PERSON   = '';                                                 
+         EVS_ESK  = '';                                                 
+                                                                        
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /*      SKRIV UDTRÆK                                                 */
+ /*********************************************************************/
+ SKRIV_UDTRÆK: PROC;                                                    
+                                                                        
+         UDTRÆK_SLUT.DCPRN  = EVS_ESK.DCPRN;                            
+         UDTRÆK_SLUT.EKOMNR = EVS_ESK.EKOMNR;                           
+         UDTRÆK_SLUT.EEJDNR = EVS_ESK.EEJDNR;                           
+                                                                        
+         UDTRÆK_SLUT.BFASTSTIGBGR = PERSON.BFASTSTIGBGR;                
+                                                                        
+         UDTRÆK_SLUT.FYLD1 = ',';                                       
+         UDTRÆK_SLUT.FYLD2 = ',';                                       
+         UDTRÆK_SLUT.FYLD3 = ',';                                       
+                                                                        
+         WRITE FILE (BH350O) FROM (UDTRÆK_SLUT);                        
+         ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                         
+                                                                        
+ END SKRIV_UDTRÆK;                                                      
+                                                                        
+ /*********************************************************************/
+ /* OPSÆT BRUGTE INDIKATORE TIL -1 SOM STARTS VÆRDI            RUTINE */
+ /*********************************************************************/
+ INIT_INDK: PROC;                                                       
+                                                                        
+   INDK_PERS.BBER2FAM_I         = -1;                                   
+   INDK_PERS.BBER2FAM_015ANV_I  = -1;                                   
+   INDK_PERS.BBERGRL_I          = -1;                                   
+   INDK_PERS.BBERGRL_015ANV_I   = -1;                                   
+   INDK_PERS.BBERGRLUDL_01_I    = -1;                                   
+   INDK_PERS.BEJBOL1_I          = -1;                                   
+   INDK_PERS.BEJBOL1_015ANV_I   = -1;                                   
+   INDK_PERS.BEJBOL2_I          = -1;                                   
+   INDK_PERS.BEJBOL2_015ANV_I   = -1;                                   
+   INDK_PERS.BEJBOLANV_I        = -1;                                   
+   INDK_PERS.BEJBOLANV_015ANV_I = -1;                                   
+   INDK_PERS.BEJBOLANV_02_I     = -1;                                   
+   INDK_PERS.BEJDVÆR_015ANV_I   = -1;                                   
+   INDK_PERS.BEVSGL_I           = -1;                                   
+   INDK_PERS.BEVSMAN_I          = -1;                                   
+   INDK_PERS.BFORSKAT_I         = -1;                                   
+   INDK_PERS.BGRPROM1_I         = -1;                                   
+   INDK_PERS.BGRPROM2_I         = -1;                                   
+   INDK_PERS.BMANNEDSL_I        = -1;                                   
+   INDK_PERS.BNEDSL1_I          = -1;                                   
+   INDK_PERS.BNEDSL2_I          = -1;                                   
+   INDK_PERS.BNETTO_I           = -1;                                   
+   INDK_PERS.BOMBTILBUDL_01_I   = -1;                                   
+   INDK_PERS.BPENSNED_I         = -1;                                   
+   INDK_PERS.BPENSNEDGL_I       = -1;                                   
+   INDK_PERS.BPENSNÆ_I          = -1;                                   
+   INDK_PERS.BPROM1_I           = -1;                                   
+   INDK_PERS.BPROM2_I           = -1;                                   
+   INDK_PERS.BSTIBEGR_I         = -1;                                   
+   INDK_PERS.BSTITIL_I          = -1;                                   
+   INDK_PERS.BSUM1_I            = -1;                                   
+   INDK_PERS.BSUM2_I            = -1;                                   
+   INDK_PERS.BUDLSKC_I          = -1;                                   
+   INDK_PERS.GPCTEJER_I         = -1;                                   
+   INDK_PERS.MANNEDSLSTI_I      = -1;                                   
+   INDK_PERS.BEJBOLANV_015PCT_I = -1;                                   
+   INDK_PERS.BEJBOLANV_02OM_I   = -1;                                   
+   INDK_PERS.BEJBOLANV_02OMNY_I = -1;                                   
+   INDK_PERS.BBER2FAM_AKT_I     = -1;                                   
+   INDK_PERS.BBERGRL_AKT_I      = -1;                                   
+   INDK_PERS.BEJBOL1_AKT_I      = -1;                                   
+   INDK_PERS.BEJBOL2_AKT_I      = -1;                                   
+   INDK_PERS.BEJBOLANV_AKT_I    = -1;                                   
+   INDK_PERS.BPENSNÆGL_I        = -1;                                   
+   INDK_PERS.BSUM3_I            = -1;                                   
+   INDK_PERS.BGLSUM1_I          = -1;                                   
+   INDK_PERS.BFASTSTIGBGR_I     = -1;                                   
+   INDK_PERS.BMANEVSSTI_I       = -1;                                   
+   INDK_PERS.MANPENSSTI_I       = -1;                                   
+   INDK_PERS.BBER2FAM_02ANV_I   = -1;                                   
+   INDK_PERS.BBERGRL_02ANV_I    = -1;                                   
+   INDK_PERS.BEJBOL1_02ANV_I    = -1;                                   
+   INDK_PERS.BEJBOL2_02ANV_I    = -1;                                   
+   INDK_PERS.BEJBOLANV_01OM_I   = -1;                                   
+   INDK_PERS.BEJBOLANV_01OMNY_I = -1;                                   
+   INDK_PERS.BEJBOLANV_02ANV_I  = -1;                                   
+   INDK_PERS.BEJDVÆR_02ANV_I    = -1;                                   
+                                                                        
+ END INIT_INDK;                                                         
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST('SQL_FEJL.....');                                
+         PUT SKIP LIST('SQLCA',SQLCA);                                  
+         CLOSE FILE(BH350O);                                            
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD =  FEJLTEKST;                                        
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE(BH350O);                                            
+         CALL CLOSE_PERSONEJENDOMSOPL;                                  
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA PERSONTABELLEN ................'; 
+         LIN.ANT   = ANTLÆS_PERSON;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT ............................'; 
+         LIN.ANT   = ANTSKRIV_PERSON;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ %INCLUDE BH35000M;             /* DECLARE OG FETCH SQL STATEMENTS.   */
+ %INCLUDE ZM90013M;             /* OMSÆT DATO TIL/FRA DB2-DATOFORMAT  */
+ %INCLUDE ZM90051M;             /* KONV BIN15 TIL CHAR                */
+ %INCLUDE BS34307M;             /* KONV BF31 TIL CHAR6                */
+ %INCLUDE BH30001M;             /* KONV DATO FRA CHAR TIL DEC FIXED   */
+ %INCLUDE BH30002M;             /* KONV CHAR(10) TIL DEC FIXED(11)    */
+ %INCLUDE BH30010M;             /* FLYT VÆRDIER FRA EJERSKABS FELTER  */
+                                                                        
+      ; /* UNDGÅ PROBLEMER MED LABEL */                                 
+ DCL 1 ZM,                                                              
+       2  DUMMY           CHAR (01);                                    
+ END BH35000;                                                           

@@ -1,0 +1,791 @@
+ BE86600: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD / EVS SLUT                                 *
+ * PROGRAMNAVN: BE86600.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Konvertering af MT til DB2-tabeller                    *
+ *              til ønsket år ifølge parameterfil                      *
+ * PGMFORLØB:   1. Slet data i tabeller for ønsket år/afv.id           *
+ *              2. Læs Mandtal seq dataset                             *
+ *              3. Check hvilken type input og vælg korrekt struktur   *
+ *              4. SKRIV RÆKKER PÅ DB2-TABELLER                        *
+ *              5. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     Mandtal dataset (type iflg. BE86PI)                    *
+ *                  MT1 - BR84250N  -- > BR44250N                      *
+ *                  MT2 - BE65300N                                     *
+ *                                                                     *
+ * UDDATA:      BE86601Y - KONTROLLISTE.                               *
+ *              BE66000T - MT-OPLYSNINGER                              *
+ ***********************************************************************
+ * OPRETTET   : Lene Maj Jensen   QLE             BALLERUP 26.02.2018  *
+ * RETTET     : Esben Brodersen   EBD             BALLERUP 26.09.2018  *
+ * RULLET BR34250N -> BR44250N                                         *
+ **********************************************************************/
+ /* Slut 2020 : Elena Flygenring EFL                       marts 2021 */
+ /*              - struktur BE65300M erstattes med BE55300M           */
+ /*              - struktur BE65300N erstattes med BE65321N           */
+ /*              - Brug af FILE BE866I og BE866_PARM fjernes          */
+ /*              - BE866_PARM.FS_MRK fjernes                          */
+ /*              - BE866_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes*/
+ /*                erstattes med brug af BE55300M.AFVIKLINGS_ID       */
+ /*              - BE866_PARM.AAR fjernes                             */
+ /*                erstattes med brug af BE55300M.TIL_EVS_AAR         */
+ /*              - BE66000T: nyt felt DATA_ID tilføjet                */
+ /*                                                                   */
+ /*   Rettet af :  LAC Sep 2023. BFF17 Trin 4                         */
+ /*                BE86600t er udvidet med 2 felter CMFRG og          */
+ /*                OPGØR_ID, og dissse er nu med i input til M1       */
+ /*                Tidligere navngivning var forkert, så alt          */
+ /*                BR842 er ændret til BR442                          */
+ /*                B86600T M2 opdateres ved at hente de 2 nye felter  */
+ /*                på BE86600T's M1 oplysninger                       */
+ /*                                                                   */
+ /*                PEN Feb. 2024 BF17 Trin 4                          */
+ /*                Delete rettet så også data_id indgår i kriterie    */
+ /*                                                                   */
+ /*                PEN Feb. 2024 BF17 Trin 4                          */
+ /*                Ændret fra  BE65324N => BE65325N til SLUT 2024 og  */
+ /*                FORSKUD 2025                                       */
+ /*   Rettet af :  JJJ Jun 2024. BFF17 Trin 3                         */
+ /*                BE55600M erstatter BE55300M                        */
+ /*********************************************************************/
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KOMMUNEDATA A/S 2006');    
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     BE86PI FILE RECORD INPUT;     /* Styring af inputtype   */     
+ DCL     BEMT0I FILE RECORD INPUT;     /* MT-fil                 */     
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+ /*********************************************************************/
+ /* DECLARE AF Øvrige filer                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     1 KOER_PARM,  /* styrer hvilket input der benyttes */          
+         3 KØRSELS_ID        CHAR(5),  /* MT1, MT2, ESR1, ESR2 osv */   
+         3 REST              CHAR(75);                                  
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+         EXEC SQL INCLUDE BE66000T;  /* MANDTAL              */         
+                                                                        
+ DCL     1 MT,                                                          
+         %INCLUDE BE6600TN;                                             
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF includes til mt-filer                             */
+ /* hvilken struktur der benyttes er parameterstyret                  */
+ /*********************************************************************/
+                                                                        
+             /* MT BR44250N */                                          
+ DCL     BR442_AR        CHAR      (2000) VAR;   /*RUL*/                
+                                                                        
+ DCL     1 BR442         BASED(ADDR(BR442_AR)) UNAL, /*RUL*/            
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BR44250N;                   /*RUL*/                 
+                                                                        
+ DCL     1 BR44259       BASED(ADDR(BR442_AR)), /*RUL*/                 
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BR44259N;                   /*RUL*/                 
+                                                                        
+         /* MT BE65300N */                                              
+ DCL     BE653_AR        CHAR      (2000) VAR;   /*RUL*/                
+ DCL     1 BE653        BASED(ADDR(BE653_AR)), /*RUL*/                  
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BE65325N;;                                          
+                                                                        
+ DCL     1 BE65399       BASED(ADDR(BE653_AR)), /*RUL*/                 
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BE65399N;                   /*RUL*/                 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_KØRSELS_ID                 CHAR(5);                         
+                                                                        
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_Z_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                  
+                                                                        
+ DCL     WS_Z_TIL_EVS_AAR                 BIN FIXED (15);               
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE86600');              
+                                                                        
+ /* BFF17 Trin 4 */                                                     
+ DCL     WS_CMFRG         Char (1); //  PIC   '9';                      
+ DCL     WS_OPGØR_ID      BIN FIXED(31);                                
+ DCL     WS_OPGØR_ID_PIC  PIC '99999999999';                            
+                                                                        
+                                                                        
+                                                                        
+ DCL     1 BE866_PARM,                                                  
+           %INCLUDE BE86600N;                                           
+                                                                        
+ DCL     1 BE88Z_PARM,                                                  
+           %INCLUDE BE86600N;                                           
+                                                                        
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     EOF_BE88P       BIT       (01)      INIT      ('0'B);          
+ DCL     EOF_BEMT       BIT       (01)      INIT      ('0'B);           
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     MATCH_FUNDET    BIT       (1)     INIT ('0'B);                 
+ DCL     TEST_PUT        BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     AAR_SIDSTE   pic '9999';  /* benyttes i sidste_ */             
+ DCL     AAR_DETTE    pic '9999';  /* benyttes i dette_ */              
+ DCL     AAR_NAESTE   pic '9999';  /* benyttes i naeste_ */             
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE86600'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTEN                     */
+ /*********************************************************************/
+                                                                        
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (1),                                 
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE86600L'),                                        
+           2 F1          CHAR      (23)      INIT      (' '),           
+           2 TEKST2      CHAR      (43)      INIT      (                
+           'MT INPUT TIL BEREGNING '),                                  
+           2 ÅR          PIC       '9999',                              
+           2 F2          CHAR      (21)      INIT      ((21)' '),       
+           2 TEKST4      CHAR      (14)      INIT      (                
+           'UDSKREVET DEN '),                                           
+           2 DATO        CHAR      (10);                                
+                                                                        
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (1),                                 
+           2 F1          CHAR      (53)      INIT      (' '),           
+           2 TEKST1      CHAR      (79)      INIT                       
+           ('KØRSELSKONTROLLISTE');                                     
+                                                                        
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (1),                                 
+           2 TEKST       CHAR      (53),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F1          CHAR      (68)      INIT      (' ');           
+                                                                        
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+                                                                        
+ DCL     ZS61900         ENTRY;              /* UDSKRIV SSI-DATO      */
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANT_INS_MT BIN FIXED (31) INIT(0);  /* HERAF INSERTED */       
+ DCL     ANT_LÆS BIN FIXED (31) INIT(0);      /* LÆST PÅ MT-dataset  */ 
+ /*********************************************************************/
+ /* Declare af Cursors                                                */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_BEMT = NEJ;                                                
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE86600L');             
+            END;                                                        
+                                                                        
+         ON ENDFILE (BEMT0I)                                            
+         BEGIN;                                                         
+            EOF_BEMT = JA;                                              
+            BR442.DCPRN = 9999999999;                                   
+            BE653.DCPRN = 9999999999;                                   
+         END;                                                           
+                                                                        
+         OPEN FILE (BEMT0I) TITLE ('BEMT000I');                         
+                                                                        
+         ON ENDFILE (BE86PI)                                            
+         BEGIN;                                                         
+            EOF_BE88P = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (BE86PI) TITLE ('BE8660PZ');                         
+                                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+            SELECT (BE55600M.AFVIKLINGS_ID);                            
+               WHEN ('OPRET_EVS_FORSK')                                 
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;        
+                     OVERLIN1.TEKST2 = 'MT data FORSKUD';               
+                     AAR_SIDSTE = WS_TIL_EVS_AAR - 2;                   
+                     AAR_DETTE  = WS_TIL_EVS_AAR - 1;                   
+                     AAR_NAESTE = WS_TIL_EVS_AAR;                       
+                  END;                                                  
+               WHEN ('OPRET_EVS_SLUT')                                  
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;        
+                     OVERLIN1.TEKST2 = 'MT data SLUT';                  
+                     AAR_SIDSTE = WS_TIL_EVS_AAR - 1;                   
+                     AAR_DETTE = WS_TIL_EVS_AAR;                        
+                     AAR_NAESTE = WS_TIL_EVS_AAR + 1;                   
+                  END;                                                  
+               WHEN ('SUPPL_EVS_SLUT')                                  
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.TIL_EVS_AAR;        
+                     OVERLIN1.TEKST2 = 'MT data SUPPLEMENT';            
+                     AAR_SIDSTE = WS_TIL_EVS_AAR - 1;                   
+                     AAR_DETTE = WS_TIL_EVS_AAR;                        
+                     AAR_NAESTE = WS_TIL_EVS_AAR + 1;                   
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+                                                                        
+         READ FILE (BE86PI) INTO (KOER_PARM);                           
+                                                                        
+         IF EOF_BE88P = NEJ                                             
+         THEN DO;                                                       
+            SELECT (KOER_PARM.KØRSELS_ID);                              
+               WHEN ('MT1')                                             
+                  DO;                                                   
+                     WS_KØRSELS_ID = KOER_PARM.KØRSELS_ID;              
+                  END;                                                  
+               WHEN ('MT2')                                             
+                  DO;                                                   
+                     WS_KØRSELS_ID = KOER_PARM.KØRSELS_ID;              
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERKFEJL';                   
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         CALL ZZ20390('*OPEN','BE86601Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.ÅR   = GLSLUTÅR - 1;                                  
+         OVERLIN1.DATO = UDDATO;                                        
+         SIDELIN.CCA   = ZZIK1;                                         
+         OVERLIN1.CCA  = ZZWS2;                                         
+         OVERLIN2.CCA  = ZZWS3;                                         
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL RYD_DB2_TABELLER; /* for:                               */
+                   /* til_evs_aar   = BE55600M.TIL_EVS_AAR            */
+                   /* afviklings_id = BE55600M.BE55600M.AFVIKLINGS_ID */
+                   /* kørsels_id    = koer_parm.kØRSELS_ID            */
+                                                                        
+         IF WS_KØRSELS_ID = 'MT1'                                       
+         then do;                                                       
+            CALL BEHANDL_MT1;                                           
+         end;                                                           
+                                                                        
+         IF WS_KØRSELS_ID = 'MT2'                                       
+         then do;                                                       
+            CALL BEHANDL_MT2;                                           
+         end;                                                           
+                                                                        
+         exec sql commit;                                               
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Behandl MT med struktur BR44250N                                  */
+ /*********************************************************************/
+ BEHANDL_MT1: PROC;                                                     
+                                                                        
+         CALL LÆS_MT1_DATASET;                                          
+                                                                        
+         DO WHILE (^EOF_BEMT);                                          
+                                                                        
+            /* Start med at nulstille output struktur */                
+            DCLBE66000T = '';                                           
+                                                                        
+            /* flyt data fra MT-dataset til db2-struktur */             
+            CALL FLYT_FELTER_BR442;                                     
+                                                                        
+            CALL INSERT_MTOPL;                                          
+                                                                        
+            CALL LÆS_MT1_DATASET;                                       
+         END;                                                           
+                                                                        
+ END BEHANDL_MT1;                                                       
+                                                                        
+ /*********************************************************************/
+ /* Behandl MT med struktur BE65324N                                  */
+ /*********************************************************************/
+ BEHANDL_MT2: PROC;                                                     
+                                                                        
+         CALL LÆS_MT2_DATASET;                                          
+                                                                        
+         DO WHILE (^EOF_BEMT);                                          
+                                                                        
+            /* Start med at nulstille output struktur */                
+            DCLBE66000T = '';                                           
+                                                                        
+            /* Hent oplysninger fra M1 - BFF17 Trin 4 */                
+            Call HENT_M1;                                               
+                                                                        
+            /* flyt data fra MT-dataset til db2-struktur */             
+            CALL FLYT_FELTER_BE653;                                     
+                                                                        
+            CALL INSERT_MTOPL;                                          
+                                                                        
+            CALL LÆS_MT2_DATASET;                                       
+         END;                                                           
+                                                                        
+ END BEHANDL_MT2;                                                       
+ /*********************************************************************/
+ /* Læs MT dataset med BE31800N struktur                              */
+ /*********************************************************************/
+ LÆS_MT1_DATASET: PROC;                                                 
+                                                                        
+       EOF_BEMT = '0'B;                                                 
+                                                                        
+       READ FILE (BEMT0I) INTO (BR442_AR);                              
+                                                                        
+       ANT_LÆS = ANT_LÆS + 1;                                           
+                                                                        
+       IF BR442.DCPRN >= 9999999999                                     
+       THEN DO;                                                         
+          EOF_BEMT = '1'B;                                              
+       END;                                                             
+                                                                        
+ END LÆS_MT1_DATASET;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Læs MT dataset med BE65321N struktur                              */
+ /*********************************************************************/
+ LÆS_MT2_DATASET: PROC;                                                 
+                                                                        
+       EOF_BEMT = '0'B;                                                 
+                                                                        
+       READ FILE (BEMT0I) INTO (BE653_AR);                              
+                                                                        
+       ANT_LÆS = ANT_LÆS + 1;                                           
+                                                                        
+       IF BE653.DCPRN >= 9999999999                                     
+       THEN DO;                                                         
+          EOF_BEMT = '1'B;                                              
+       END;                                                             
+                                                                        
+ END LÆS_MT2_DATASET;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Hent oplysninger fra M1       BF17 Trin 4                         */
+ /*********************************************************************/
+ HENT_M1: PROC;                                                         
+                                                                        
+       EXEC SQL                                                         
+           Select CMFRG,                                                
+                  PRINTOPGØRID                                          
+           INTO :WS_CMFRG,                                              
+                :WS_OPGØR_ID                                            
+       FROM BE66000T                                                    
+       WHERE TIL_EVS_AAR   = :WS_TIL_EVS_AAR                            
+         AND AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                       
+         AND DCPRN         = :BE653.DCPRN                               
+         AND DATA_ID       = :BE55600M.DATA_ID                          
+         AND KØRSELS_ID    = 'MT1'                                      
+         ;                                                              
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0);                                                    
+            WHEN(100) DO;                                               
+               WS_CMFRG = ' ';                                          
+               WS_OPGØR_ID = 0;                                         
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 Læs BE66000T';                          
+               PUT SKIP LIST ('BE653.DCPRN: ',BE653.DCPRN);             
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END HENT_M1;                                                           
+                                                                        
+ /*********************************************************************/
+ /* FLYT FELTER FRA MT1-struktur TIL DB2-STRUKTURER  FRA FORSKUD      */
+ /*********************************************************************/
+ FLYT_FELTER_BR442: PROC;                                               
+                                                                        
+    MT = '';                                                            
+    MT.TIL_EVS_AAR = WS_TIL_EVS_AAR;                                    
+    MT.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                             
+    MT.DATA_ID       = BE55600M.DATA_ID;                                
+    MT.KØRSELS_ID = 'MT1';                                              
+                                                                        
+    MT.DCPRN = BR442.DCPRN;                                             
+    MT.PROGRAMNAVN = WS_PROGRAMNAVN;                                    
+    MT.DB2FUNKTION = 'I';                                               
+    MT.CCIVS = BR442.CCIVS;                                             
+    MT.CRGN = BR442.CRGN;                                               
+    MT.DSORP = BR442.DSORP;                                             
+    MT.CPART = BR442.CPART;                                             
+    MT.BPENSIND = BR442.BPENSIND;                                       
+    MT.BPENSGR = BR442.BPENSGR;                                         
+    MT.CSTATUS = BR442.CSTATUS;                                         
+    MT.HIST_OPD_DETTE_DHENVN = BR442.DHENVN;                            
+    MT.HIST_OPD_DETTE_CSBSK = BR442.CSBSK;                              
+    MT.HIST_OPD_DETTE_CSKPLOM = BR442.CSKPLOM;                          
+    MT.HIST_OPD_DETTE_DCIÆN = BR442.DCIÆN;                              
+    /* BF17 trin 4 */                                                   
+    MT.CMFRG        = BR442.CMFRG;                                      
+    MT.PRINTOPGØRID = BR442.OPGØR_ID;                                   
+                                                                        
+                                                                        
+ END FLYT_FELTER_BR442;                                                 
+ /*********************************************************************/
+ /* FLYT FELTER FRA MT2-struktur TIL DB2-STRUKTURER  FRA FORSKUD      */
+ /*********************************************************************/
+ FLYT_FELTER_BE653: PROC;                                               
+                                                                        
+    MT = '';                                                            
+    MT.TIL_EVS_AAR = WS_TIL_EVS_AAR;                                    
+    MT.AFVIKLINGS_ID = WS_FORSKUD_SLUT_TXT;                             
+    MT.DATA_ID       = BE55600M.DATA_ID;                                
+    MT.KØRSELS_ID = 'MT2';                                              
+                                                                        
+    MT.PROGRAMNAVN = WS_PROGRAMNAVN;                                    
+    MT.DB2FUNKTION = 'I';                                               
+                                                                        
+    MT.DCPRN = BE653.DCPRN;                                             
+    MT.PROGRAMNAVN = WS_PROGRAMNAVN;                                    
+    MT.CCIVS = BE653.CCIVS;                                             
+    MT.CPENS = BE653.CPENS;                                             
+    MT.CRGN = BE653.CRGN;                                               
+    MT.DSORP = BE653.DSORP;                                             
+    MT.CPART = BE653.CPART;                                             
+    MT.CFRÅR = BE653.CFRÅR;                                             
+    MT.CFRÅROPR = BE653.CFRÅROPR;                                       
+    MT.DRGNÅRFRA = BE653.DRGNÅRFRA;                                     
+    MT.DRGNÅRTIL = BE653.DRGNÅRTIL;                                     
+    MT.BPENSIND = BE653.BPENSIND;                                       
+    MT.BPENSGR = BE653.BPENSGR;                                         
+    MT.CSTATUS = BE653.CSTATUS;                                         
+    MT.CDØDÆGTF = BE653.CDØDÆGTF;                                       
+    MT.CDUBLET = BE653.CDUBLET;                                         
+    MT.CÆGTF_OK = BE653.CÆGTF_OK;                                       
+    MT.COVF_DHE = BE653.COVF_DHE;                                       
+    MT.FØROPL_DCIÆN_GL = BE653.FØROPL.DCIÆN_GL;                         
+    MT.FØROPL_CCIVS_GL = BE653.FØROPL.CCIVS_GL;                         
+    /*QEB RET TAGET FRA BK86600L*/                                      
+    MT.HIST_OPD_SIDSTE_DHENVN = BE653.HIST_OPL(AAR_SIDSTE).DHENVN;      
+    MT.HIST_OPD_SIDSTE_CSBSK = BE653.HIST_OPL(AAR_SIDSTE).CSBSK;        
+    MT.HIST_OPD_SIDSTE_CSKPLOM = BE653.HIST_OPL(AAR_SIDSTE).CSKPLOM;    
+    MT.HIST_OPD_SIDSTE_DCIÆN = BE653.HIST_OPL(AAR_SIDSTE).DCIÆN;        
+    MT.HIST_OPD_DETTE_DHENVN = BE653.HIST_OPL(AAR_DETTE).DHENVN;        
+    MT.HIST_OPD_DETTE_CSBSK = BE653.HIST_OPL(AAR_DETTE).CSBSK;          
+    MT.HIST_OPD_DETTE_CSKPLOM = BE653.HIST_OPL(AAR_DETTE).CSKPLOM;      
+    MT.HIST_OPD_DETTE_DCIÆN = BE653.HIST_OPL(AAR_DETTE).DCIÆN;          
+    MT.HIST_OPD_NAESTE_DHENVN = BE653.HIST_OPL(AAR_NAESTE).DHENVN;      
+    MT.HIST_OPD_NAESTE_CSBSK = BE653.HIST_OPL(AAR_NAESTE).CSBSK;        
+    MT.HIST_OPD_NAESTE_CSKPLOM = BE653.HIST_OPL(AAR_NAESTE).CSKPLOM;    
+    MT.HIST_OPD_NAESTE_DCIÆN = BE653.HIST_OPL(AAR_NAESTE).DCIÆN;        
+    MT.PER_DERHVPER_FRA1 = BE653.PER.DERHVPER_FRA1;                     
+    MT.PER_DERHVPER_TIL1 = BE653.PER.DERHVPER_TIL1;                     
+    MT.PER_DERHVPER_FRA2 = BE653.PER.DERHVPER_FRA2;                     
+    MT.PER_DERHVPER_TIL2 = BE653.PER.DERHVPER_TIL2;                     
+    MT.PER_DERHVPER_FRA3 = BE653.PER.DERHVPER_FRA3;                     
+    MT.PER_DERHVPER_TIL3 = BE653.PER.DERHVPER_TIL3;                     
+    MT.PER_DERHVPER_FRA4 = BE653.PER.DERHVPER_FRA4;                     
+    MT.PER_DERHVPER_TIL4 = BE653.PER.DERHVPER_TIL4;                     
+    MT.PER_DERHVPER_FRA5 = BE653.PER.DERHVPER_FRA5;                     
+    MT.PER_DERHVPER_TIL5 = BE653.PER.DERHVPER_TIL5;                     
+    /* BF17 trin 4 */                                                   
+    MT.CMFRG        =  WS_CMFRG;                                        
+    MT.PRINTOPGØRID =  WS_OPGØR_ID;                                     
+                                                                        
+                                                                        
+ END FLYT_FELTER_BE653;                                                 
+ /*********************************************************************/
+ /* INSERT række på DB2-tabel til MT                           RUTINE */
+ /*********************************************************************/
+ INSERT_MTOPL: PROC;                                                    
+                                                                        
+         EXEC SQL                                                       
+            INSERT INTO BE66000T                                        
+            (                                                           
+         TIL_EVS_AAR,                                                   
+         AFVIKLINGS_ID,                                                 
+         DATA_ID,                                                       
+         KØRSELS_ID,                                                    
+         DCPRN,                                                         
+         PROGRAMNAVN,                                                   
+         DB2FUNKTION,                                                   
+         OPRET_TS,                                                      
+         CCIVS,                                                         
+         CPENS,                                                         
+         CRGN,                                                          
+         DSORP,                                                         
+         CPART,                                                         
+         CFRÅR,                                                         
+         CFRÅROPR,                                                      
+         DRGNÅRFRA,                                                     
+         DRGNÅRTIL,                                                     
+         BPENSIND,                                                      
+         BPENSGR,                                                       
+         CSTATUS,                                                       
+         CDØDÆGTF,                                                      
+         CDUBLET,                                                       
+         CÆGTF_OK,                                                      
+         COVF_DHE,                                                      
+         FØROPL_DCIÆN_GL,                                               
+         FØROPL_CCIVS_GL,                                               
+         HIST_OPD_SIDSTE_DHENVN,                                        
+         HIST_OPD_SIDSTE_CSBSK,                                         
+         HIST_OPD_SIDSTE_CSKPLOM,                                       
+         HIST_OPD_SIDSTE_DCIÆN,                                         
+         HIST_OPD_DETTE_DHENVN,                                         
+         HIST_OPD_DETTE_CSBSK,                                          
+         HIST_OPD_DETTE_CSKPLOM,                                        
+         HIST_OPD_DETTE_DCIÆN,                                          
+         HIST_OPD_NAESTE_DHENVN,                                        
+         HIST_OPD_NAESTE_CSBSK,                                         
+         HIST_OPD_NAESTE_CSKPLOM,                                       
+         HIST_OPD_NAESTE_DCIÆN,                                         
+         PER_DERHVPER_FRA1,                                             
+         PER_DERHVPER_TIL1,                                             
+         PER_DERHVPER_FRA2,                                             
+         PER_DERHVPER_TIL2,                                             
+         PER_DERHVPER_FRA3,                                             
+         PER_DERHVPER_TIL3,                                             
+         PER_DERHVPER_FRA4,                                             
+         PER_DERHVPER_TIL4,                                             
+         PER_DERHVPER_FRA5,                                             
+         PER_DERHVPER_TIL5,                                             
+         CMFRG,                           /* BF17 trin 4 */             
+         PRINTOPGØRID                     /* BF17 trin 4 */             
+            )                                                           
+            values                                                      
+            (                                                           
+            :MT.TIL_EVS_AAR,                                            
+            :MT.AFVIKLINGS_ID,                                          
+            :MT.DATA_ID,                                                
+            :MT.KØRSELS_ID,                                             
+            :MT.DCPRN,                                                  
+            :MT.PROGRAMNAVN,                                            
+            :MT.DB2FUNKTION,                                            
+            current timestamp,                                          
+            :MT.CCIVS,                                                  
+            :MT.CPENS,                                                  
+            :MT.CRGN,                                                   
+            :MT.DSORP,                                                  
+            :MT.CPART,                                                  
+            :MT.CFRÅR,                                                  
+            :MT.CFRÅROPR,                                               
+            :MT.DRGNÅRFRA,                                              
+            :MT.DRGNÅRTIL,                                              
+            :MT.BPENSIND,                                               
+            :MT.BPENSGR,                                                
+            :MT.CSTATUS,                                                
+            :MT.CDØDÆGTF,                                               
+            :MT.CDUBLET,                                                
+            :MT.CÆGTF_OK,                                               
+            :MT.COVF_DHE,                                               
+            :MT.FØROPL_DCIÆN_GL,                                        
+            :MT.FØROPL_CCIVS_GL,                                        
+            :MT.HIST_OPD_SIDSTE_DHENVN,                                 
+            :MT.HIST_OPD_SIDSTE_CSBSK,                                  
+            :MT.HIST_OPD_SIDSTE_CSKPLOM,                                
+            :MT.HIST_OPD_SIDSTE_DCIÆN,                                  
+            :MT.HIST_OPD_DETTE_DHENVN,                                  
+            :MT.HIST_OPD_DETTE_CSBSK,                                   
+            :MT.HIST_OPD_DETTE_CSKPLOM,                                 
+            :MT.HIST_OPD_DETTE_DCIÆN,                                   
+            :MT.HIST_OPD_NAESTE_DHENVN,                                 
+            :MT.HIST_OPD_NAESTE_CSBSK,                                  
+            :MT.HIST_OPD_NAESTE_CSKPLOM,                                
+            :MT.HIST_OPD_NAESTE_DCIÆN,                                  
+            :MT.PER_DERHVPER_FRA1,                                      
+            :MT.PER_DERHVPER_TIL1,                                      
+            :MT.PER_DERHVPER_FRA2,                                      
+            :MT.PER_DERHVPER_TIL2,                                      
+            :MT.PER_DERHVPER_FRA3,                                      
+            :MT.PER_DERHVPER_TIL3,                                      
+            :MT.PER_DERHVPER_FRA4,                                      
+            :MT.PER_DERHVPER_TIL4,                                      
+            :MT.PER_DERHVPER_FRA5,                                      
+            :MT.PER_DERHVPER_TIL5,                                      
+            :MT.CMFRG,                           /* BF17 trin 4 */      
+            :MT.PRINTOPGØRID                     /* BF17 trin 4 */      
+            );                                                          
+                                                                        
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_INS_MT = ANT_INS_MT + 1;                             
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT  = '101 INSERT BE66000T';                       
+               PUT SKIP LIST ('MT.DCPRN: ',MT.DCPRN);                   
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END INSERT_MTOPL;                                                      
+                                                                        
+ /*********************************************************************/
+ /* Ryd db2-tabeller før start                                 RUTINE */
+ /*********************************************************************/
+ RYD_DB2_TABELLER: PROC;                                                
+                                                                        
+         EXEC SQL                                                       
+            Delete from BE66000T                                        
+            where til_evs_aar = :WS_TIL_EVS_AAR                         
+            and   afviklings_id = :WS_FORSKUD_SLUT_TXT                  
+            AND   DATA_ID       = :BE55600M.DATA_ID                     
+            and   kØrsels_id = :WS_KØRSELS_ID;                          
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+            END;                                                        
+            WHEN(100);                                                  
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 DELETE BE66000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END RYD_DB2_TABELLER;                                                  
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST('ABENDTXT     : ',ABENDTXT);                     
+         PUT SKIP LIST('WS_KØRSELS_ID: ',WS_KØRSELS_ID);                
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+                                                                        
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.TEKST =                                                
+         'ANTAL LÆSTE RECORDS PÅ MT DATASET';                           
+         DETLIN1.ANTAL = ANT_LÆS;                                       
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+         DETLIN1.TEKST =                                                
+         'ANTAL SKREVNE RÆKKER PÅ BE66000T MT     ';                    
+         DETLIN1.ANTAL = ANT_INS_MT;                                    
+         CALL ZZ20300(DETLIN1,'01');                                    
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL KONTROLLISTE;                                             
+         CLOSE FILE (BE86PI);                                           
+         CLOSE FILE (BEMT0I);                                           
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+ END AFSLUT;                                                            
+ END BE86600;                                                           

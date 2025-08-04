@@ -1,0 +1,249 @@
+ ZX28000: /* MQ GENNEMSTILLING TIL EVS */                               
+         PROC OPTIONS(MAIN,REENTRANT) REORDER;                          
+ /**********************************************************************
+ **                                                                   **
+ **     NAVN              -   ZX28000                                 **
+ **                                                                   **
+ **     FUNKTION          -   GENNEMSTILLLER MQ FORESPØRGSLER TIL     **
+ **                           EVS SYSTEMET.                           **
+ **                                                                   **
+ **     TRANSAKTIONSKODE  -   B2Q0, B2Q2, B2Q3 OG B2Q4                **
+ **                                                                   **
+ **     PROGRAMMØR        -   HENRIK KNIGGE, USE UST UTI 10.11.00     **
+ **     RETTET AF         -   HENRIK KNIGGE, USE UTI     04.04.02     **
+ **     VEDR.             -   LAGT BEGRÆNSNING PÅ HVOR MANGE NYE      **
+ **                           TASK DER KAN STARTES OP CA. ½ AF        **
+ **                           PURGE-THRESHOLD.                        **
+ **                                                                   **
+ **     RETTET AF         -   HENRIK KNIGGE, USE UTI     11.04.02     **
+ **     VEDR.             -   KUN TRANSAKTIONER DER RESULTERE I       **
+ **                           BEHANDLING AF MESSAGE FAKTURERES,       **
+ **                           RESTEN ÆNDRES TIL GRATISTRANS Z60G      **
+ **                                                                   **
+ **     RETTET AF         -   HENRIK KNIGGE, BC          18.04.05     **
+ **     VEDR.             -   UDSØGNING AF TRANSCLASS FRA TRANS-KODE  **
+ **                           TIL TEST PÅ PURGE-THRESHOLD.            **
+ **                           SÅ KAN TRANSAKTIONERNE LIGGE I HVER SIN **
+ **                           CLASSE OG IKKE LÅSE FOR HINANDEN.       **
+ **                                                                   **
+ **********************************************************************/
+ DCL 1 CAREA,                                                           
+ %INCLUDE ZS38301N   /* COMMAREA FRA STARTTRANS */;                     
+                                                                        
+ DCL 1 ZS38201N,                                                        
+ %INCLUDE ZS38201N   /* COMMAREA TIL MQ RUTINEN */;                     
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ %INCLUDE ZS37800M;                                                     
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ DCL 1 LINKAREAL,                                                       
+      2 INPUTLENGTH        BIN FIXED(31,0),                             
+      2 INPUTPTR           PTR,                                         
+      2 OUTPUTLENGTH       BIN FIXED(31,0),                             
+      2 OUTPUTPTR          PTR,                                         
+      2 FEJLNR             BIN FIXED (15),                              
+      2 FEJLTEKST          CHAR      (70);                              
+                                                                        
+ /**********************************************************************
+ *    TWA                                                              *
+ **********************************************************************/
+ DCL  TWAPTR               PTR;                                         
+ DCL 1  TWA                BASED(TWAPTR),                               
+      2 PARMPTR            PTR;                                         
+                                                                        
+ /**********************************************************************
+ *    STRUKTUR TIL AT ÆNDRE TRANSAKTIONSKODE I CMF.                    *
+ **********************************************************************/
+ %INCLUDE ZS62700N;                                                     
+ %INCLUDE ZS62701N;                                                     
+ %INCLUDE ZS62799N;                                                     
+ /**********************************************************************
+ *    ØVRIGE DECLARES                                                  *
+ **********************************************************************/
+ DCL  I                    FIXED BIN (15);                              
+ DCL  HLPNUM               PIC '99999999';                              
+ DCL  MAXTRANS             FIXED BIN (31);                              
+ DCL  VENTETRANS           FIXED BIN (31);                              
+ DCL  TRANSKLASE           CHAR(08);                                    
+ DCL  CICSRC               FIXED BIN (31);                              
+ DCL (ADDR,CSTG,NULL,STG,SUBSTR) BUILTIN;                               
+ /**********************************************************************
+ **     HOVED STYRING.                                                **
+ **********************************************************************/
+                                                                        
+  EXEC CICS RETRIEVE INTO(CAREA)                                        
+                     LENGTH(STG(CAREA))                                 
+                     RESP(CICSRC);                                      
+                                                                        
+  IF CICSRC ^= DFHRESP(NORMAL)                                          
+  THEN DO;                                                              
+    ZS378TEKST = 'FEJL VED RETRIEVE I PROGRAM ZX28000';                 
+    CALL ABEND_PROCEDURE;                                               
+  END;                                                                  
+                                                                        
+  CALL GETMAIN(LINKAREAL.INPUTPTR,20000);                               
+                                                                        
+  LINKAREAL.FEJLNR = 0;                                                 
+                                                                        
+  ZS38201N.CSTYRE      = 'GET';                                         
+  ZS38201N.QUEUE_NAME  = CAREA.QUEUE_NAME;                              
+  ZS38201N.QUEUE_NAMED = ' ';                                           
+  ZS38201N.USERID      = CAREA.USERID;                                  
+  ZS38201N.KONVERTER   = 'NEJ';                                         
+  ZS38201N.PRIORITET   = 'H';                                           
+  ZS38201N.MQSYS       = '';                                            
+  ZS38201N.DATALEN     = 1000;                                          
+  ZS38201N.DATA_PTR    = LINKAREAL.INPUTPTR;                            
+                                                                        
+  CALL LINK_ZS382;                                                      
+  CALL SKRIV_LOGKØ;                                                     
+                                                                        
+  EXEC CICS LINK PROGRAM('BQ99900')                                     
+                 COMMAREA(LINKAREAL)                                    
+                 RESP(CICSRC);                                          
+                                                                        
+  IF CICSRC ^= DFHRESP(NORMAL)                                          
+  THEN DO;                                                              
+    ZS378TEKST = 'FEJL VED LINK TIL PROGRAM BQ99900';                   
+    CALL ABEND_PROCEDURE;                                               
+  END;                                                                  
+                                                                        
+  IF LINKAREAL.FEJLNR = 0                                               
+  THEN;                                                                 
+  ELSE                                                                  
+     CALL SKRIV_FEJLKØ;                                                 
+                                                                        
+  IF LINKAREAL.FEJLNR < 0                                               
+  THEN DO;                                                              
+    CALL GENSTART;                                                      
+    EXEC CICS RETURN;                                                   
+  END;                                                                  
+                                                                        
+  DO I = 48 TO 1 BY -1 WHILE(SUBSTR(CAREA.QUEUE_NAME,I,7) ^= 'REQUEST');
+  END;                                                                  
+  ZS38201N.QUEUE_NAME  = SUBSTR(CAREA.QUEUE_NAME,1,I-1) !! 'REPLY  ';   
+  ZS38201N.CSTYRE      = 'PUT';                                         
+  ZS38201N.DATALEN     = LINKAREAL.OUTPUTLENGTH;                        
+  ZS38201N.DATA_PTR    = LINKAREAL.OUTPUTPTR;                           
+                                                                        
+  CALL LINK_ZS382;                                                      
+  CALL SKRIV_LOGKØ;                                                     
+                                                                        
+  CALL GENSTART;                                                        
+                                                                        
+  EXEC CICS RETURN;                                                     
+ /**********************************************************************
+ *    KALD TIL MQ RUTINEN - ZS38200 SKRIV LOGKØ (KØNAVN.KOPI).         *
+ **********************************************************************/
+ SKRIV_LOGKØ:   PROC;                                                   
+  DO I = 48 TO 1 BY -1 WHILE(SUBSTR(ZS38201N.QUEUE_NAME,I,1) = ' ');    
+  END;                                                                  
+  ZS38201N.QUEUE_NAME  = SUBSTR(ZS38201N.QUEUE_NAME,1,I) !! '.KOPI';    
+  ZS38201N.CSTYRE     = 'PUT';                                          
+                                                                        
+  CALL LINK_ZS382;                                                      
+ END SKRIV_LOGKØ;                                                       
+ /**********************************************************************
+ *    KALD TIL MQ RUTINEN - ZS38200 SKRIV LOGKØ (KØNAVN.FEJL).         *
+ **********************************************************************/
+ SKRIV_FEJLKØ:   PROC;                                                  
+  DO I = 48 TO 1 BY -1 WHILE(SUBSTR(CAREA.QUEUE_NAME,I,1) = ' ');       
+  END;                                                                  
+  ZS38201N.QUEUE_NAME  = SUBSTR(CAREA.QUEUE_NAME,1,I) !! '.FEJL';       
+  ZS38201N.CSTYRE     = 'PUT';                                          
+                                                                        
+  CALL LINK_ZS382;                                                      
+ END SKRIV_FEJLKØ;                                                      
+ /**********************************************************************
+ *    KALD TIL MQ RUTINEN - ZS38200.                                   *
+ **********************************************************************/
+ LINK_ZS382:   PROC;                                                    
+  EXEC CICS LINK PROGRAM('ZS38200')                                     
+                 COMMAREA(ZS38201N)                                     
+                 RESP(CICSRC);                                          
+                                                                        
+  IF ZS38201N.CRETUR ^= 0                                               
+  THEN DO;                                                              
+    EXEC CICS ADDRESS TWA(TWAPTR); /* FAKTURERE IKKE FEJL OG         */ 
+    PARMPTR = ADDR(Z27PARM);       /* MANGLENDE MEDDELSER            */ 
+    ZIDTRID = '001';                                                    
+    ZFRTRID = '1';                                                      
+    Z27TRID = 'Z60G';                                                   
+    ZID999  = '999';                                                    
+    EXEC CICS LINK PROGRAM('ZS62702');                                  
+    IF ZFRTRID ^= '9'                                                   
+    THEN DO;                                                            
+      ZS378TEKST = 'FEJL I KØNAVN ' !! ZS38201N.QUEUE_NAME;             
+      CALL ABEND_PROCEDURE;                                             
+    END;                                                                
+                                                                        
+    SELECT(ZS38201N.CREASON);                                           
+     WHEN(2033) EXEC CICS RETURN;  /* IKKE FLERE MEDDELSER */           
+     WHEN(2042) CALL GENSTART;     /* MESSAGE IN USE       */           
+     WHEN(2085) DO;                                                     
+       ZS378TEKST = 'FEJL I KØNAVN ' !! ZS38201N.QUEUE_NAME;            
+       CALL ABEND_PROCEDURE;                                            
+     END;                                                               
+     OTHER;                                                             
+    END;                                                                
+    HLPNUM = ZS38201N.CREASON;                                          
+    ZS378TEKST = 'FEJL VED ' !! ZS38201N.CSTYRE !! 'TEKST='             
+                 !! ZS38201N.CTEKST !! 'RC=' !! HLPNUM;                 
+    CALL ABEND_PROCEDURE;                                               
+    EXEC CICS RETURN;                                                   
+  END;                                                                  
+  IF ZS38201N.BACKOUTCOUNT > 0 /* PROBLEM MED MESSAGE */                
+  THEN                                                                  
+     EXEC CICS DELAY FOR SECONDS(1);                                    
+ END LINK_ZS382;                                                        
+                                                                        
+ /**********************************************************************
+ *    GENSTART DETTE PROGRAM.                                          *
+ **********************************************************************/
+ GENSTART:   PROC;                                                      
+  /* DET ER IKKE LYKKEDES AT FÅ TRIGGER MEKANISMEN TIL AT FUNGERE       
+     TILFREDSSTILLENDE - DERFOR PRØVER VI AT STARTE PROGRAMMET OP       
+     EN GANG TIL FOR AT TØMME KØEN - HVIS DER IKKE FINDES MERE I        
+     KØEN SKRIVER PROGRAMMET UD PÅ APPL LOGGEN OG ENDER.                
+     DER STARTES KUN OP HVIS ANTALLET AF VENTENE TRANSAKTIONER ER       
+     MINDRE END HALVDELEN AF DET MAX TILLADTE ANTAL                */   
+                                                                        
+  EXEC CICS INQUIRE TRANSACTION(EIBTRNID)                               
+                    TRANCLASS(TRANSKLASE)                               
+                    RESP(CICSRC);                                       
+                                                                        
+  IF CICSRC = DFHRESP(NORMAL)                                           
+  THEN                                                                  
+    EXEC CICS INQUIRE TRANCLASS(TRANSKLASE)                             
+                      PURGETHRESH(MAXTRANS)                             
+                      QUEUED(VENTETRANS)                                
+                      RESP(CICSRC);                                     
+                                                                        
+  IF CICSRC = DFHRESP(NORMAL)                                           
+   & VENTETRANS < MAXTRANS / 2                                          
+  THEN                                                                  
+    EXEC CICS START TRANSID(EIBTRNID)                                   
+                    FROM(CAREA)                                         
+                    LENGTH(STG(CAREA))                                  
+                    RESP(CICSRC);                                       
+                                                                        
+  EXEC CICS RETURN;                                                     
+ END GENSTART;                                                          
+                                                                        
+ /**********************************************************************
+ *    ABEND PÅ EN PÆN MÅDE                                             *
+ **********************************************************************/
+ ABEND_PROCEDURE:  PROC;                                                
+   ZS378FUNK  = '04';         /* AFSLUT, COMMAREA SLETTES     */        
+   ZS378TYPE  = 'CICS';                                                 
+   ZS378MODUL = 'ZX28000';                                              
+   %INCLUDE ZS37802M;                                                   
+ END ABEND_PROCEDURE;                                                   
+                                                                        
+ %INCLUDE ZX23000G         /* GETMAIN RUTINE     */;                    
+ END ZX28000;                                                           

@@ -1,0 +1,2122 @@
+ BE24400:    /* UDPAKNING TIL ÆNDRINGSKØRSEL                  #01     */
+ PROC OPTIONS (MAIN) REORDER;                                           
+ /*********************************************************************/
+ /* FUNKTION:                                                         */
+ /*                                                                   */
+ /* BEHANDLING AF 0080 3132 INDIVIDER                                 */
+ /* 1. LÆSER TAB-SEPARERET(X'05') FRA VAR.BLOCK. INPUT-DATASÆT        */
+ /*                                                                   */
+ /* 2. TESTER LÆNGDE PÅ HVERT ENKELT FELT                             */
+ /*    AT DER ER OVERENSTEMMELSE MELLLEM INDDATA OG UDDATA            */
+ /*                                                                   */
+ /* 3. SKRIVER DE UDPAKKEDE DATA I EN UDDATASTRUKTUR                  */
+ /*    der skal loades til db2 tabellen BE90100T                      */
+ /*    DUMMY_ID TIL BE90100T DANNES FRA SEQ. TABELLEN BE90105S        */
+ /*                                                                   */
+ /* 4. HVIS DER ER FEJL I INDDATA KOPIERES DATA OVER PÅ ET            */
+ /*    KOPIDATASÆT                                                    */
+ /*                                                                   */
+ /* 5. ELLERS SKRIVER UDDATA  PÅ DATASÆT                              */
+ /*                                                                   */
+ /*  INDDATA:        FLYDENDENDE DATA FRA DXC MED FØLGENDE INDIVIDER: */
+ /*                  -  INDIVID 132 Ejendomsdata                      */
+ /*                  PARM   - Funktion = 'GENSKRIV'                   */
+ /*                       Hvis filen PARM findes                      */
+ /*                          hvis Funktion = 'GENSKRIV'               */
+ /*                          Kørslen slettes i BE90100T selvom        */
+ /*                          kørselsnr. for indkomståret findes i     */
+ /*                          BE90000T.                                */
+ /*                       Status på indlæs program sættes til kørt.   */
+ /*                       Status på overførelsesprogram sættes til    */
+ /*                       ej kørt                                     */
+ /*                                                                   */
+ /*                                                                   */
+ /*                                                                   */
+ /*  UDDATA          UDPAKKET DATA DER SKAL LOADES TIL TABELLEN       */
+ /*                  BE90100T                                         */
+ /*                  INDIVID 132 Ejendomsdata                         */
+ /*                  FEJLDATA                                         */
+ /*                                                                   */
+ /*  EXTERNE REF.    ZS30101   ABENDRUTINE                            */
+ /*                  ZS61900   LOGNING AF KST-DATO PÅ LOAD            */
+ /*                                                                   */
+ /*********************************************************************/
+ /*      RETTET AF   : LTJ                               Nov-2023     */
+ /*      VEDRØRENDE  : Tilrettet EVS ny lov modtag individ 132        */
+ /*                    Ny udgave af programmet kopieret fra BQ24400   */
+ /*                    til BE24400.                                   */
+ /*                    Nyt antal felter i input datasæt fra DXC 223   */
+ /*                                                                   */
+ /*      RETTET AF   : LTJ September 2024                             */
+ /*                    US1863155 BF17 ÆA70 Ændringer til individ 132  */
+ /*                    6 nye felter og 7 felter fjernes.              */
+ /*                    Nyt antal felter i input datasæt fra DXC 222   */
+ /*                                                                   */
+ /*********************************************************************/
+ /*********************************************************************/
+ /*********************************************************************/
+ /*      DECLARES AF FILES                                            */
+ /*********************************************************************/
+  DCL BE2442I FILE   RECORD INPUT;/*INDIVID 132 EJENDOMSDATA*//*ÅR-RET*/
+  DCL BE2449O FILE   RECORD OUTPUT; /* Fejlindivid  132     *//*ÅR-RET*/
+  DCL BE9010O FILE   RECORD OUTPUT; /* DB2 INDIVID 132 TIL LOAD*/       
+  DCL SYSPRINT EXTERNAL FILE PRINT;                                     
+ /*********************************************************************/
+ /*      DECLARES AF BUILTIN-FUNKTIONER                               */
+ /*********************************************************************/
+   DCL (ADDR,                                                           
+        CSTG,                                                           
+        NULL,                                                           
+        STG,                                                            
+        INDEX,                                                          
+        SUBSTR,                                                         
+        LBOUND,                                                         
+        HBOUND,                                                         
+        VERIFY,                                                         
+        DIVIDE,                                                         
+        LENGTH,                                                         
+        MOD,                                                            
+        PLIRETC,                                                        
+        PLIDUMP,                                                        
+        LOW,                                                            
+        TIMESTAMP)           BUILTIN;                                   
+                                                                        
+ /*********************************************************************/
+ /*      DB2 TABELSTRUKTURER                                          */
+ /*********************************************************************/
+   EXEC SQL INCLUDE SQLCA;                                              
+   EXEC SQL INCLUDE BE90000T; /*Driftsstyringstabel                   */
+   EXEC SQL INCLUDE BE90100T; /*Indlæsningstabel                      */
+ /*********************************************************************/
+ /*      DECLARES                                                     */
+ /*********************************************************************/
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ /*********************************************************************/
+ /*      ENTRY-DECLARE DATORUTINE & FORMAT DDMMÅRHU                   */
+ /*********************************************************************/
+ %INCLUDE ZS38000N;                                                     
+ %INCLUDE ZS38002N;                                                     
+ DCL     HELP_DATOC           CHAR      (8),                            
+         HELP_DATOP           PIC       '(8)9'  DEF HELP_DATOC,         
+         1 HELP_DTX           DEF       HELP_DATOC,                     
+          2 ÅRX               PIC       '9999',                         
+          2 MDX               PIC       '99',                           
+          2 DGX               PIC       '99';                           
+ DCL     DATO                      PIC       '(8)9',                    
+         1 DATO_DEF                DEF       DATO,                      
+          2 DG1                    PIC       '99',                      
+          2 MD1                    PIC       '99',                      
+          2 ÅR1                    PIC       '9999';                    
+ DCL     TID             CHAR      (9);                                 
+ DCL     1 TID1          BASED(ADDR(TID)),                              
+           2 TIM          CHAR      (2),                                
+           2 MIN          CHAR      (2),                                
+           2 SEK          CHAR      (2);                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES   PARM TIL UNDERMODULER                             */
+ /*********************************************************************/
+   DCL 1 INDV_0132_OPTAELT,                                             
+      %INCLUDE BE24498N;                              /*ÅR-RET*/ /*#01*/
+   DCL 1 INDV_0132_HEADER,                            /*#29*/           
+       %INCLUDE BE24400N;;             /*ÅR-RET*/     /*#29*/    /*#01*/
+ /*********************************************************************/
+ /*      DECLARES AF STRUKTURER  INPUT                                */
+ /*********************************************************************/
+ /********************************************************************/ 
+ /* Input - PARM -                                                   */ 
+ /********************************************************************/ 
+ DCL PARM              FILE RECORD INPUT;                               
+ DCL 1 PARM_REC,                                                        
+       3 PARM_FUNKTION  CHAR(08),                                       
+       3 PARM_FILLER    CHAR(72);                                       
+                                                                        
+ DCL LGD_INPUTFIL BIN FIXED(15);                                        
+ DCL 1 INPUTFIL      CHAR(20004) VAR; /* MED LIDT EKSTRA PLADS */       
+ DCL 1 INPUTFIL_IND,                                                    
+      2 DATA         CHAR(20000);                             /*ÅR-RET*/
+ DCL INPUTTAB(20000) CHAR(01) DEF INPUTFIL_IND;                         
+ DCL  1  INDIVID     BASED (ADDR(INPUTFIL_IND.DATA)),                   
+       3 INDVNR      CHAR      (4),                                     
+       3 FILLER      CHAR      (1),                                     
+       3 PNR         CHAR     (10);                                     
+                                                                        
+ DCL  1  INDV_HEAD       BASED (ADDR(INPUTFIL_IND.DATA)),               
+       %INCLUDE BE24400N;;                                    /*ÅR-RET*/
+                                                                        
+ DCL  1  INDV_TRAIL      BASED (ADDR(INPUTFIL_IND.DATA)),               
+       %INCLUDE BE24499N;;                                    /*ÅR-RET*/
+ /*********************************************************************/
+ /*      DECLARES AF STRUKTURER  OUTPUT                               */
+ /*********************************************************************/
+ Dcl INDV_0132_LAENGDE BIN FIXED(15) INIT(1205);  /* 1299 */            
+ DCL UDDATA  CHAR(INDV_0132_LAENGDE) VAR;                     /*ÅR-RET*/
+ DCL 1 HEADER    BASED(ADDR(UDDATA)),                                   
+       4 LAENGDE BIN FIXED  (15),                                       
+       %INCLUDE BE24400N;;                                    /*ÅR-RET*/
+ DCL 1 INDV_0132 UNALIGNED BASED(ADDR(UDDATA)),                         
+       4 LAENGDE BIN FIXED  (15),                                       
+       %INCLUDE BE24432N;;                                    /*ÅR-RET*/
+ // DCL DB2_UDDATA  CHAR(1059);                             /*ÅR-RET*/  
+ DCL 1 DB2_INDV_0132 UNALIGNED,                                         
+     %INCLUDE BE90100N;;                                                
+                                                                        
+ /*********************************************************************/
+ /*      DIVERSE DECLARES                                             */
+ /*********************************************************************/
+   DCL I       BIN FIXED(15);                                           
+   DCL OUTPUT_TXT   CHAR(127); /*LÆNGSTE STRENG + 2 ANFØRSELSTEGN */    
+                               /*ÅR-RET?*/                              
+   DCL FELT_POS_START  BINARY FIXED(15);                                
+   DCL FELT_POS_SLUT   BINARY FIXED(15);                                
+                                                                        
+   DCL EOF_BE2442I       BIT(1) INIT('0'B);                   /*ÅR-RET*/
+   DCL FEJL              BIT(1) INIT('1'B);                             
+   DCL OK                BIT(1) INIT('0'B);                             
+   DCL JA                BIT(1) INIT('1'B);                             
+   DCL NEJ               BIT(1) INIT('0'B);                             
+   DCL TRUE              BIT(1) INIT('1'B);                             
+   DCL FALSE             BIT(1) INIT('0'B);                             
+   DCL AFBRYD            BIT(1) INIT('0'B);                             
+   DCL TRAILER_SW        BIT(1) INIT('0'B);                             
+   DCL TFLAG             BIT(1) INIT('0'B);                             
+   DCL CONVERT_SW        BIT(1) INIT('0'B);                             
+   DCL INDKOMSTÅR_TOCIF_CHAR     CHAR  (2)  INIT ('24');      /*ÅR-RET*/
+   DCL INDKOMSTÅR_TOCIF_PIC      PIC  '99'  INIT (24);        /*ÅR-RET*/
+   DCL INDKOMSTÅR_FIRECIF_CHAR   CHAR  (4)  INIT ('2024');    /*ÅR-RET*/
+   DCL INDKOMSTÅR_FIRECIF_PIC_WS PIC '9999'                             
+                              BASED(ADDR(INDKOMSTÅR_FIRECIF_CHAR));     
+   DCL INDKOMSTÅR_FIRECIF_BIN   BIN FIXED (15)  INIT (2024);  /*ÅR-RET*/
+                                                                        
+   DCL SK_TEGN BINARY FIXED(15) INIT(5) BASED(ADDR (SK_TEGN_CHAR));     
+   DCL 1 SK_TEGN_CHAR,                                                  
+         2 SK_1         CHAR(1),                                        
+         2 SK_2         CHAR(1),                                        
+         2 SK_3_4       CHAR(2);                                        
+   DCL PROGRAM_1     CHAR (08) INIT ('BE24400L');             /*ÅR-RET*/
+   DCL PROGRAM_2     CHAR (08) INIT ('BE24700L');             /*ÅR-RET*/
+   /*%INCLUDE BQ0DATOW; lagt direkte ind i programmet*/                 
+       %INCLUDE BE24401N;; /* FELTTYPER */                    /*ÅR-RET*/
+                                                                        
+   DCL MAX_ANT_FELTER      BINARY FIXED(15) INIT(223);        /*ÅR-RET*/
+   DCL PLACERING_CHAR(223)  CHAR(18) INIT                     /*ÅR-RET*/
+    %INCLUDE BE24432M;;                                                 
+                                                                        
+   DCL 1 PLACERING_BASED(223) BASED(ADDR(PLACERING_CHAR)),    /*ÅR-RET*/
+         2 FELTNR          PIC '9999',                                  
+         2 FILLER_1        CHAR(1),                                     
+         2 ADRESSE         PIC '99999',                                 
+         2 FILLER_2        CHAR(1),                                     
+         2 LGD             CHAR(4),  /*LÆNGDE BRUGES IKKE HERFRA*/      
+         2 FILLER_3        CHAR(1),                                     
+         2 TYPE            PIC '99';                                    
+     /*F EKS.   0002 00251 00004 18 FYLDER 19 CHAR */                   
+                                                                        
+   DCL HJ_FELTNR  BINARY FIXED(15) INIT(0);                             
+   DCL IND_POS    BINARY FIXED(15);                                     
+   DCL TAB_SIZE   BINARY FIXED(15);                                     
+   DCL O_DATA     CHAR(80);                                             
+   DCL HJ_POS BINARY FIXED(15) INIT(1);                                 
+                                                                        
+   DCL KOERNR_C   CHAR  (3)  INIT ('');                                 
+   DCL KOERNR_P PIC '999' BASED(ADDR(KOERNR_C));                        
+                                                                        
+   DCL HJ_PIC_999  PIC '999' ;                                          
+   DCL HJ_PIC_9999 PIC '9999' ;                                         
+                                                                        
+   DCL ANT_ANF_TGN  BINARY FIXED(15) INIT(0);                           
+   DCL TAL          CHAR      (10)   INIT ('0123456789 ');              
+   DCL CSC_F_ANT    FIXED BIN(15,0)  INIT(0);                           
+   DCL HJ_PNR       PIC '(10)9'      INIT(0);                           
+   DCL WK_DUMMY_ID  BIN FIXED(63);                                      
+   DCL DUMMY_ID_DANNET CHAR (01);                                       
+   DCL WK_INDKAAR   BIN FIXED (15);                                     
+   DCL WK_KOERNR    BIN FIXED (15);                                     
+   DCL WK_KOERDTO   CHAR (10);                                          
+   DCL FEJLTEKST    CHAR (45) INIT(' ');                                
+   DCL TIDSSTAMP    CHAR(26);                                           
+ /*********************************************************************/
+ /****** PRINTLINIER TIL INTERN FEJL- OG KONTROLLISTE               */  
+ /*********************************************************************/
+         % INCLUDE ZZ20301M;     /* STANDARD KONTROLKARAKTERER */       
+   DCL     1   PRINT89,                                                 
+             3  CCHAR      CHAR      (1),                               
+             3  TEXT       CHAR      (132);                             
+                                                                        
+   DCL     1 OSKR89,                                                    
+  /*ÅR-RET*/ 2 TX1         CHAR      (13) INIT ('BE24400L  *'),  /*#01*/
+           2 TX2         CHAR      (30)                                 
+                                  INIT ('UDPAKNING TIL ÆNDRINGSKØRSEL'),
+           2 TX3         CHAR      (6)  INIT ('DATO: '),                
+           2 UDDATO      PIC       '99.99.9999',                        
+           2 HFILL       CHAR      (82) INIT (' ');                     
+   DCL     O89             CHAR      (132)  DEF OSKR89;                 
+                                                                        
+   DCL     L89             CHAR      (132);                             
+   DCL     1 LIN99         DEF       L89,                               
+             2 TEKST       CHAR      (45),                              
+             2 FILL1       CHAR      (2),                               
+             2 ANTAL       PIC       'Z.ZZZ.ZZ9',                       
+             2 FILL2       CHAR      (76);                              
+                                                                        
+ /*********************************************************************/
+ /*      HOUSEKEEPING                                                 */
+ /*********************************************************************/
+            ON ERROR                                                    
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBKO','MODUL BE24400');       /*ÅR-RET*/
+            END;                                                        
+                                                                        
+         ON CONVERSION                                                  
+          BEGIN;                                                        
+             CSC_F_ANT = CSC_F_ANT + 1;                                 
+             PUT SKIP LIST(' BE24400: CONVERSION FEJL');      /*ÅR-RET*/
+             PUT SKIP LIST('       PNR        :' !!INDIVID.PNR);        
+             PUT SKIP LIST('       0132_REC_NR:' !!FANTAL_LAES);        
+             PUT SKIP LIST('       INP_FELT_NR:' !!I);                  
+             PUT SKIP LIST('              DATA:' !!                     
+                                               SUBSTR(OUTPUT_TXT,1,30));
+             PUT SKIP LIST('         INPUT_POS:' !! IND_POS);           
+             PUT SKIP LIST('         ONCHAR   : ' !!ONCHAR());          
+             ONCHAR() = 0;                                              
+             CONVERT_SW = '1'B;                                         
+          END;                                                          
+                                                                        
+         CALL ZS61900;/* SKRIV SSI-DATO */                              
+         ZS380PARM.RETURKODE  = 0;                                      
+         FUNKTION   = 'DAGSDATO';                                       
+         VALIDERING = 'N';                                              
+         CALL ZS38000(ZS380PARM.FUNKTION,                               
+                      ZS380PARM.VALIDERING,                             
+                      ZS380PARM.PARM,                                   
+                      ZS380PARM.RETURKODE);                             
+                                                                        
+         HELP_DATOC   = ZS380PARM3.DATO1;                               
+         DATO_DEF.DG1 = HELP_DTX.DGX;                                   
+         DATO_DEF.MD1 = HELP_DTX.MDX;                                   
+         DATO_DEF.ÅR1 = HELP_DTX.ÅRX;                                   
+         UDDATO = DATO;                                                 
+         CALL ZZ20390 ('*OPEN','BE24489Y'); /* KONTROLLISTE *//*ÅR-RET*/
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = O89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+         PRINT89 = '';;                                                 
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         ON ENDFILE (BE2442I)                                 /*ÅR-RET*/
+         BEGIN;                                                         
+            EOF_BE2442I = JA;                                 /*ÅR-RET*/
+         END;                                                           
+                                                                        
+         PARM_REC = '';                                                 
+         PARM_FUNKTION = '*';                                           
+                                                                        
+         ON UNDEFINEDFILE(PARM) BEGIN;                                  
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+         OPEN FILE(PARM) TITLE('PARM');                                 
+                                                                        
+         ON ENDFILE(PARM) BEGIN;                                        
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+        READ FILE(PARM) INTO(PARM_REC);                                 
+ /*------------------------------------------------------------------*/ 
+ /* HOUSEKEEPING_SLUT                                                */ 
+ /*------------------------------------------------------------------*/ 
+ HOUSEKEEPING_SLUT:                                                     
+                                                                        
+         put skip list('PARM_FUNKTION',PARM_FUNKTION);                  
+                                                                        
+        CALL INIT;                                                      
+ /*********************************************************************/
+ /*      HOVEDSTYRING                                                 */
+ /*********************************************************************/
+         CALL BEHANDLING;                                               
+         CALL SKRIV_TOTALER;                                            
+         CALL AFSLUT;                                                   
+         CALL KONTROLTÆLLER;                                            
+ /*********************************************************************/
+ /*      KONTROLTÆLLING                                               */
+ /*********************************************************************/
+ KONTROLTÆLLER: PROC;                                                   
+                                                                        
+         IF TRAILER_SW THEN DO;                                         
+            IF INDV_0132_OPTAELT.FANTAL_LAES - 2 ^= INDV_TRAIL.FINDV    
+            THEN DO;                                                    
+               PUT SKIP LIST ('BE24400');                     /*ÅR-RET*/
+               ABENDTXT =                                               
+                      '250 ANTAL LÆSTE AFVIGER FRA ANTAL FRA TRAILEREN';
+               CALL ABEND_MODUL('BE24400');                   /*ÅR-RET*/
+            END;                                                        
+         END;                                                           
+         ELSE DO;                                                       
+            ABENDTXT                                                    
+            = '251 BE24400 INGEN TRAILER RECORD FUNDET';      /*ÅR-RET*/
+            PUT SKIP LIST(ABENDTXT);                                    
+            CALL ABEND_MODUL('BE24400');                      /*ÅR-RET*/
+         END;                                                           
+                                                                        
+                                                                        
+ END KONTROLTÆLLER;                                                     
+ /*********************************************************************/
+ /*      INIT                                                         */
+ /*********************************************************************/
+ INIT: PROC;                                                            
+         OPEN FILE (BE2442I) TITLE ('BE24400I');              /*ÅR-RET*/
+         OPEN FILE (BE9010O) TITLE ('BE90100O');                        
+         OPEN FILE (BE2449O) TITLE ('BE24490O');              /*ÅR-RET*/
+         INDV_0132_OPTAELT = '';                                        
+         TIDSSTAMP = TIMESTAMP;                                         
+ END INIT;                                                              
+                                                                        
+ /*********************************************************************/
+ /*      BEHANDLING                                                   */
+ /*********************************************************************/
+ BEHANDLING: PROC;                                                      
+                                                                        
+   SK_TEGN = 5;                                                         
+   CALL LÆS_INPUTFIL;                                                   
+   UDDATA = '';                                                         
+   /*CALL TEST_VIS_PLACERING*/                                          
+   DO WHILE(EOF_BE2442I = NEJ);                               /*ÅR-RET*/
+      INDV_0132_OPTAELT.FANTAL_LAES = INDV_0132_OPTAELT.FANTAL_LAES + 1;
+      I = 2;                                                            
+      HJ_POS = 0;                                                       
+      IND_POS = 0;                                                      
+      AFBRYD = NEJ;                                                     
+      BITTAB(*) = '0'B;                                                 
+      INDV_0132.STAT(*) = '0'B;                                         
+      SELECT (INDIVID.INDVNR);                                          
+        WHEN('0001') /* HEADER */                                       
+          DO;                                                           
+            CALL DAN_HEADER_INDV0132;                                   
+          END;                                                          
+        WHEN('0132') /* Ejendomsdata */                                 
+          DO;                                                           
+             CALL BEHANDL_DATA;                                         
+             IF AFBRYD = NEJ                                            
+             THEN                                                       
+               DO;                                                      
+                   INDV_0132.LAENGDE = INDV_0132_LAENGDE;/*ÅR-RET*/     
+                   INDV_0132.STAT(*) = BITTAB(*);                       
+                   CALL DAN_INDIVID_TIL_DB2_LOAD;                       
+                   UDDATA = ' ';                                        
+                   INDV_0132 = '';                                      
+                   /*INDV_0132_OPTAELT.FANTAL_SKRIV =                   
+                                 INDV_0132_OPTAELT.FANTAL_SKRIV + 1*/   
+             END;                                                       
+          END;                                                          
+        WHEN('0999') /* TRAILER */                                      
+          DO;                                                           
+             TRAILER_SW = JA;                                           
+          END;                                                          
+        OTHER  /* FEJL */                                               
+          DO;                                                           
+             PUT SKIP LIST('FEJL I 0132 INPUTDATA I RECORDNR: ',        
+                           INDV_0132_OPTAELT.FANTAL_LAES);              
+             ABENDTXT =                                                 
+                '250 FEJL I 0132 INPUTDATA';                            
+             CALL ABEND_MODUL('BE24400');                     /*ÅR-RET*/
+          END;                                                          
+      END; /*SELECT INDIVIDNR */                                        
+      CALL LÆS_INPUTFIL;                                                
+   END;                                                                 
+                                                                        
+ END BEHANDLING;                                                        
+ /*********************************************************************/
+ /*      Dan individ til DB2 load                                     */
+ /*********************************************************************/
+ DAN_INDIVID_TIL_DB2_LOAD: proc;                                        
+                                                                        
+                                                                        
+    IF INDV_0132.INDKAAR ^= INDV_0132_HEADER.INDKAAR THEN               
+    DO;                                                                 
+       PUT SKIP LIST('FEJL I 0132 INPUTDATA I RECORDNR: ',              
+                      INDV_0132_OPTAELT.FANTAL_LAES);                   
+       PUT SKIP LIST('INDV_0132.INDKAAR',INDV_0132.INDKAAR);            
+       PUT SKIP LIST('INDV_0132_HEADER.INDKAAR',                        
+                      INDV_0132_HEADER.INDKAAR);                        
+       ABENDTXT = '252 FEJL I 0132 INDKAAR';                            
+                                                                        
+       CALL ABEND_MODUL('BE24400');                           /*ÅR-RET*/
+    END;                                                                
+                                                                        
+                                                                        
+     DB2_INDV_0132 = '';                                                
+     CALL DAN_DUMMY_ID;                                                 
+     IF DUMMY_ID_DANNET = 'J'                                           
+     THEN                                                               
+       DO;                                                              
+          DB2_INDV_0132.DUMMY_ID     = WK_DUMMY_ID;                     
+          DB2_INDV_0132.INDKAAR      = INDV_0132.INDKAAR;               
+          DB2_INDV_0132.KOERNR       = WK_KOERNR;                       
+          DB2_INDV_0132.KOERDTO      = WK_KOERDTO;                      
+          DB2_INDV_0132.PNR          = INDV_0132.PNR;                   
+          DB2_INDV_0132.ENR          = INDV_0132.ENR;                   
+          DB2_INDV_0132.EJV2FAMILNR  = INDV_0132.EJV2FAMILNR;           
+          DB2_INDV_0132.EJVLBNR      = INDV_0132.EJVLBNR;               
+          DB2_INDV_0132.REGISTMP     = INDV_0132.REGISTMP;              
+          DB2_INDV_0132.CSCREGISTMP  = INDV_0132.CSCREGISTMP;           
+          DB2_INDV_0132.CSRLREGISTMP = INDV_0132.CSRLREGISTMP;          
+                                                                        
+          IF INDV_0132.STAT(11) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.FSKUDRESKAMDKOD = INDV_0132.FSKUDRESKAMDKOD;  
+          ELSE                                                          
+            DB2_INDV_0132.FSKUDRESKAMDKOD_NULL = '?';                   
+                                                                        
+          IF INDV_0132.STAT(12) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.BOBHAKOD = INDV_0132.BOBHAKOD;                
+          ELSE                                                          
+            DB2_INDV_0132.BOBHAKOD_NULL = '?';                          
+                                                                        
+          IF INDV_0132.STAT(13) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVPENSINDKBLB = INDV_0132.EJVPENSINDKBLB;    
+          ELSE                                                          
+            DB2_INDV_0132.EJVPENSINDKBLB_NULL = '?';                    
+                                                                        
+          IF INDV_0132.STAT(14) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.AFVISTGODKENDKOD = INDV_0132.AFVISTGODKENDKOD;
+          ELSE                                                          
+            DB2_INDV_0132.AFVISTGODKENDKOD_NULL = '?';                  
+                                                                        
+          IF INDV_0132.STAT(15) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.ALMOPGOEKOD = INDV_0132.ALMOPGOEKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.ALMOPGOEKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(16) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.ALMINDKOPGOENR = INDV_0132.ALMINDKOPGOENR;    
+          ELSE                                                          
+            DB2_INDV_0132.ALMINDKOPGOENR_NULL = '?';                    
+                                                                        
+          IF INDV_0132.STAT(17) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.GENERATYPEKOD = INDV_0132.GENERATYPEKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.GENERATYPEKOD_NULL = '?';                     
+                                                                        
+          IF INDV_0132.STAT(18) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJDBLIGEKMNR = INDV_0132.EJDBLIGEKMNR;        
+          ELSE                                                          
+            DB2_INDV_0132.EJDBLIGEKMNR_NULL = '?';                      
+                                                                        
+          IF INDV_0132.STAT(19) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.VEJKOD = INDV_0132.VEJKOD;                    
+          ELSE                                                          
+            DB2_INDV_0132.VEJKOD_NULL = '?';                            
+                                                                        
+          IF INDV_0132.STAT(20) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.HUSNR = INDV_0132.HUSNR;                      
+          ELSE                                                          
+            DB2_INDV_0132.HUSNR_NULL = '?';                             
+                                                                        
+          IF INDV_0132.STAT(21) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.HUSBOSTAADR = INDV_0132.HUSBOSTAADR;          
+          ELSE                                                          
+            DB2_INDV_0132.HUSBOSTAADR_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(22) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.ETAGENR = INDV_0132.ETAGENR;                  
+          ELSE                                                          
+            DB2_INDV_0132.ETAGENR_NULL = '?';                           
+                                                                        
+          IF INDV_0132.STAT(23) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.SIDEDOERNR = INDV_0132.SIDEDOERNR;            
+          ELSE                                                          
+            DB2_INDV_0132.SIDEDOERNR_NULL = '?';                        
+                                                                        
+          IF INDV_0132.STAT(24) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.AFSTADTAKOD = INDV_0132.AFSTADTAKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.AFSTADTAKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(25) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.AKTVUROPRKOD = INDV_0132.AKTVUROPRKOD;        
+          ELSE                                                          
+            DB2_INDV_0132.AKTVUROPRKOD_NULL = '?';                      
+                                                                        
+          IF INDV_0132.STAT(26) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.BNYTEKOD = INDV_0132.BNYTEKOD;                
+          ELSE                                                          
+            DB2_INDV_0132.BNYTEKOD_NULL = '?';                          
+                                                                        
+          IF INDV_0132.STAT(27) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVBSKATKOD = INDV_0132.EJVBSKATKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.EJVBSKATKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(28) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.FSIGTVURKOD = INDV_0132.FSIGTVURKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.FSIGTVURKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(29) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.VURDEOPRIDKOD = INDV_0132.VURDEOPRIDKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.VURDEOPRIDKOD_NULL = '?';                     
+                                                                        
+          IF INDV_0132.STAT(30) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.VURMARKOD = INDV_0132.VURMARKOD;              
+          ELSE                                                          
+            DB2_INDV_0132.VURMARKOD_NULL = '?';                         
+                                                                        
+          IF INDV_0132.STAT(31) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJDBLIGEADRDTAKOD =                           
+                                     INDV_0132.EJDBLIGEADRDTAKOD;       
+          ELSE                                                          
+            DB2_INDV_0132.EJDBLIGEADRDTAKOD_NULL = '?';                 
+                                                                        
+          IF INDV_0132.STAT(32) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJDOMBYGKOD = INDV_0132.EJDOMBYGKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.EJDOMBYGKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(33) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJV2FAMILAARDTAKOD =                          
+                                     INDV_0132.EJV2FAMILAARDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJV2FAMILAARDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(34) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJV2FAMILANVDTAKOD =                          
+                                     INDV_0132.EJV2FAMILANVDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJV2FAMILANVDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(35) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJV2FAMILANVKOD = INDV_0132.EJV2FAMILANVKOD;  
+          ELSE                                                          
+            DB2_INDV_0132.EJV2FAMILANVKOD_NULL = '?';                   
+                                                                        
+          IF INDV_0132.STAT(36) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJV2FAMILNRDTAKOD =                           
+                                     INDV_0132.EJV2FAMILNRDTAKOD;       
+          ELSE                                                          
+            DB2_INDV_0132.EJV2FAMILNRDTAKOD_NULL = '?';                 
+                                                                        
+          IF INDV_0132.STAT(37) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVAEGPENINDDTAKOD =                          
+                                     INDV_0132.EJVAEGPENINDDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJVAEGPENINDDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(38) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVARVPENSKOD = INDV_0132.EJVARVPENSKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJVARVPENSKOD_NULL = '?';                     
+                                                                        
+          IF INDV_0132.STAT(39) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVARVPENSDTAKOD = INDV_0132.EJVARVPENSDTAKOD;
+          ELSE                                                          
+            DB2_INDV_0132.EJVARVPENSDTAKOD_NULL = '?';                  
+                                                                        
+          IF INDV_0132.STAT(40) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVBERDTAKOD = INDV_0132.EJVBERDTAKOD;        
+          ELSE                                                          
+            DB2_INDV_0132.EJVBERDTAKOD_NULL = '?';                      
+                                                                        
+          IF INDV_0132.STAT(41) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVBERGRLKOD = INDV_0132.EJVBERGRLKOD;        
+          ELSE                                                          
+            DB2_INDV_0132.EJVBERGRLKOD_NULL = '?';                      
+                                                                        
+          IF INDV_0132.STAT(42) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVBERKOD = INDV_0132.EJVBERKOD;              
+          ELSE                                                          
+            DB2_INDV_0132.EJVBERKOD_NULL = '?';                         
+                                                                        
+          IF INDV_0132.STAT(43) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVBERKVITEKOD  =  INDV_0132.EJVBERKVITEKOD;  
+          ELSE                                                          
+            DB2_INDV_0132.EJVBERKVITEKOD_NULL = '?';                    
+                                                                        
+          IF INDV_0132.STAT(44) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVEJERANDELDTAKOD =                          
+                                       INDV_0132.EJVEJERANDELDTAKOD;    
+          ELSE                                                          
+            DB2_INDV_0132.EJVEJERANDELDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(45) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVEJINDFLYTDTAKOD =                          
+                                     INDV_0132.EJVEJINDFLYTDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJVEJINDFLYTDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(46) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVEJINDFLYTKOD = INDV_0132.EJVEJINDFLYTKOD;  
+          ELSE                                                          
+            DB2_INDV_0132.EJVEJINDFLYTKOD_NULL = '?';                   
+                                                                        
+          IF INDV_0132.STAT(47) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVERHANDDAGDTAKOD =                          
+           INDV_0132.EJVERHANDDAGDTAKOD;                                
+          ELSE                                                          
+            DB2_INDV_0132.EJVERHANDDAGDTAKOD_NULL = '?';                
+                                                                        
+          IF INDV_0132.STAT(48) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVFREDEDTAKOD = INDV_0132.EJVFREDEDTAKOD;    
+          ELSE                                                          
+            DB2_INDV_0132.EJVFREDEDTAKOD_NULL = '?';                    
+                                                                        
+          IF INDV_0132.STAT(49) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVFREDEKOD = INDV_0132.EJVFREDEKOD;          
+          ELSE                                                          
+            DB2_INDV_0132.EJVFREDEKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(50) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVLBNRDTAKOD = INDV_0132.EJVLBNRDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJVLBNRDTAKOD_NULL = '?';                     
+                                                                        
+          IF INDV_0132.STAT(51) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVPENSNSLDTAKOD = INDV_0132.EJVPENSNSLDTAKOD;
+          ELSE                                                          
+            DB2_INDV_0132.EJVPENSNSLDTAKOD_NULL = '?';                  
+                                                                        
+          IF INDV_0132.STAT(52) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVPENSNSLKOD =  INDV_0132.EJVPENSNSLKOD;     
+          ELSE                                                          
+            DB2_INDV_0132.EJVPENSNSLKOD_NULL = '?';                     
+                                                                        
+          IF INDV_0132.STAT(53) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKABGAARDTAKOD =                           
+                                        INDV_0132.EJVSKABGAARDTAKOD;    
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKABGAARDTAKOD_NULL = '?';                 
+                                                                        
+          IF INDV_0132.STAT(54) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKABGKOD =  INDV_0132.EJVSKABGKOD;         
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKABGKOD_NULL = '?';                       
+                                                                        
+          IF INDV_0132.STAT(55) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKAFSKKOD = INDV_0132.EJVSKAFSKKOD;        
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKAFSKKOD_NULL = '?';                      
+                                                                        
+          IF INDV_0132.STAT(56) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKAGENNSLKOD =  INDV_0132.EJVSKAGENNSLKOD; 
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKAGENNSLKOD_NULL = '?';                   
+                                                                        
+          IF INDV_0132.STAT(57) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKAMANUEDTAKOD =                           
+                                      INDV_0132.EJVSKAMANUEDTAKOD;      
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKAMANUEDTAKOD_NULL = '?';                 
+                                                                        
+          IF INDV_0132.STAT(58) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKASTANSLKOD = INDV_0132.EJVSKASTANSLKOD;  
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKASTANSLKOD_NULL = '?';                   
+                                                                        
+          IF INDV_0132.STAT(59) = '1'B                                  
+          THEN                                                          
+            DB2_INDV_0132.EJVSKATTYPEDTAKOD  =                          
+           INDV_0132.EJVSKATTYPEDTAKOD;                                 
+          ELSE                                                          
+            DB2_INDV_0132.EJVSKATTYPEDTAKOD_NULL = '?';                 
+                                                                        
+      IF INDV_0132.STAT(60) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVSKATTYPEKOD = INDV_0132.EJVSKATTYPEKOD;        
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKATTYPEKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(61) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVSKATUDLEJDTAKOD =                              
+                                   INDV_0132.EJVSKATUDLEJDTAKOD;        
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKATUDLEJDTAKOD_NULL = '?';                    
+                                                                        
+      IF INDV_0132.STAT(62) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVSLETEDTAKOD = INDV_0132.EJVSLETEDTAKOD;        
+      ELSE                                                              
+        DB2_INDV_0132.EJVSLETEDTAKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(63) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVSLETEKOD  =  INDV_0132.EJVSLETEKOD;            
+      ELSE                                                              
+        DB2_INDV_0132.EJVSLETEKOD_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(64) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLEJNSLDTAKOD  =                              
+                                      INDV_0132.EJVUDLEJNSLDTAKOD;      
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLEJNSLDTAKOD_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(65) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLSKATDTAKOD = INDV_0132.EJVUDLSKATDTAKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLSKATDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(66) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLXNSLDTAKOD = INDV_0132.EJVUDLXNSLDTAKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLXNSLDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(67) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLXNSLKOD  =  INDV_0132.EJVUDLXNSLKOD;        
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLXNSLKOD_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(68) = '1'B                                      
+      THEN                                                              
+       DB2_INDV_0132.EJVUSKPENINDDTAKOD =  INDV_0132.EJVUSKPENINDDTAKOD;
+      ELSE                                                              
+        DB2_INDV_0132.EJVUSKPENINDDTAKOD_NULL = '?';                    
+                                                                        
+      IF INDV_0132.STAT(69) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.ENRDTAKOD         =  INDV_0132.ENRDTAKOD;         
+      ELSE                                                              
+        DB2_INDV_0132.ENRDTAKOD_NULL = '?';                             
+                                                                        
+      IF INDV_0132.STAT(70) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.ERHAARDAGDTAKOD   =  INDV_0132.ERHAARDAGDTAKOD;   
+      ELSE                                                              
+        DB2_INDV_0132.ERHAARDAGDTAKOD_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(71) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.ERHVEDELVIDTAKOD  =  INDV_0132.ERHVEDELVIDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.ERHVEDELVIDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(72) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EVSRABBRTKOD = INDV_0132.EVSRABBRTKOD;            
+                                                                        
+      IF INDV_0132.STAT(73) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.EVSSKAFSKUDDTAKOD = INDV_0132.EVSSKAFSKUDDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.EVSSKAFSKUDDTAKOD_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(74) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.INDFLYTDTAKOD = INDV_0132.INDFLYTDTAKOD;          
+      ELSE                                                              
+        DB2_INDV_0132.INDFLYTDTAKOD_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(75) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.KILDEPROCEKOD = INDV_0132.KILDEPROCEKOD;          
+      ELSE                                                              
+        DB2_INDV_0132.KILDEPROCEKOD_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(76) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.KOEBFSKKOD = INDV_0132.KOEBFSKKOD;                
+      ELSE                                                              
+        DB2_INDV_0132.KOEBFSKKOD_NULL = '?';                            
+                                                                        
+      IF INDV_0132.STAT(77) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.KOEBDTAKOD =  INDV_0132.KOEBDTAKOD;               
+      ELSE                                                              
+        DB2_INDV_0132.KOEBDTAKOD_NULL = '?';                            
+                                                                        
+      IF INDV_0132.STAT(78) = '1'B                                      
+      THEN                                                              
+         DB2_INDV_0132.KOEBKOD =  INDV_0132.KOEBKOD;                    
+      ELSE                                                              
+        DB2_INDV_0132.KOEBKOD_NULL = '?';                               
+                                                                        
+      IF INDV_0132.STAT(79) = '1'B                                      
+      THEN DB2_INDV_0132.LANDDTAKOD       =  INDV_0132.LANDDTAKOD;      
+      ELSE                                                              
+        DB2_INDV_0132.LANDDTAKOD_NULL = '?';                            
+                                                                        
+      IF INDV_0132.STAT(80) = '1'B                                      
+      THEN DB2_INDV_0132.LANDKOD          =  INDV_0132.LANDKOD;         
+      ELSE                                                              
+        DB2_INDV_0132.LANDKOD_NULL = '?';                               
+                                                                        
+      IF INDV_0132.STAT(81) = '1'B                                      
+      THEN DB2_INDV_0132.OVTAGDTAKOD      =  INDV_0132.OVTAGDTAKOD;     
+      ELSE                                                              
+        DB2_INDV_0132.OVTAGDTAKOD_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(82) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.MANPENSNSLDTAKOD =   INDV_0132.MANPENSNSLDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.MANPENSNSLDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(83) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.NAEUDLEJBOLDTAKOD  = INDV_0132.NAEUDLEJBOLDTAKOD; 
+      ELSE                                                              
+        DB2_INDV_0132.NAEUDLEJBOLDTAKOD_NULL  = '?';                    
+                                                                        
+      IF INDV_0132.STAT(84) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.NAEUDLEJBOLKOD   =  INDV_0132.NAEUDLEJBOLKOD;     
+      ELSE                                                              
+        DB2_INDV_0132.NAEUDLEJBOLKOD_NULL  = '?';                       
+                                                                        
+      IF INDV_0132.STAT(85) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.PERSAENDRNYDTAKOD =  INDV_0132.PERSAENDRNYDTAKOD; 
+      ELSE                                                              
+        DB2_INDV_0132.PERSAENDRNYDTAKOD_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(86) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.PERSAENDRNYKOD    =  INDV_0132.PERSAENDRNYKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.PERSAENDRNYKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(87) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.OMFAGSKPLKOD      =  INDV_0132.OMFAGSKPLKOD;      
+      ELSE                                                              
+        DB2_INDV_0132.OMFAGSKPLKOD_NULL = '?';                          
+                                                                        
+      IF INDV_0132.STAT(88) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.RGSKALEJEBERDTAKOD = INDV_0132.RGSKALEJEBERDTAKOD;
+      ELSE                                                              
+        DB2_INDV_0132.RGSKALEJEBERDTAKOD_NULL = '?';                    
+                                                                        
+      IF INDV_0132.STAT(89) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.RGSKALEJEBERKOD    =  INDV_0132.RGSKALEJEBERKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.RGSKALEJEBERKOD_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(90) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.STINIBGRAEKOD      =  INDV_0132.STINIBGRAEKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.STINIBGRAEKOD_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(91) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.SYSTEMKILDEKOD =  INDV_0132.SYSTEMKILDEKOD;       
+      ELSE                                                              
+        DB2_INDV_0132.SYSTEMKILDEKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(92) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UBEBODAGDTAKOD     =  INDV_0132.UBEBODAGDTAKOD;   
+      ELSE                                                              
+        DB2_INDV_0132.UBEBODAGDTAKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(93) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDFLYTDTAKOD = INDV_0132.UDFLYTDTAKOD;            
+      ELSE                                                              
+        DB2_INDV_0132.UDFLYTDTAKOD_NULL = '?';                          
+                                                                        
+      IF INDV_0132.STAT(94) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLEJBOLDAGDTAKOD = INDV_0132.UDLEJBOLDAGDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJBOLDAGDTAKOD_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(95) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLEJDAGDTAKOD = INDV_0132.UDLEJDAGDTAKOD;        
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJDAGDTAKOD_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(96) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLEJDVAEDIDTAKOD = INDV_0132.UDLEJDVAEDIDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJDVAEDIDTAKOD_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(97) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLLJEINDTDTAKOD = INDV_0132.UDLLJEINDTDTAKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.UDLLJEINDTDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(98) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLLJESKATDTAKOD = INDV_0132.UDLLJESKATDTAKOD;    
+      ELSE                                                              
+        DB2_INDV_0132.UDLLJESKATDTAKOD_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(99) = '1'B                                      
+      THEN                                                              
+        DB2_INDV_0132.UDLPNGINSIESDTAKOD = INDV_0132.UDLPNGINSIESDTAKOD;
+      ELSE                                                              
+        DB2_INDV_0132.UDLPNGINSIESDTAKOD_NULL = '?';                    
+                                                                        
+      IF INDV_0132.STAT(100) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLREAGAEDTAKOD = INDV_0132.UDLREAGAEDTAKOD;      
+      ELSE                                                              
+        DB2_INDV_0132.UDLREAGAEDTAKOD_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(101) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.AARAND12FAMILBLB = INDV_0132.AARAND12FAMILBLB;    
+      ELSE                                                              
+        DB2_INDV_0132.AARAND12FAMILBLB_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(102) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.AARAND22FAMILBLB = INDV_0132.AARAND22FAMILBLB;    
+      ELSE                                                              
+        DB2_INDV_0132.AARAND22FAMILBLB_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(103) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJV2FAMILAARBLB = INDV_0132.EJV2FAMILAARBLB;      
+      ELSE                                                              
+        DB2_INDV_0132.EJV2FAMILAARBLB_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(104) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVAEGPENINDBLB = INDV_0132.EJVAEGPENINDBLB;      
+      ELSE                                                              
+        DB2_INDV_0132.EJVAEGPENINDBLB_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(105) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSALLANBRAARBLB = INDV_0132.EJVSALLANBRAARBLB;  
+      ELSE                                                              
+        DB2_INDV_0132.EJVSALLANBRAARBLB_NULL = '?';                     
+                                                                        
+      IF INDV_0132.STAT(106) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKABGAARBLB = INDV_0132.EJVSKABGAARBLB;        
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKABGAARBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(107) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKAFSKBLB       =  INDV_0132.EJVSKAFSKBLB;     
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKAFSKBLB_NULL = '?';                          
+                                                                        
+      IF INDV_0132.STAT(108) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKAMANUEBLB     =  INDV_0132.EJVSKAMANUEBLB;   
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKAMANUEBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(109) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLEJNSLBLB     =  INDV_0132.EJVUDLEJNSLBLB;   
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLEJNSLBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(110) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVUDLSKATBLB = INDV_0132.EJVUDLSKATBLB;          
+      ELSE                                                              
+        DB2_INDV_0132.EJVUDLSKATBLB_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(111) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVUSKPENINDBLB = INDV_0132.EJVUSKPENINDBLB;      
+      ELSE                                                              
+        DB2_INDV_0132.EJVUSKPENINDBLB_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(112) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EVSSKAFSKUDBLB = INDV_0132.EVSSKAFSKUDBLB;        
+      ELSE                                                              
+        DB2_INDV_0132.EVSSKAFSKUDBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(113) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.GLEJDSKATBLB =  INDV_0132.GLEJDSKATBLB;           
+      ELSE                                                              
+        DB2_INDV_0132.GLEJDSKATBLB_NULL = '?';                          
+                                                                        
+      IF INDV_0132.STAT(114) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.MANPENSNSLBLB      =  INDV_0132.MANPENSNSLBLB;    
+      ELSE                                                              
+         DB2_INDV_0132.MANPENSNSLBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(115) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLEJDVAEDIBLB     = INDV_0132.UDLEJDVAEDIBLB;    
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJDVAEDIBLB_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(116) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLLJEINDTBLB      =  INDV_0132.UDLLJEINDTBLB;    
+      ELSE                                                              
+        DB2_INDV_0132.UDLLJEINDTBLB_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(117) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLLJESKATBLB      =  INDV_0132.UDLLJESKATBLB;    
+      ELSE                                                              
+        DB2_INDV_0132.UDLLJESKATBLB_NULL = '?';                         
+                                                                        
+      IF INDV_0132.STAT(118) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLPNGINSIESBLB    =  INDV_0132.UDLPNGINSIESBLB;  
+      ELSE                                                              
+        DB2_INDV_0132.UDLPNGINSIESBLB_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(119) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLREAKRGAELDBLB   = INDV_0132.UDLREAKRGAELDBLB;  
+      ELSE                                                              
+        DB2_INDV_0132.UDLREAKRGAELDBLB_NULL = '?';                      
+                                                                        
+      IF INDV_0132.STAT(120) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJDBLIGEADR        =  INDV_0132.EJDBLIGEADR;      
+      ELSE                                                              
+        DB2_INDV_0132.EJDBLIGEADR_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(121) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVERHANDDAGANT = INDV_0132.EJVERHANDDAGANT;      
+      ELSE                                                              
+        DB2_INDV_0132.EJVERHANDDAGANT_NULL = '?';                       
+                                                                        
+      IF INDV_0132.STAT(122) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.ERHAARDAGANT       =  INDV_0132.ERHAARDAGANT;     
+      ELSE                                                              
+        DB2_INDV_0132.ERHAARDAGANT_NULL = '?';                          
+                                                                        
+      IF INDV_0132.STAT(123) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.LJLIHANT =  INDV_0132.LJLIHANT;                   
+      ELSE                                                              
+        DB2_INDV_0132.LJLIHANT_NULL = '?';                              
+                                                                        
+      IF INDV_0132.STAT(124) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UBEBODAGANT =  INDV_0132.UBEBODAGANT;             
+      ELSE                                                              
+        DB2_INDV_0132.UBEBODAGANT_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(125) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLEJBOLDAGANT = INDV_0132.UDLEJBOLDAGANT;        
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJBOLDAGANT_NULL = '?';                        
+                                                                        
+      IF INDV_0132.STAT(126) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDLEJDAGANT  =  INDV_0132.UDLEJDAGANT;            
+      ELSE                                                              
+        DB2_INDV_0132.UDLEJDAGANT_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(127) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.AFSTADTO =                                        
+                   KONV_CH8_DB2DATE(INDV_0132.AFSTADTO);                
+      ELSE                                                              
+        DB2_INDV_0132.AFSTADTO_NULL = '?';                              
+                                                                        
+      IF INDV_0132.STAT(128) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.AFSTAFSKDTO =                                     
+                 KONV_CH8_DB2DATE(INDV_0132.AFSTAFSKDTO);               
+      ELSE                                                              
+        DB2_INDV_0132.AFSTAFSKDTO_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(129) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.INDFLYTDTO =                                      
+                KONV_CH8_DB2DATE(INDV_0132.INDFLYTDTO);                 
+      ELSE                                                              
+        DB2_INDV_0132.INDFLYTDTO_NULL = '?';                            
+                                                                        
+      IF INDV_0132.STAT(130) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.OVTAGDTO =                                        
+                KONV_CH8_DB2DATE(INDV_0132.OVTAGDTO);                   
+      ELSE                                                              
+        DB2_INDV_0132.OVTAGDTO_NULL = '?';                              
+                                                                        
+      IF INDV_0132.STAT(131) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.OVTAGFSKDTO =                                     
+               KONV_CH8_DB2DATE(INDV_0132.OVTAGFSKDTO);                 
+      ELSE                                                              
+        DB2_INDV_0132.OVTAGFSKDTO_NULL = '?';                           
+                                                                        
+      IF INDV_0132.STAT(132) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.UDFLYTDTO =                                       
+              KONV_CH8_DB2DATE(INDV_0132.UDFLYTDTO);                    
+      ELSE                                                              
+        DB2_INDV_0132.UDFLYTDTO_NULL = '?';                             
+                                                                        
+      IF INDV_0132.STAT(133) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.VURTERMDTO =                                      
+              KONV_CH8_DB2DATE(INDV_0132.VURTERMDTO);                   
+      ELSE                                                              
+        DB2_INDV_0132.VURTERMDTO_NULL = '?';                            
+                                                                        
+      IF INDV_0132.STAT(134) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVEJEANDFSKPCT =  INDV_0132.EJVEJEANDFSKPCT;     
+      ELSE                                                              
+        DB2_INDV_0132.EJVEJEANDFSKPCT_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(135) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVEJERANDELPCT =  INDV_0132.EJVEJERANDELPCT;     
+      ELSE                                                              
+        DB2_INDV_0132.EJVEJERANDELPCT_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(136) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKATUDLEJPCT =  INDV_0132.EJVSKATUDLEJPCT;     
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKATUDLEJPCT_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(137) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.ERHVEDELVIPCT   =  INDV_0132.ERHVEDELVIPCT;       
+      ELSE                                                              
+        DB2_INDV_0132.ERHVEDELVIPCT_NULL  = '?';                        
+                                                                        
+      IF INDV_0132.STAT(138) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.JURKATID   =  INDV_0132.JURKATID;                 
+      ELSE                                                              
+        DB2_INDV_0132.JURKATID_NULL  = '?';                             
+                                                                        
+      IF INDV_0132.STAT(139) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.JURUNDKATID   =  INDV_0132.JURUNDKATID;           
+      ELSE                                                              
+        DB2_INDV_0132.JURUNDKATID_NULL  = '?';                          
+                                                                        
+      IF INDV_0132.STAT(140) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.VURDEAAR   =  INDV_0132.VURDEAAR;                 
+      ELSE                                                              
+        DB2_INDV_0132.VURDEAAR_NULL  = '?';                             
+                                                                        
+      IF INDV_0132.STAT(141) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.KMDREGISTMP = INDV_0132.KMDREGISTMP;              
+      ELSE                                                              
+        DB2_INDV_0132.KMDREGISTMP_NULL  = '?';                          
+                                                                        
+      IF INDV_0132.STAT(142) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.VURMARDTAKOD = INDV_0132.VURMARDTAKOD;            
+      ELSE                                                              
+        DB2_INDV_0132.VURMARDTAKOD_NULL  = '?';                         
+                                                                        
+      IF INDV_0132.STAT(143) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EVSMANUERABDTAKOD = INDV_0132.EVSMANUERABDTAKOD;  
+      ELSE                                                              
+        DB2_INDV_0132.EVSMANUERABDTAKOD_NULL  = '?';                    
+                                                                        
+      IF INDV_0132.STAT(144) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EVSMANUERABBLB = INDV_0132.EVSMANUERABBLB;        
+      ELSE                                                              
+        DB2_INDV_0132.EVSMANUERABBLB_NULL  = '?';                       
+                                                                        
+      IF INDV_0132.STAT(145) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.VURMARKATKOD = INDV_0132.VURMARKATKOD;            
+      ELSE                                                              
+        DB2_INDV_0132.VURMARKATKOD_NULL  = '?';                         
+                                                                        
+      IF INDV_0132.STAT(146) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.VURMARKATDTAKOD = INDV_0132.VURMARKATDTAKOD;      
+      ELSE                                                              
+        DB2_INDV_0132.VURMARKATDTAKOD_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(147) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVBGOVPROREBLB = INDV_0132.EJVBGOVPROREBLB;      
+      ELSE                                                              
+        DB2_INDV_0132.EJVBGOVPROREBLB_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(148) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVBGUNDERPROREBLB = INDV_0132.EJVBGUNDERPROREBLB;
+      ELSE                                                              
+        DB2_INDV_0132.EJVBGUNDERPROREBLB_NULL  = '?';                   
+                                                                        
+      IF INDV_0132.STAT(149) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVRDUPENSNSLBLB  =  INDV_0132.EJVRDUPENSNSLBLB;  
+      ELSE                                                              
+        DB2_INDV_0132.EJVRDUPENSNSLBLB_NULL  = '?';                     
+                                                                        
+      IF INDV_0132.STAT(150) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKAAARERHNSLBLB = INDV_0132.EJVSKAAARERHNSLBLB;
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKAAARERHNSLBLB_NULL  = '?';                   
+                                                                        
+      IF INDV_0132.STAT(151) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKABOLNSLBLB    =  INDV_0132.EJVSKABOLNSLBLB;  
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKABOLNSLBLB_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(152) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKAEFTNSLBLB   =  INDV_0132.EJVSKAEFTNSLBLB;   
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKAEFTNSLBLB_NULL  = '?';                      
+                                                                        
+      IF INDV_0132.STAT(153) = '1'B                                     
+      THEN                                                              
+        DB2_INDV_0132.EJVSKAEJBEBONSLBLB = INDV_0132.EJVSKAEJBEBONSLBLB;
+      ELSE                                                              
+        DB2_INDV_0132.EJVSKAEJBEBONSLBLB_NULL  = '?';                   
+                                                                        
+     IF INDV_0132.STAT(154) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAERHANDNSLBLB = INDV_0132.EJVSKAERHANDNSLBLB; 
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAERHANDNSLBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(155) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEBOLNSLBLB =  INDV_0132.EJVSKAFOEBOLNSLBLB;
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEBOLNSLBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(156) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEEJEANDBLB =  INDV_0132.EJVSKAFOEEJEANDBLB;
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEEJEANDBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(157) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEERHNSLBLB =  INDV_0132.EJVSKAFOEERHNSLBLB;
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEERHNSLBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(158) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOERDUPENBLB = INDV_0132.EJVSKAFOERDUPENBLB; 
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOERDUPENBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(159) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEMANSKABLB = INDV_0132.EJVSKAFOEMANSKABLB; 
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEMANSKABLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(160) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEPERNSLBLB = INDV_0132.EJVSKAFOEPERNSLBLB; 
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEPERNSLBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(161) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOERABBLB = INDV_0132.EJVSKAFOERABBLB;       
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOERABBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(162) = '1'B                                      
+     THEN                                                               
+        DB2_INDV_0132.EJVSKAFOEUDLNSLBLB = INDV_0132.EJVSKAFOEUDLNSLBLB;
+     ELSE                                                               
+        DB2_INDV_0132.EJVSKAFOEUDLNSLBLB_NULL  = '?';                   
+                                                                        
+     IF INDV_0132.STAT(163) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAFOEUDLSKABLB = INDV_0132.EJVSKAFOEUDLSKABLB; 
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAFOEUDLSKABLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(164) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAGENNSLBLB = INDV_0132.EJVSKAGENNSLBLB;       
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAGENNSLBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(165) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAMASKIBLB = INDV_0132.EJVSKAMASKIBLB;         
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAMASKIBLB_NULL  = '?';                        
+                                                                        
+     IF INDV_0132.STAT(166) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAPENSNSLBLB = INDV_0132.EJVSKAPENSNSLBLB;     
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAPENSNSLBLB_NULL  = '?';                      
+                                                                        
+     IF INDV_0132.STAT(167) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAPERNSLAGBLB = INDV_0132.EJVSKAPERNSLAGBLB;   
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAPERNSLAGBLB_NULL  = '?';                     
+                                                                        
+     IF INDV_0132.STAT(168) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKASTANSLBLB = INDV_0132.EJVSKASTANSLBLB;       
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKASTANSLBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(169) = '1'B                                      
+     THEN                                                               
+     DB2_INDV_0132.EJVSKATUDLNSLAGBLB = INDV_0132.EJVSKATUDLNSLAGBLB;   
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKATUDLNSLAGBLB_NULL  = '?';                    
+                                                                        
+     IF INDV_0132.STAT(170) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAUBEBONSLBLB = INDV_0132.EJVSKAUBEBONSLBLB;   
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAUBEBONSLBLB_NULL  = '?';                     
+                                                                        
+     IF INDV_0132.STAT(171) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAUDLNSLBLB  =  INDV_0132.EJVSKAUDLNSLBLB;     
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAUDLNSLBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(172) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.OVPROREBGBLB  =  INDV_0132.OVPROREBGBLB;           
+     ELSE                                                               
+       DB2_INDV_0132.OVPROREBGBLB_NULL  = '?';                          
+                                                                        
+     IF INDV_0132.STAT(173) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.UNDERPROREBGBLB = INDV_0132.UNDERPROREBGBLB;       
+     ELSE                                                               
+       DB2_INDV_0132.UNDERPROREBGBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(174) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EGEEJERDAGANT   =  INDV_0132.EGEEJERDAGANT;        
+     ELSE                                                               
+       DB2_INDV_0132.EGEEJERDAGANT_NULL  = '?';                         
+                                                                        
+     IF INDV_0132.STAT(175) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJBEBODAGANT    =  INDV_0132.EJBEBODAGANT;         
+     ELSE                                                               
+       DB2_INDV_0132.EJBEBODAGANT_NULL  = '?';                          
+                                                                        
+     IF INDV_0132.STAT(176) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJEJEREJDDAGANT =  INDV_0132.EJEJEREJDDAGANT;      
+     ELSE                                                               
+       DB2_INDV_0132.EJEJEREJDDAGANT_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(177) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJERDAGANT  =  INDV_0132.EJERDAGANT;               
+     ELSE                                                               
+       DB2_INDV_0132.EJERDAGANT_NULL  = '?';                            
+                                                                        
+     IF INDV_0132.STAT(178) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EVSRABBLB   =  INDV_0132.EVSRABBLB;                
+     ELSE                                                               
+       DB2_INDV_0132.EVSRABBLB_NULL  = '?';                             
+                                                                        
+     IF INDV_0132.STAT(179) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.RABBRTEJEANDPCT   =  INDV_0132.RABBRTEJEANDPCT;    
+     ELSE                                                               
+       DB2_INDV_0132.RABBRTEJEANDPCT_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(180) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EVSRABDTAKOD = INDV_0132.EVSRABDTAKOD;             
+     ELSE                                                               
+       DB2_INDV_0132.EVSRABDTAKOD_NULL = '?';                           
+                                                                        
+     IF INDV_0132.STAT(181) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.RABPCTAARSAKOD = INDV_0132.RABPCTAARSAKOD;         
+     ELSE                                                               
+       DB2_INDV_0132.RABPCTAARSAKOD_NULL  = '?';                        
+                                                                        
+     IF INDV_0132.STAT(182) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.EJVSKAEFTRABBLB  =  INDV_0132.EJVSKAEFTRABBLB;     
+     ELSE                                                               
+       DB2_INDV_0132.EJVSKAEFTRABBLB_NULL  = '?';                       
+                                                                        
+     IF INDV_0132.STAT(183) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR1 =  INDV_0132.FEJLNR1;                      
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR1_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(184) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD1 = INDV_0132.FEJLADVISTYPEKOD1;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD1_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(185) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR1 =  INDV_0132.MYNDNR1;                      
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR1_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(186) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD1 =  INDV_0132.KILDEPROCEKOD1;        
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD1_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(187) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR2 =  INDV_0132.FEJLNR2;                      
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR2_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(188) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD2 = INDV_0132.FEJLADVISTYPEKOD2;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD2_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(189) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR2 = INDV_0132.MYNDNR2;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR2_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(190) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD2 = INDV_0132.KILDEPROCEKOD2;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD2_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(191) = '1'B                                      
+     THEN                                                               
+      DB2_INDV_0132.FEJLNR3 =  INDV_0132.FEJLNR3;                       
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR3_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(192) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD3 = INDV_0132.FEJLADVISTYPEKOD3;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD3_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(193) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR3 = INDV_0132.MYNDNR3;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR3_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(194) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD3 = INDV_0132.KILDEPROCEKOD3;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD3_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(195) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR4 = INDV_0132.FEJLNR4;                       
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR4_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(196) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD4 = INDV_0132.FEJLADVISTYPEKOD4;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD4_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(197) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR4 = INDV_0132.MYNDNR4;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR4_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(198) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD4 = INDV_0132.KILDEPROCEKOD4;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD4_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(199) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR5 =  INDV_0132.FEJLNR5;                      
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR5_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(200) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD5 = INDV_0132.FEJLADVISTYPEKOD5;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD5_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(201) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR5 = INDV_0132.MYNDNR5;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR5_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(202) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD5 = INDV_0132.KILDEPROCEKOD5;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD5_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(203) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR6 =  INDV_0132.FEJLNR6;                      
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR6_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(204) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD6 = INDV_0132.FEJLADVISTYPEKOD6;   
+     ELSE                                                               
+     DB2_INDV_0132.FEJLADVISTYPEKOD6_NULL = '?';                        
+                                                                        
+     IF INDV_0132.STAT(205) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR6 =  INDV_0132.MYNDNR6;                      
+     ELSE                                                               
+        DB2_INDV_0132.MYNDNR6_NULL =  '?';                              
+                                                                        
+     IF INDV_0132.STAT(206) = '1'B                                      
+     THEN                                                               
+     DB2_INDV_0132.KILDEPROCEKOD6 = INDV_0132.KILDEPROCEKOD6;           
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD6_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(207) = '1'B                                      
+     THEN DB2_INDV_0132.FEJLNR7 = INDV_0132.FEJLNR7;                    
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR7_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(208) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD7 = INDV_0132.FEJLADVISTYPEKOD7;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD7_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(209) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR7 =  INDV_0132.MYNDNR7;                      
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR7_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(210) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD7 =  INDV_0132.KILDEPROCEKOD7;        
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD7_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(211) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR8 = INDV_0132.FEJLNR8;                       
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR8_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(212) = '1'B                                      
+     THEN                                                               
+      DB2_INDV_0132.FEJLADVISTYPEKOD8 = INDV_0132.FEJLADVISTYPEKOD8;    
+     ELSE                                                               
+      DB2_INDV_0132.FEJLADVISTYPEKOD8_NULL = '?';                       
+                                                                        
+     IF INDV_0132.STAT(213) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR8 = INDV_0132.MYNDNR8;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR8_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(214) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD8 = INDV_0132.KILDEPROCEKOD8;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD8_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(215) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR9 = INDV_0132.FEJLNR9;                       
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR9_NULL = '?';                                
+                                                                        
+     IF INDV_0132.STAT(216) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD9 = INDV_0132.FEJLADVISTYPEKOD9;   
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD9_NULL = '?';                      
+                                                                        
+     IF INDV_0132.STAT(217) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR9 = INDV_0132.MYNDNR9;                       
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR9_NULL =  '?';                               
+                                                                        
+     IF INDV_0132.STAT(218) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD9 = INDV_0132.KILDEPROCEKOD9;         
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD9_NULL = '?';                         
+                                                                        
+     IF INDV_0132.STAT(219) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLNR10 = INDV_0132.FEJLNR10;                     
+     ELSE                                                               
+       DB2_INDV_0132.FEJLNR10_NULL = '?';                               
+                                                                        
+     IF INDV_0132.STAT(220) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD10 = INDV_0132.FEJLADVISTYPEKOD10; 
+     ELSE                                                               
+       DB2_INDV_0132.FEJLADVISTYPEKOD10_NULL = '?';                     
+                                                                        
+     IF INDV_0132.STAT(221) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.MYNDNR10 = INDV_0132.MYNDNR10;                     
+     ELSE                                                               
+       DB2_INDV_0132.MYNDNR10_NULL =  '?';                              
+     IF INDV_0132.STAT(222) = '1'B                                      
+     THEN                                                               
+       DB2_INDV_0132.KILDEPROCEKOD10 = INDV_0132.KILDEPROCEKOD10;       
+     ELSE                                                               
+       DB2_INDV_0132.KILDEPROCEKOD10_NULL = '?';                        
+                                                                        
+     DB2_INDV_0132.INSERT_TS = TIDSSTAMP;                               
+     DB2_INDV_0132.INSERT_AF = PROGRAM_1;                               
+                                                                        
+     WRITE FILE (BE9010O) FROM (DB2_INDV_0132);                         
+     FANTAL_DB2_SKRIV = FANTAL_DB2_SKRIV + 1;                           
+    END;                                                                
+                                                                        
+ END DAN_INDIVID_TIL_DB2_LOAD;                                          
+ /*********************************************************************/
+ /*      LÆSE INPUT FIL                                               */
+ /*********************************************************************/
+ LÆS_INPUTFIL: PROC;                                                    
+   READ FILE (BE2442I) INTO (INPUTFIL);                       /*ÅR-RET*/
+   INPUTFIL_IND = INPUTFIL;                                             
+   TAB_SIZE     = LENGTH(INPUTFIL);                                     
+ END LÆS_INPUTFIL;                                                      
+ /*********************************************************************/
+ /*      BEHANDLING                                                   */
+ /*********************************************************************/
+ DAN_HEADER_INDV0132: PROC;                                             
+ DCL HJ_KØRSELSNR BIN FIXED (15);                                       
+                                                                        
+     IF INDV_HEAD.INDKAAR ^= INDKOMSTÅR_FIRECIF_CHAR                    
+     THEN                                                               
+        DO;                                                             
+          PUT SKIP LIST ('BE24400');                          /*ÅR-RET*/
+          ABENDTXT = '250 FORKERT INDKOMSTÅR I HEADER';                 
+          CALL ABEND_MODUL('BE24400');                        /*ÅR-RET*/
+        END;                                                            
+                                                                        
+     IF VERIFY (INDV_HEAD.KOERNR,TAL) ^= 0                              
+     THEN                                                               
+        DO;                                                             
+          KOERNR_C = INDV_HEAD.KOERNR;                                  
+          IF KOERNR_P = 0 THEN                                          
+           DO;                                                          
+            PUT SKIP LIST ('BE24400');                        /*ÅR-RET*/
+            ABENDTXT = '250 KØRSELSNR MANGLER I HEADER';                
+            CALL ABEND_MODUL('BE24400');                      /*ÅR-RET*/
+           END;                                                         
+        END;                                                            
+                                                                        
+     ZS380PARM.RETURKODE  = 0;                                          
+     ZS380PARM.FUNKTION   = 'VALIDATO';                                 
+     ZS380PARM.VALIDERING = 'J';                                        
+     ZS380PARM3.DATO1     = INDV_HEAD.KOERDTOD;                         
+                                                                        
+     CALL ZS38000(ZS380PARM.FUNKTION,                                   
+                  ZS380PARM.VALIDERING,                                 
+                  ZS380PARM.PARM,                                       
+                  ZS380PARM.RETURKODE);                                 
+                                                                        
+     IF ZS380PARM.RETURKODE > 0                                         
+     THEN                                                               
+        DO;                                                             
+          PUT SKIP LIST ('BE24400');                          /*ÅR-RET*/
+          ABENDTXT = '250 KØRESLSDATO MANGLER I HEADER';                
+          CALL ABEND_MODUL('BE24400');                        /*ÅR-RET*/
+        END;                                                            
+                                                                        
+                                                                        
+     CALL DRIFTSTYR_KONTROL(132);                                       
+                                                                        
+     WK_INDKAAR = KONV_CH4_BF15(INDV_HEAD.INDKAAR);                     
+     WK_KOERNR  = KONV_CH3_BF15(INDV_HEAD.KOERNR);                      
+     IF (MAX_KØRSELSNR = WK_KOERNR)                                     
+     THEN                                                               
+       DO;                                                              
+           IF PARM_FUNKTION = 'GENSKRIV'                                
+           THEN                                                         
+             DO;                                                        
+                 CALL SLET_BE90100T(WK_INDKAAR,WK_KOERNR);              
+                 CALL OPDAT_BE90000T(WK_INDKAAR,WK_KOERNR,132);         
+             END;                                                       
+           ELSE                                                         
+             DO;                                                        
+               ABENDTXT =                                               
+              '264 KØRSELSNR. '!! INDV_HEAD.KOERNR !!' ER KØRT';        
+               CALL ABEND_MODUL('BE24400');                   /*ÅR-RET*/
+             END;                                                       
+      END;                                                              
+                                                                        
+     EXEC SQL SELECT KOERNR                                             
+         INTO :HJ_KØRSELSNR                                             
+         FROM  BE90100T                                                 
+         WHERE INDKAAR = :WK_INDKAAR                                    
+         AND   KOERNR  = :WK_KOERNR                                     
+     FETCH FIRST ROWS ONLY                                              
+     ;                                                                  
+                                                                        
+     SELECT (SQLCODE);                                                  
+       WHEN (0)                                                         
+          DO;                                                           
+             ABENDTXT =                                                 
+            '264 KØRSELSNR. '!! INDV_HEAD.KOERNR !!' ER KØRT';          
+             CALL ABEND_MODUL('BE24400');                     /*ÅR-RET*/
+          END;                                                          
+       WHEN (100)                                                       
+         DO;                                                            
+           HJ_KØRSELSNR = 0;                                            
+           IF PARM_FUNKTION = 'GENSKRIV'                                
+           THEN;                                                        
+           ELSE                                                         
+             CALL OPRET_BE90000T(132);                                  
+         END;                                                           
+       OTHER                                                            
+         DO;                                                            
+           FEJLTEKST='260 FEJL I SELECT Koerne på BE90100T SQLCODE: '   
+                     !! SQLCODE;                                        
+           CALL sql_fejl;                                               
+         END;                                                           
+     END;                                                               
+                                                                        
+     INDV_0132_HEADER = INDV_HEAD;                                      
+     HEADER = INDV_HEAD, BY NAME;                                       
+     HEADER.LAENGDE = 20 + 2;                       /*UDVIDET 10022013*/
+                                                                        
+     WK_KOERDTO = KONV_CH8_DB2DATE(INDV_HEAD.KOERDTOD);                 
+     UDDATA = ' ';                                                      
+     HEADER = '';                                                       
+ END DAN_HEADER_INDV0132;                                               
+ /*********************************************************************/
+ /*      SLET_BE90100T                                                */
+ /*********************************************************************/
+ SLET_BE90100T: PROC(T_INDKAAR,T_KOERNR);                               
+ DCL T_INDKAAR BIN FIXED (15);                                          
+ DCL T_KOERNR  BIN FIXED (15);                                          
+                                                                        
+       EXEC SQL DELETE                                                  
+         FROM  BE90100T                                                 
+         WHERE INDKAAR = :T_INDKAAR                                     
+         AND   KOERNR  = :T_KOERNR                                      
+     ;                                                                  
+                                                                        
+     SELECT (SQLCODE);                                                  
+       WHEN (0)                                                         
+          DO;                                                           
+             put skip list('antal slettet rækker:',SQLERRD(3));         
+             EXEC SQL COMMIT;                                           
+          END;                                                          
+       WHEN(100);                                                       
+       OTHER                                                            
+         DO;                                                            
+           FEJLTEKST='266 FEJL VED DELETE på BE90100T SQLCODE: '        
+                     !! SQLCODE;                                        
+           CALL sql_fejl;                                               
+         END;                                                           
+     END;                                                               
+ END SLET_BE90100T;                                                     
+ /*********************************************************************/
+ /*      BEHANDLING  AF DATA                                          */
+ /*********************************************************************/
+ BEHANDL_DATA: PROC;                                                    
+   DO WHILE(AFBRYD=NEJ & (HJ_POS < (TAB_SIZE+1)) &                      
+            I < (MAX_ANT_FELTER+1));                                    
+                                                                        
+      HJ_FELTNR = PLACERING_BASED.FELTNR(I);                            
+      FELTBIT = '0'B;                                                   
+      OUTPUT_TXT = DAN_STRENG(HJ_POS,HJ_FELTNR);                        
+      IF PLACERING_BASED(I).FELTNR > MAX_ANT_FELTER THEN                
+         ;                                                              
+      ELSE DO;                                                          
+        HJ_FELTNR = PLACERING_BASED(I).FELTNR;                          
+        IF IND_POS < (TAB_SIZE + 1) THEN DO;                            
+ /* SÆTTER AFBRYD OP TIL '1'B NÅR DER ER FEJL */                        
+                                                                        
+           AFBRYD = KONVERTER_OG_INDSAET_FELT(OUTPUT_TXT,HJ_FELTNR,     
+                                      FELT_POS_START,FELT_POS_SLUT);    
+                                                                        
+           IF AFBRYD=JA THEN                                            
+            PUT DATA(PLACERING_char(I),OUTPUT_TXT,HJ_FELTNR,            
+                     FELT_POS_START,FELT_POS_SLUT);                     
+                                                                        
+           I = I + 1;                                                   
+         END;                                                           
+      END;                                                              
+   END;                                                                 
+ END BEHANDL_DATA;                                                      
+ /*-------------------------------------------------------------------*/
+ /* Konverterer fra char 08 til char(10) DB2 date                     */
+ /*                                                                   */
+ /*-------------------------------------------------------------------*/
+ KONV_CH8_DB2DATE: PROC (CHAR8)                                         
+                             RETURNS (CHAR (10));                       
+ DCL     CHAR8      CHAR (08);                                          
+ DCL     CHAR10     CHAR (10);                                          
+                                                                        
+         IF CHAR8 = ''                                                  
+         THEN                                                           
+           DO;                                                          
+              CHAR10 = '';                                              
+           END;                                                         
+         ELSE                                                           
+           DO;                                                          
+              CHAR10 = SUBSTR(CHAR8,1,4) !! '-' !!                      
+                       SUBSTR(CHAR8,5,2) !! '-' !!                      
+                       SUBSTR(CHAR8,7,2);                               
+           END;                                                         
+         RETURN (CHAR10);                                               
+                                                                        
+ END KONV_CH8_DB2DATE;                                                  
+ /*********************************************************************/
+ /* SKRIV FEJL TEXT                                                   */
+ /*********************************************************************/
+ SKRIV_FEJL_TEXT: PROC(NR,FEJLTYPE,FELTTYPE,START_IDX,SLUT_IDX,FELT);   
+    DECLARE NR        BINARY FIXED(15);                                 
+    DECLARE FEJLTYPE  BINARY FIXED(15);                                 
+    DECLARE FELTTYPE  BINARY FIXED(15);                                 
+    DECLARE START_IDX BINARY FIXED(15);                                 
+    DECLARE SLUT_IDX  BINARY FIXED(15);                                 
+    DECLARE FELT      CHAR(50);                                         
+                                                                        
+    SELECT(FEJLTYPE);                                                   
+      WHEN (1013) DO;                                                   
+        PUT SKIP LIST(' BE24400: FOR MANGE KARAKTERER. FEJL: ' !! NR);  
+        PUT SKIP LIST('       PNR        :' !! INDV_0132.PNR);          
+        PUT SKIP LIST('       0132_REC_NR:' !! FANTAL_LAES);            
+        PUT SKIP LIST('       INP_FELT_NR:' !! I);                      
+        PUT SKIP LIST('          FELTTYPE:' !! FELTTYPE);               
+        PUT SKIP LIST('         START_IDX:' !! START_IDX);              
+        PUT SKIP LIST('          SLUT_IDX:' !! SLUT_IDX);               
+        PUT SKIP LIST('            LÆNGDE:' !! (SLUT_IDX-START_IDX+1)); 
+        PUT SKIP LIST('              DATA:' !! SUBSTR(OUTPUT_TXT,1,30));
+        PUT SKIP LIST('         INPUT_POS:' !! IND_POS);                
+        PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!                 
+                       TYPE_CHAR_DEF(FELTTYPE).LGD);                    
+        PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!             
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+      WHEN (1014) DO;                                                   
+              PUT SKIP LIST(' BE24400: FEJL NR : ' !! NR);              
+              PUT SKIP LIST('PNR         ' !! INDV_0132.PNR);           
+              PUT SKIP LIST('0132_REC_NR ' !! FANTAL_LAES);             
+              PUT SKIP LIST('FELTTYPE    ' !! FELTTYPE);                
+              PUT SKIP LIST('          I ' !! I);                       
+              PUT SKIP LIST('TALLET ER FOR STORT ' !! FELT);            
+              PUT SKIP LIST('FELTTYPE            ' !!                   
+                             FELTTYPE_BESKRIVELSE(FELTTYPE));           
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!           
+                             TYPE_CHAR_DEF(FELTTYPE).LGD);              
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!       
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+      OTHERWISE   DO;                                                   
+              PUT SKIP LIST('*********FEJL************* ' !! NR);       
+              PUT SKIP LIST('PNR         ' !! INDV_0132.PNR);           
+              PUT SKIP LIST('0132_REC_NR' !! FANTAL_LAES);              
+              PUT SKIP LIST('FELTTYPE  ' !! FELTTYPE);                  
+              PUT SKIP LIST('I ' !! I);                                 
+              PUT SKIP LIST('UKENDT FELTTYPE ' !! FELTTYPE);            
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).LGD ' !!           
+                             TYPE_CHAR_DEF(FELTTYPE).LGD);              
+              PUT SKIP LIST('TYPE_CHAR_DEF(FELTTYPE).FELTTXT ' !!       
+                             TYPE_CHAR_DEF(FELTTYPE).FELTTXT);          
+      END;                                                              
+    END;                                                                
+                                                                        
+ END SKRIV_FEJL_TEXT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* TEST VIS PLACERING                                                */
+ /*********************************************************************/
+  /*                                                                    
+   TEST_VIS_PLACERING: PROC;                                            
+     DCL I BINARY FIXED(15);                                            
+         PUT SKIP LIST('TEST_VIS_PLACERING');                           
+      I = 1;                                                            
+      PUT SKIP LIST('****************');                                
+      PUT SKIP LIST('TAB_SIZE=' !! TAB_SIZE);                           
+      DO WHILE((I < (MAX_ANT_FELTER + 1)));                             
+         PUT SKIP LIST('****************');                             
+         PUT SKIP LIST('I=      ' !! I);                                
+         PUT SKIP LIST('FELTNR  ' !! PLACERING_BASED(I).FELTNR);        
+         PUT SKIP LIST('ADRESSE ' !! PLACERING_BASED(I).ADRESSE);       
+         PUT SKIP LIST('TYPE    ' !! PLACERING_BASED(I).TYPE);          
+         I = I + 1;                                                     
+      END;                                                              
+   END TEST_VIS_PLACERING;                                              
+  */                                                                    
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+         ABENDMODUL   = 'BE24400';                            /*ÅR-RET*/
+         ABENDTXT = FEJLTEKST;                                          
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /*      SKRIV TOTALER                                                */
+ /*********************************************************************/
+ SKRIV_TOTALER: PROC;                                                   
+                                                                        
+         PRINT89 = '';                                /*#29*  HERFRA*/  
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'INDV 132 HEADER:'                              
+                      !! INDV_0132_HEADER.INDVNR !! ' '                 
+                      !! INDV_0132_HEADER.INDKAAR !! ' '                
+                      !! INDV_0132_HEADER.KOERNR !! ' '                 
+                      !! INDV_0132_HEADER.FASE1KOERNR !! ' '            
+                      !! INDV_0132_HEADER.KOERDTOD;                     
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                 /*#29* HERTIL*/    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL LÆSTE INCL. HEADER/TRAILER INDV. 0132.:';
+         LIN99.ANTAL  = INDV_0132_OPTAELT.FANTAL_LAES;                  
+         CCHAR        = ZZWS1;                                          
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+      /*   L89 = ''                                                */   
+      /*   LIN99.TEKST  = 'ANTAL SKREVNE INCL. HEADER INDV. 0132..'*/   
+      /*   LIN99.ANTAL  = INDV_0132_OPTAELT.FANTAL_SKRIV           */   
+      /*   PRINT89.TEXT = L89                                      */   
+      /*   CALL ZZ20300(PRINT89,'89')                              */   
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL SKREVNE FEJL INDV. 0132...............:';
+         LIN99.ANTAL  = INDV_0132_OPTAELT.FANTAL_FEJL;                  
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+         L89 = '';                                                      
+         LIN99.TEKST  = 'ANTAL SKREVNE DB2 LOADFIL 0132  ............:';
+         LIN99.ANTAL  = FANTAL_DB2_SKRIV;                               
+         PRINT89.TEXT = L89;                                            
+         CALL ZZ20300(PRINT89,'89');                                    
+                                                                        
+                                                                        
+         PRINT89 = '';                                                  
+         CCHAR        = ZZWS1;                                          
+         CALL ZZ20300(PRINT89,'89');                                    
+     /***** SLUT **************************************************/    
+                                                                        
+ END SKRIV_TOTALER;                                                     
+ /*********************************************************************/
+ /*      AFSLUT                                                       */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+    CLOSE FILE (BE2442I),                                     /*ÅR-RET*/
+          FILE (PARM),                                                  
+          FILE (BE2449O),                                     /*ÅR-RET*/
+          FILE (BE9010O);                                               
+                        /*ÅR-RET*/ /*#01*/                              
+    CALL ZZ20300(' ','99');      /* LUK ALLE PRINTDATASÆT */            
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ %INCLUDE ZM90002M;;            /* Fjerne alt andet end tal i feltet  */
+ %INCLUDE BE90004M;             /* DRIFTSSTYRING FOR 2019   */          
+ %INCLUDE BE90101M;             /* DAN dummy_id             */          
+ %INCLUDE BE24401M;             /* DAN STRENG               *//*ÅR-RET*/
+ %INCLUDE BE24406M;             /* KONVERTER OG INDSAET FELT*//*ÅR-RET*/
+ %INCLUDE BE24403M;             /* TJEK GRÆNSE              *//*ÅR-RET*/
+ %INCLUDE BE24404M;             /* ABENDMODUL        *//*ÅR-RET*//*#01*/
+ %INCLUDE BE24405M;             /* KONVERTER         *//*ÅR-RET*//*#01*/
+                                                                        
+ END BE24400;                                                    /*#01*/

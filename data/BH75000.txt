@@ -1,0 +1,336 @@
+ BH75000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS                                                   **
+ * PROGRAMNAVN: BH75000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRAKKER ALLE ejendomme for et indkomstår  *
+ *                                                                      
+ * INDDATA:     BQ21000T          - EVS EJENDOMSREGISTER               *
+ * UDDATA:      BH75000O - UDTRAK FRA ejendomsregister                 *
+ * KONSTRUKTØR: Ivan   Overlund                                        *
+ *              Esben  Brodersen Tilføjet EENHEDLBNR slut 2018         *
+ ***********************************************************************
+ * Kørselsparameter:                                                   *
+ * JCL ligger på BZTSO : UDV.BEVS.S18.JCL(BH75000T) til slut 2018      *
+ *                                                                     *
+ * Parameter:                                                          *
+ *      1 PARMLINIE  BASED (ADDR (PARM_AR) ),                          *
+ *          2 PARMSTART    CHAR      (02),                             *
+ *          2 PROGNAVN     CHAR      (07),                             *
+ *          2 AAR          PIC       '9999',                           *
+ *          2 REST         CHAR      (67);                             *
+ * Parmstart = >>                                                      *
+ * Prognavn  = BH75000                                                 *
+ * AAR       = Det årstal der skal trækkes ud                          *
+ * ser herefter således ud:>>BH750002016                               *
+ * *********************************************************************
+ * Programmet henter alle forekomster i BQ20000(-udenlandske ejendomme)*
+ * slår så op i BQ21000 med FELTKODE 105 og henter ejendomsbeliggenhed)*
+ * Hvis der ikke er en 105, sættes feltet blank.                       *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2015');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */
+         EXEC SQL INCLUDE BQ20000K;     /* EVS ejendomsregister       */
+         EXEC SQL INCLUDE BQ21000K;     /* EVS ejendomsregister       */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     OK             CHAR (01)        INIT('J');                     
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     FETCH_SQLKODE  FIXED BIN(15)    INIT(0);                       
+ DCL     WK_AAR         FIXED BIN(15)    INIT(0);                       
+ DCL     ANT_FETCH      FIXED BIN(31)    INIT(0);                       
+ DCL     ANT_FETCH_PIC  PIC '(15)9'      INIT(0);                       
+ DCL     DISP_ANT       PIC 'ZZZ.ZZZ.ZZZ.Z99';                          
+ DCL     FLERE          CHAR(01);                                       
+ DCL     DATA_105       CHAR(01);                                       
+ DCL     GEM_EKOMNR     FIXED BIN(15)    INIT(0);                       
+ DCL     GEM_EEJDNR     FIXED BIN(31)    INIT(0);                       
+ /*********************************************************************/
+ /* PARM KORT                                                         */
+ /*********************************************************************/
+  DCL     EOF_PARM         BIT (1) INIT ('0'B);                         
+  DCL     PARMKORT         FILE RECORD INPUT;                           
+  DCL     PARM_AR          CHAR  (80)  INIT(' ');                       
+  DCL     PARM_MEDTAGET    BIT (1)     INIT('0'B);                      
+  DCL     PARM_FEJL        BIT (1)     INIT('0'B);                      
+                                                                        
+  DCL     1 PARMLINIE  BASED (ADDR (PARM_AR) ),                         
+            2 PARMSTART    CHAR      (02),                              
+            2 PROGNAVN     CHAR      (07),                              
+            2 AAR          PIC       '9999',                            
+            2 REST         CHAR      (67);                              
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ DCL     BH7500O FILE OUTPUT RECORD; /* EJENDOMSREGISTER              */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRAK,                                                      
+           %INCLUDE BH75000N;;                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP,PROCNAME) BUILTIN;   
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH75000');                 
+            END;                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE CURSOR                                                    */
+ /*********************************************************************/
+       EXEC SQL                                                         
+          DECLARE EJD_CSR CURSOR FOR                                    
+          SELECT  DINDKAAR                                              
+                 ,EKOMNR                                                
+                 ,EEJDNR                                                
+                 ,EENHEDLBNR                                            
+          FROM    BQ20000T                                              
+          WHERE   DINDKAAR = :WK_AAR                                    
+          AND     EKOMNR  ^=  999                                       
+          AND     EENHEDLBNR IN (0,1)                                   
+          ORDER BY EKOMNR                                               
+                  ,EEJDNR                                               
+                  ,EENHEDLBNR DESC                                      
+          ;                                                             
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+                                                                        
+         CALL OPSTART_INIT;                                             
+                                                                        
+         OPEN FILE (BH7500O) TITLE ('BH75000O');                        
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+         CALL OPEN_CSR;                                                 
+         UDTRAK = '';                                                   
+         FLERE  = 'N';                                                  
+         CALL FETCH_CSR;                                                
+         DO WHILE(FLERE = 'J');                                         
+          CALL BEHANDEL_EJD;                                            
+          CALL FETCH_CSR;                                               
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ BEHANDEL_EJD: PROC;                                                    
+                                                                        
+       CALL HENT_BQ21000;                                               
+                                                                        
+       /* Der skal kun skrives 1 pr ejendom pga 2 familie*/             
+       IF GEM_EKOMNR ^= DCLGENBQ20000T.EKOMNR !                         
+          GEM_EEJDNR ^= DCLGENBQ20000T.EEJDNR                           
+       THEN                                                             
+         DO;                                                            
+           UDTRAK.DINDKAAR       = DCLGENBQ20000T.DINDKAAR;             
+           UDTRAK.EKOMNR         = DCLGENBQ20000T.EKOMNR;               
+           UDTRAK.EEJDNR         = DCLGENBQ20000T.EEJDNR;               
+           IF DATA_105 = 'J'                                            
+           THEN                                                         
+             UDTRAK.EJDBELIG       = DCLGENBQ21000T.INDHOLD_C;          
+           ELSE                                                         
+             UDTRAK.EJDBELIG       = '';                                
+           UDTRAK.PRIM_BFE       = 0;                                   
+           UDTRAK.VEI            = 0;                                   
+                                                                        
+           WRITE FILE(BH7500O) FROM (UDTRAK);                           
+                                                                        
+           GEM_EKOMNR = DCLGENBQ20000T.EKOMNR;                          
+           GEM_EEJDNR = DCLGENBQ20000T.EEJDNR;                          
+                                                                        
+           UDTRAK = '';                                                 
+         END;                                                           
+                                                                        
+ END BEHANDEL_EJD;                                                      
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ HENT_BQ21000: PROC;                                                    
+       DATA_105 = '';                                                   
+                                                                        
+       EXEC SQL                                                         
+        SELECT FELTKODE                                                 
+              ,INDHOLD_C                                                
+        INTO   :DCLGENBQ21000T.FELTKODE                                 
+              ,:DCLGENBQ21000T.INDHOLD_C                                
+        FROM BQ21000T                                                   
+        WHERE DINDKAAR   =:DCLGENBQ20000T.DINDKAAR                      
+          AND EKOMNR     =:DCLGENBQ20000T.EKOMNR                        
+          AND EEJDNR     =:DCLGENBQ20000T.EEJDNR                        
+          AND EENHEDLBNR =:DCLGENBQ20000T.EENHEDLBNR                    
+          AND FELTKODE = 105                                            
+       ;                                                                
+       SELECT(SQLCA.SQLCODE);                                           
+         WHEN(0)                                                        
+          DATA_105 = 'J';                                               
+         WHEN(100)                                                      
+          DATA_105 = 'N';                                               
+          OTHERWISE                                                     
+           DO;                                                          
+            FEJLTEKST = ('ALVORLIG DB2 FEJL 83');                       
+            CALL ZS67000(SQLCA);                                        
+            CALL SQL_FEJL;                                              
+           END;                                                         
+        END;                                                            
+                                                                        
+                                                                        
+ END HENT_BQ21000;                                                      
+ /*********************************************************************/
+ /* OPEN CURSOR                                                RUTINE */
+ /*********************************************************************/
+ OPEN_CSR: PROC;                                                        
+                                                                        
+        EXEC SQL                                                        
+          OPEN EJD_CSR                                                  
+        ;                                                               
+                                                                        
+        SELECT(SQLCA.SQLCODE);                                          
+         WHEN(0,100)                                                    
+         ;                                                              
+          OTHERWISE                                                     
+           DO;                                                          
+            FEJLTEKST = ('ALVORLIG DB2 FEJL 80');                       
+            CALL ZS67000(SQLCA);                                        
+            CALL SQL_FEJL;                                              
+           END;                                                         
+        END;                                                            
+                                                                        
+ END OPEN_CSR;                                                          
+ /*********************************************************************/
+ FETCH_CSR: PROC;                                                       
+                                                                        
+         EXEC SQL                                                       
+          FETCH EJD_CSR                                                 
+           INTO :DCLGENBQ20000T.DINDKAAR                                
+               ,:DCLGENBQ20000T.EKOMNR                                  
+               ,:DCLGENBQ20000T.EEJDNR                                  
+               ,:DCLGENBQ20000T.EENHEDLBNR                              
+           ;                                                            
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+          WHEN(0)                                                       
+           DO;                                                          
+             FLERE = 'J';                                               
+             ANT_FETCH = ANT_FETCH + 1;                                 
+           END;                                                         
+          WHEN(100)                                                     
+           FLERE= 'N';                                                  
+          OTHERWISE                                                     
+           DO;                                                          
+            FEJLTEKST = ('DB2 FEJL FETCH 81');                          
+            CALL ZS67000(SQLCA);                                        
+            CALL SQL_FEJL;                                              
+           END;                                                         
+         END;                                                           
+                                                                        
+ END FETCH_CSR;                                                         
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+                                                                        
+   PARMLINIE = '';                                                      
+   ANT_FETCH = '';                                                      
+                                                                        
+   OPEN FILE (PARMKORT) TITLE ('BH75000C') INPUT;                       
+   READ FILE (PARMKORT) INTO  (PARM_AR);                                
+   CLOSE FILE(PARMKORT);                                                
+                                                                        
+   IF PARMLINIE.PROGNAVN ^= 'BH75000'                                   
+    THEN                                                                
+       PARM_FEJL = '1'B;                                                
+                                                                        
+    IF VERIFY (PARMLINIE.AAR,'0123456789')  >  0                        
+    THEN                                                                
+      DO;                                                               
+        PARM_FEJL = '1'B;                                               
+      END;                                                              
+     ELSE                                                               
+      DO;                                                               
+       WK_AAR = PARMLINIE.AAR;                                          
+      END;                                                              
+                                                                        
+    IF PARM_FEJL                                                        
+    THEN                                                                
+       DO;                                                              
+         PUT SKIP LIST ('FEJL I PARMKORT: ',PARMLINIE.AAR);             
+         CALL ZS30101(5,ABENDMEDD,2);                                   
+       END;                                                             
+    ELSE                                                                
+       DO;                                                              
+         PARM_MEDTAGET  = '1'B;                                         
+         PUT SKIP LIST('PARMKORT MEDTAGET: ' !!                         
+                PARMLINIE.PROGNAVN  !! PARMLINIE.AAR);                  
+       END;                                                             
+                                                                        
+  END OPSTART_INIT;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST('SQL_FEJL.....');                                
+         PUT SKIP LIST('SQLCA',SQLCA);                                  
+         CLOSE FILE(BH7500O);                                           
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD =  FEJLTEKST;                                        
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+         ANT_FETCH_PIC   = ANT_FETCH;                                   
+         DISP_ANT        = ANT_FETCH_PIC;                               
+         PUT SKIP LIST ('ANTAL EJENDOMME UDTRUKKET'  !! DISP_ANT);      
+                                                                        
+         CLOSE FILE(BH7500O);                                           
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+                                                                        
+ END BH75000;                                                           

@@ -1,0 +1,803 @@
+ BH30300: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROGRAMNAVN: BH30300.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE AKTIVE OG VALIDE UDENLANDSKE *
+ *              EJENDOMME FRA EVS FORSKUD TABELLER FOR AKUELT          *
+ *              FORSKUDSÅR(2020) TIL OPRETTELSE AF EVS FOR AKUELT      *
+ *              SLUTÅR(2019)                                           *
+ * PGMFORLØB:   1. ÅBEN EVS UDTRÆKSFIL.                                *
+ *              2. DECLARE PERSONEJENDOMSOPL.                          *
+ *              3. OPEN PERSONEJENDOMSOPL.                             *
+ *              4. LÆS/FETCH RÆKKE PÅ PERSONTABEL.                     *
+ *              5. BEHANDL DATA TIL FILSTRUKTUR.                       *
+ *              6. SKRIV RÆKKE PÅ EVS FIL.                             *
+ *              7. LUK PERSONEJENDOMSOPL.                              *
+ *              8. LUK EVS UDTRÆKSFIL.                                 *
+ *              9. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     BN00500T - EVS EJENDOMSTABEL.                          *
+ *              BN00600T - EVS PERSONTABEL.                            *
+ * UDDATA:      BH30300O - UDTRÆK FRA EVS FORSKUD KUN KOMMUNE          *
+ *                         999 (UDENLANDSKE EJENDOMME).                *
+ *              BH30301Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: GERD HOLM-PEDERSEN    GEH, PF              15.11.2011. *
+ ********************************************************************** 
+ * ÆNDRINGSLOG: EVS SLUT 2012 LARS KAAE HARRITSHØJ, PR     SEP 2012    *
+ * ÆNDRINGSLOG: EVS SLUT 2013 JØRGEN SAUGMANN, QQS         OKT 2013    *
+ * ÆNDRINGSLOG: EVS SLUT 2014 JØRGEN SAUGMANN, SAU         OKT 2014    *
+ *            : EVS SLUT-15. JNK: Årstal rettet i printlinie. OKT 2015 *
+ * ÆNDRINGSLOG: EVS SLUT 2015 ESBEN BRODERSEN QEB          MAR 2016    *
+ *              OMLAGT EN LINE TIL DATOMACRO  #01                      *
+ * ÆNDRINGSLOG: EVS SLUT 2016 ESBEN BRODERSEN QEB          OKT 2016    *
+ *              KUN KOMMENTARER ER RETTET                              *
+ * ÆNDRINGSLOG: EVS SLUT 2017 ESBEN BRODERSEN QEB          OKT 2017    *
+ *              KUN KOMMENTARER ER RETTET                              *
+ * ÆNDRINGSLOG: EVS SLUT 2018 ESBEN BRODERSEN QEB          SEP 2018    *
+ *              KUN KOMMENTARER ER RETTET                              *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2013');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE BN00500T;        /* EVS EJENDOMSTABELLEN */   
+         EXEC SQL INCLUDE BN00600T;        /* EVS PERSONTABELLEN   */   
+         EXEC SQL INCLUDE BN03300T;        /* LANDEKODE TABELLEN   */   
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF DIV. FÆLLESMACROER (SLUT/FORSKUD      )           */
+ /*********************************************************************/
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     HJ_DCPRN       CHAR (10);                                      
+ DCL     HJ_DCPRN_PIC   PIC  '(10)9' BASED(ADDR(HJ_DCPRN));             
+ DCL     HJ_EKOMNR      CHAR (03);                                      
+ DCL     HJ_EEJDNR      CHAR (06);                                      
+ DCL     EKOMEEJD_NR    CHAR (09);                                      
+ DCL     OK             CHAR (01)        INIT('J');                     
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     GEM_EEJDNR     BIN FIXED (31) INIT(0);                         
+ DCL     GEM_DCPRN      FIXED (11) INIT(0);                             
+ DCL     SW_FDAGEJ_NUL  BIT(01)    INIT('0'B);                          
+ DCL     FETCH_SQLKODE  FIXED BIN(15)    INIT(0);                       
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     HJ_DATOEN      PIC '(8)9';                                     
+ DCL     1 HJ_DATO      BASED(ADDR(HJ_DATOEN)),                         
+           2 AAR        PIC  '9999',                                    
+           2 MD         PIC  '99',                                      
+           2 DG         PIC  '99';                                      
+                                                                        
+ DCL     HJ_SLUTAAR   BIN FIXED(15);                                    
+ DCL     HJ_DINDKAAR  BIN FIXED(15);                                    
+ DCL     HJ_DOVTG_ST  DEC FIXED(9,0);                                   
+ DCL     HJ_DOVTG_SL  DEC FIXED(9,0);                                   
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH3030O FILE OUTPUT RECORD; /* EVS UDTRÆK KUN   KOMMUNE 999 */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_FORS,                                                 
+           %INCLUDE BH30100N;;  /* OBS GENBRUG FRA BH30100N */          
+                                                                        
+ DCL     1 INDK_PERS,                                                   
+           2 BNYMAN_I       BIN FIXED (15);                             
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANTLÆS_PERSON   BIN FIXED (31) INIT(0);/* LÆSTE PERSONTABEL  */
+ DCL     ANTSKRIV_PERSON BIN FIXED (31) INIT(0);/* SKREVET UDTRÆKSFIL */
+ DCL     ANTSKRIV_UDL    BIN FIXED (31) INIT(0);/* SKREVET KUN  UDLAND*/
+ DCL     ANTCEJBEVS_9    BIN FIXED (31) INIT(0);/* CEJBEVS=9(SLETTET) */
+ DCL     ANTEJENDOM_0    BIN FIXED (31) INIT(0);/* EEJDNR =0          */
+ DCL     ANTEJENDOM      BIN FIXED (31) INIT(0);/* HJÆLPE FELT        */
+ DCL     SQLKODE         PIC '9999';                                    
+ DCL     TV_SUMMERET      BIN FIXED (31) INIT(0);/* ANTAL SUMMERET    */
+ DCL     TV_IKKE_SUMMERET BIN FIXED (31) INIT(0);/*ANTAL IKKE SUMMERET*/
+ DCL     TV_STOR_FDAGIALT BIN FIXED (31) INIT(0);/*ANTAL FDAGIALT>360 */
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+  /*     ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH30300');                 
+            END;  */                                                    
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         PERSONEJENDOMSOPL = '';                                        
+         EJENDOMSOPL = '';                                              
+         UDTRÆK_FORS = '';                                              
+         UDTRÆK_FORS.BFORSKAT_SW = -1;                                  
+         DT = DATE;                                                     
+                                                                        
+         HJ_SLUTAAR  =    BH65300M.SLUTÅR;                              
+         HJ_DINDKAAR =    BH65300M.FORSKÅR;                             
+         HJ_DOVTG_ST =    BH65300M.ÅR0101;                              
+         HJ_DOVTG_SL =    BH65300M.ÅR1231;                              
+                                                                        
+         OPEN FILE (BH3030O) TITLE ('BH30300O');                        
+                                                                        
+         CALL ZZ20390('*OPEN','BH30301Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL DECLARE_PERSONEJENDOMSOPL;                                
+         CALL OPEN_PERSONEJENDOMSOPL;                                   
+         CALL FETCH_PERSONEJENDOMSOPL;                                  
+                                                                        
+         SELECT (FETCH_SQLKODE);  /*GEMT SQLCODE FRA FETCH_PERSONEJ. */ 
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               GEM_EEJDNR = PERSONEJENDOMSOPL.EEJDNR;                   
+               GEM_DCPRN  = PERSONEJENDOMSOPL.PERSONNUMMER;             
+               DO WHILE (FETCH_SQLKODE = 0);                            
+                  CALL BEHANDL_OG_SKRIV;                                
+                  CALL FETCH_PERSONEJENDOMSOPL;                         
+               END;                                                     
+                                                                        
+             END;                                                       
+                                                                        
+           WHEN (100)                                                   
+               PUT SKIP LIST ('INGEN RÆKKER LÆST');                     
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH PERSON_CURSOR ';                     
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF PERSONTABEL BN00600T                RUTINE */
+ /*********************************************************************/
+ OPEN_PERSONEJENDOMSOPL: PROC;                                          
+                                                                        
+         EXEC SQL OPEN PERSON_CURSOR;                                   
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN PERSON_CURSOR';                         
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_PERSONEJENDOMSOPL;                                            
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF PERSONTABEL BN00600T               RUTINE */
+ /*********************************************************************/
+ CLOSE_PERSONEJENDOMSOPL: PROC;                                         
+                                                                        
+         EXEC SQL CLOSE PERSON_CURSOR;                                  
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE PERSON_CURSOR';                        
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_PERSONEJENDOMSOPL;                                           
+ /*********************************************************************/
+ /* BEHANDL OG SKRIV EVS OPLYSNINGER                           RUTINE */
+ /*********************************************************************/
+ BEHANDL_OG_SKRIV: PROC;                                                
+                                                                        
+         IF PERSONEJENDOMSOPL.EKOMNR ^= 999       /*FORSKUD09*/         
+          & PERSONEJENDOMSOPL.CEJBEVS = '9'                             
+         THEN                                                           
+            DO;                                                         
+               ANTCEJBEVS_9 = ANTCEJBEVS_9 + 1;                         
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF PERSONEJENDOMSOPL.EEJDNR = 0                                
+         THEN                                                           
+            DO;                                                         
+               ANTEJENDOM_0 = ANTEJENDOM_0 + 1;                         
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF GEM_EEJDNR ^= PERSONEJENDOMSOPL.EEJDNR                      
+          ! GEM_DCPRN  ^= PERSONEJENDOMSOPL.PERSONNUMMER                
+         THEN                                                           
+           DO;                                                          
+             ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                     
+                                                                        
+             IF ANTEJENDOM = 1                                          
+             THEN                                                       
+                UDTRÆK_FORS.CEVSSUM = ' ';                              
+                                                                        
+             IF SW_FDAGEJ_NUL = '1'B  & UDTRÆK_FORS.CEVSSUM = '1'       
+             THEN                                                       
+                UDTRÆK_FORS.CEVSSUM = '2'; /* TIL PERIODE OPDELING    */
+                                           /* ESB OG AAR EVS SLUT 2002*/
+             WRITE FILE (BH3030O) FROM (UDTRÆK_FORS);                   
+             ANTSKRIV_UDL = ANTSKRIV_UDL + 1;                           
+                                                                        
+             GEM_EEJDNR = PERSONEJENDOMSOPL.EEJDNR;                     
+             GEM_DCPRN  = PERSONEJENDOMSOPL.PERSONNUMMER;               
+             IF FDAGIALT > 360 THEN                                     
+               TV_STOR_FDAGIALT = TV_STOR_FDAGIALT + 1;                 
+             SW_FDAGEJ_NUL = '0'B;                                      
+             UDTRÆK_FORS = '';                                          
+             UDTRÆK_FORS.BFORSKAT_SW = -1;                              
+             ANTEJENDOM = 0;                                            
+           END;                                                         
+         CALL OVERFØRDATA;                                              
+                                                                        
+ END BEHANDL_OG_SKRIV;                                                  
+ /*********************************************************************/
+ /* OVERFØRDATA                                                RUTINE */
+ /*********************************************************************/
+ OVERFØRDATA: PROC;                                                     
+                                                                        
+         HJ_DATOEN = PERSONEJENDOMSOPL.DOVTG;                           
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 01;                                          
+              HJ_DATO.DG = 01;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         PERSONEJENDOMSOPL.DOVTG = HJ_DATOEN;                           
+                                                                        
+                                                                        
+         HJ_DATOEN = PERSONEJENDOMSOPL.DAFSTAA;                         
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 12;                                          
+              HJ_DATO.DG = 31;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         PERSONEJENDOMSOPL.DAFSTAA = HJ_DATOEN;                         
+                                                                        
+                                                                        
+         HJ_DATOEN = PERSONEJENDOMSOPL.DATO0107;                        
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 01;                                          
+              HJ_DATO.DG = 01;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         PERSONEJENDOMSOPL.DATO0107 = HJ_DATOEN;                        
+                                                                        
+                                                                        
+         HJ_DATOEN = PERSONEJENDOMSOPL.DINDFLYT;                        
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 01;                                          
+              HJ_DATO.DG = 01;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         PERSONEJENDOMSOPL.DINDFLYT = HJ_DATOEN;                        
+                                                                        
+                                                                        
+         HJ_DATOEN = PERSONEJENDOMSOPL.DFRAFLYT;                        
+                                                                        
+         IF HJ_DATOEN = 0                                               
+         THEN;                                                          
+         ELSE                                                           
+         IF HJ_DATO.MD < 01                                             
+          ! HJ_DATO.MD > 12                                             
+         THEN                                                           
+            DO;                                                         
+              HJ_DATO.MD = 12;                                          
+              HJ_DATO.DG = 31;                                          
+            END;                                                        
+         ELSE                                                           
+         IF HJ_DATO.DG < 01                                             
+         THEN                                                           
+            HJ_DATO.DG = 01;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 31                                             
+          & (HJ_DATO.MD = 01 !                                          
+             HJ_DATO.MD = 03 !                                          
+             HJ_DATO.MD = 05 !                                          
+             HJ_DATO.MD = 07 !                                          
+             HJ_DATO.MD = 08 !                                          
+             HJ_DATO.MD = 10 !                                          
+             HJ_DATO.MD = 12)                                           
+         THEN                                                           
+            HJ_DATO.DG = 31;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 30                                             
+          & (HJ_DATO.MD = 04 !                                          
+             HJ_DATO.MD = 06 !                                          
+             HJ_DATO.MD = 09 !                                          
+             HJ_DATO.MD = 11)                                           
+         THEN                                                           
+            HJ_DATO.DG = 30;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 29                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) = 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 29;                                            
+         ELSE                                                           
+         IF HJ_DATO.DG > 28                                             
+          & HJ_DATO.MD = 02                                             
+          & MOD(HJ_DATO.AAR,4) > 0                                      
+         THEN                                                           
+            HJ_DATO.DG = 28;                                            
+                                                                        
+         PERSONEJENDOMSOPL.DFRAFLYT = HJ_DATOEN;                        
+                                                                        
+         ANTEJENDOM = ANTEJENDOM + 1;                                   
+         UDTRÆK_FORS.DCPRN = PERSONEJENDOMSOPL.PERSONNUMMER;            
+                                                                        
+         UDTRÆK_FORS.EKOMNR        = PERSONEJENDOMSOPL.EKOMNR;          
+         UDTRÆK_FORS.EEJDNR        = PERSONEJENDOMSOPL.EEJDNR;          
+         /*  Først til Forskud 2020 */                                  
+     /*  UDTRÆK_FORS.EENHEDLBNR    = PERSONEJENDOMSOPL.EENHEDLBNR;*/    
+         UDTRÆK_FORS.EENHEDLBNR    = 0;                                 
+         UDTRÆK_FORS.EJDBELIG      = EJENDOMSOPL.EJDBELIG;              
+         UDTRÆK_FORS.BBERGRL       = PERSONEJENDOMSOPL.BBERGRL;         
+         UDTRÆK_FORS.BBER2FAM      = PERSONEJENDOMSOPL.BBER2FAM;        
+                                                                        
+         IF PERSONEJENDOMSOPL.EKOMNR = 999                              
+         THEN                                                           
+            UDTRÆK_FORS.CLANDEKODE    = EJENDOMSOPL.LANDEKODE;          
+         ELSE                                                           
+            UDTRÆK_FORS.CLANDEKODE    = '';                             
+                                                                        
+         UDTRÆK_FORS.CFRATYPE      = '4';                               
+         IF PERSONEJENDOMSOPL.DAFSTAA > 0                               
+         THEN                                                           
+            UDTRÆK_FORS.DSORTDAT1  = PERSONEJENDOMSOPL.DAFSTAA;         
+         ELSE                                                           
+            UDTRÆK_FORS.DSORTDAT1  = 99991231;                          
+         UDTRÆK_FORS.DSORTDAT2     = PERSONEJENDOMSOPL.DOVTG;           
+         UDTRÆK_FORS.ELBNR         = PERSONEJENDOMSOPL.ELBNR;           
+         UDTRÆK_FORS.DFRAGLD       = PERSONEJENDOMSOPL.DFRAGLD;         
+         UDTRÆK_FORS.DTILGLD       = PERSONEJENDOMSOPL.DTILGLD;         
+         UDTRÆK_FORS.CEVSBENY      = PERSONEJENDOMSOPL.CEVSBENY;        
+         UDTRÆK_FORS.CEJBEVS       = PERSONEJENDOMSOPL.CEJBEVS;         
+         UDTRÆK_FORS.COPR_CEJBEVS  = PERSONEJENDOMSOPL.COPR_CEJBEVS;    
+         UDTRÆK_FORS.CEJDTYPE      = PERSONEJENDOMSOPL.CEJDTYPE;        
+         UDTRÆK_FORS.CFRED         = PERSONEJENDOMSOPL.CFRED;           
+         UDTRÆK_FORS.CNEDSL1       = PERSONEJENDOMSOPL.CNEDSL1;         
+         UDTRÆK_FORS.DATO0107      = PERSONEJENDOMSOPL.DATO0107;        
+         UDTRÆK_FORS.DOVTG         = PERSONEJENDOMSOPL.DOVTG;           
+         IF ANTEJENDOM = 1                                              
+         THEN                                                           
+            UDTRÆK_FORS.DOVTG_GL   = PERSONEJENDOMSOPL.DOVTG;           
+         UDTRÆK_FORS.DAFSTAA       = PERSONEJENDOMSOPL.DAFSTAA;         
+         UDTRÆK_FORS.DINDFLYT      = PERSONEJENDOMSOPL.DINDFLYT;        
+         UDTRÆK_FORS.DFRAFLYT      = PERSONEJENDOMSOPL.DFRAFLYT;        
+         UDTRÆK_FORS.GPCTEJER      = PERSONEJENDOMSOPL.GPCTEJER;        
+         UDTRÆK_FORS.FDAGUDLE      = PERSONEJENDOMSOPL.FDAGUDLE;        
+         UDTRÆK_FORS.GPCTUDLE      = PERSONEJENDOMSOPL.GPCTUDLE;        
+         UDTRÆK_FORS.FDAGERHV      = PERSONEJENDOMSOPL.FDAGERHV;        
+         UDTRÆK_FORS.GPCTERHV      = PERSONEJENDOMSOPL.GPCTERHV;        
+         UDTRÆK_FORS.BPROM1        = PERSONEJENDOMSOPL.BPROM1;          
+                                                                        
+         IF PERSONEJENDOMSOPL.CEJBEVS = '0' !                           
+            PERSONEJENDOMSOPL.CEJBEVS = '4' !                           
+            PERSONEJENDOMSOPL.CEJBEVS = '5'                             
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BBRUTTO_SW = 0;                              
+               UDTRÆK_FORS.BBRUTTO    = PERSONEJENDOMSOPL.BBRUTTO;      
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BBRUTTO_SW = -1;                             
+               UDTRÆK_FORS.BBRUTTO    = 0;                              
+            END;                                                        
+                                                                        
+         UDTRÆK_FORS.CENKE      = PERSONEJENDOMSOPL.CENKE;              
+         UDTRÆK_FORS.FDAGEJ     = PERSONEJENDOMSOPL.FDAGEJ;/* ESB */    
+                                                                        
+         UDTRÆK_FORS.CEKSEMP    = PERSONEJENDOMSOPL.CEKSEMP;  /*#09-04*/
+         UDTRÆK_FORS.COPR_EKSEMP =                                      
+                               PERSONEJENDOMSOPL.COPR_EKSEMP; /*#09-04*/
+                                                                        
+         IF INDK_PERS.BNYMAN_I = 0                                      
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BNYMAN_SW = 0;                               
+               UDTRÆK_FORS.BNYMAN = PERSONEJENDOMSOPL.BNYMAN;           
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BNYMAN_SW = -1;                              
+               UDTRÆK_FORS.BNYMAN = 0;                                  
+            END;                                                        
+                                                                        
+         IF PERSONEJENDOMSOPL.CEJBEVS = '0' !                           
+            PERSONEJENDOMSOPL.CEJBEVS = '4' !                           
+            PERSONEJENDOMSOPL.CEJBEVS = '5'                             
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.B100_SW = 0;                                 
+               UDTRÆK_FORS.B100 = PERSONEJENDOMSOPL.B100;               
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.B100_SW = -1;                                
+               UDTRÆK_FORS.B100 = 0;                                    
+            END;                                                        
+                                                                        
+         IF PERSONEJENDOMSOPL.BEJERAN > 0      &                        
+            (PERSONEJENDOMSOPL.CEJBEVS = '0'   !                        
+             PERSONEJENDOMSOPL.CEJBEVS = '4'   !                        
+             PERSONEJENDOMSOPL.CEJBEVS = '5')  &                        
+            (PERSONEJENDOMSOPL.GPCTEJER > 0    &                        
+             PERSONEJENDOMSOPL.GPCTEJER < 10000)                        
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BEJERAN_SW = 0;                              
+               UDTRÆK_FORS.BEJERAN = PERSONEJENDOMSOPL.BEJERAN;         
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_FORS.BEJERAN_SW = -1;                             
+               UDTRÆK_FORS.BEJERAN = 0;                                 
+            END;                                                        
+                                                                        
+         SELECT;                                                        
+         WHEN (BNYMAN_SW = 0                      &                     
+               PERSONEJENDOMSOPL.CEJBEVS  ^= '9'  & /*BEHOLD SOM INFO */
+               PERSONEJENDOMSOPL.CEVSBENY  = '0'  &                     
+               (PERSONEJENDOMSOPL.CEJBEVS  = 'A'  !                     
+                PERSONEJENDOMSOPL.CEJBEVS  = '6'))                      
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                      UDTRÆK_FORS.BNYMAN;               
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = FDAGIALT + UDTRÆK_FORS.FDAGEJ;    
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         WHEN (BEJERAN_SW = 0                     &                     
+               PERSONEJENDOMSOPL.CEVSBENY  = '0'  &                     
+               PERSONEJENDOMSOPL.CEJBEVS  ^= '9') /*BEHOLDES SOM INFO*/ 
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                         + PERSONEJENDOMSOPL.BEJERAN;   
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = FDAGIALT + UDTRÆK_FORS.FDAGEJ;    
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         WHEN (B100_SW = 0                         &                    
+               PERSONEJENDOMSOPL.CEVSBENY  = '0'   &                    
+               PERSONEJENDOMSOPL.CEJBEVS  ^= '9') /*BEHOLDES SOM INFO*/ 
+            DO;                                                         
+               UDTRÆK_FORS.BFORSKAT = UDTRÆK_FORS.BFORSKAT +            
+                                         + PERSONEJENDOMSOPL.B100;      
+               UDTRÆK_FORS.BFORSKAT_SW = 0;                             
+               UDTRÆK_FORS.CEVSSUM = '1';                               
+               UDTRÆK_FORS.FDAGIALT = FDAGIALT + UDTRÆK_FORS.FDAGEJ;    
+               IF UDTRÆK_FORS.FDAGEJ = 0                                
+               THEN                                                     
+                  SW_FDAGEJ_NUL = '1'B;                                 
+               TV_SUMMERET = TV_SUMMERET + 1;                           
+            END;                                                        
+         OTHERWISE                                                      
+            TV_IKKE_SUMMERET = TV_IKKE_SUMMERET + 1;                    
+         END; /*SELECT*/                                                
+                                                                        
+ END OVERFØRDATA;                                                       
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+         CLOSE FILE (BH3030O);                                          
+         CALL CLOSE_PERSONEJENDOMSOPL;                                  
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = 'BH30300 ** 250 ' !! FEJLTEKST !! SQLKODE;         
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE (BH3030O);                                          
+         CALL CLOSE_PERSONEJENDOMSOPL;                                  
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' UDTRÆK FRA EVS FORSKUD '                    
+         /*#01*/       !! BH65300M.INDKÅR2                              
+                       !! ' DATO: '                                     
+                       !! DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH30300 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA PERSONTABELLEN . . . . . . . .';  
+         LIN.ANT   = ANTLÆS_PERSON;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVET MED CEJBEVS LIG 9 . .... . . . .';  
+         LIN.ANT   = ANTCEJBEVS_9;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET MED EEJDNR LIG 0. . . . . . .';  
+         LIN.ANT   = ANTEJENDOM_0;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT . . . . . . . . . . . . . .';  
+         LIN.ANT   = ANTSKRIV_PERSON;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME. . . . . . .';  
+         LIN.ANT   = ANTSKRIV_UDL;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL HVOR DER ER SUMMERET SKAT. . . . . . . .';  
+         LIN.ANT   = TV_SUMMERET;                                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL HVOR DER IKKE ER SUMMERET SKAT . . . . .';  
+         LIN.ANT   = TV_IKKE_SUMMERET;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL MED FDAGIALT STØRRE END 360 DAGE . . . .';  
+         LIN.ANT   = TV_STOR_FDAGIALT;                                  
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ %INCLUDE BH30300M;             /* DECLARE OG FETCH SQL STATEMENTS.   */
+ %INCLUDE ZM90051M;             /* KONV BIN15 TIL CHAR                */
+ %INCLUDE BS34307M;             /* KONV BF31 TIL CHAR6                */
+ %INCLUDE ZM90013M;             /* OMSÆT DATO TIL/FRA DB2-DATOFORMAT  */
+                                                                        
+ END BH30300;                                                           

@@ -1,0 +1,2287 @@
+ BE84900:  PROCEDURE OPTIONS (MAIN) REORDER;                            
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KMD A/S');                    
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL:  Find ejendomme med over 100% ejerskab                      *
+ *                                                                     *
+ * INPUT  :   Tabel BE78000T                                           *
+ *                                                                     *
+ * OUTPUT :   Tabel BE78000T                                           *
+ *                                                                     *
+ *   Testjob BE84903T i udv.bevs.F25.jcl.T3                            *
+ *                                                                     *
+ * ONE august 2024                                                     *
+ * PBR august 2024 Fravælg personer som ikke sendes til SKAT           *
+ **********************************************************************/
+                                                                        
+ /*                                                                     
+ Den aller første fecth skal bare gemmes.                               
+ først den anden fetch kan give en samlet ejerkreds. Dvs at             
+ ejendommen i første fetch kun har en ejer. Men ellers                  
+ fortsættes indtil en ny ejendom dukker op og vi derved har             
+ en samlet ejerkreds for den forrige ejendom vi fetchede.               
+ Efter sidste fetch(sqlcode100) har vi en samlet ejerkreds              
+  for den sidste ejendomm, der skal behandles.                          
+                                                                        
+ Når vi fetcher ejere tjekkes hhv om                                    
+ CEJBEVS er forskellig fra nul og om der er sat FEJLNR 5242             
+ da skal vi ikke behandle ejerskab over 100%                            
+                                                                        
+                                                                        
+ Dvs.:                                                                  
+ Hvis en ejendom har 5 ejere - og vi har fetched de 5                   
+ så vil den næste fetch (6. fetch) give en ny ejendom                   
+ Det betyder at vi nu har en samlet ejerkreds                           
+ på 5 der skal behandles                                                
+ Efter behandlingen vil vi fortsætte med den nye ejendom(6)             
+ */                                                                     
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)            INIT ('BE84900');    
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16)           INIT (' ');          
+ DCL     AFVIKL_ID_CSRP         CHAR(16)           INIT (' ');          
+ DCL     WS_SLUT_AFVIKLINGS_ID  CHAR(16)           INIT (' ');          
+ DCL     ABEND_TEXT             CHAR(200) VAR      INIT (' ');          
+ DCL     WS_TIL_EVS_AAR         BIN FIXED (15);                         
+ DCL     WS_TIL_EVS_AAR_GL      BIN FIXED (15);                         
+ DCL     ADVIS_FEJLNR           BIN FIXED (15);                         
+ DCL     (I,J,K,L)              BIN FIXED (15)     INIT      (0);       
+ DCL     Ant_Ejere              BIN FIXED (15)     INIT      (0);       
+ DCL     ANT_COMM               BIN FIXED (15)     INIT      (0);       
+ DCL     ANT_UPD                BIN FIXED (31)     INIT      (0);       
+ DCL     ANT_EJ_UPD             BIN FIXED (31)     INIT      (0);       
+                                                                        
+ DCL     SUM                    FIXED DEC (15,2)   INIT      (0);       
+ DCL     SUM_PIC                PIC '(7)Z(1)9'     INIT      (0);       
+ DCL     RESULT_FUNDET          BIT       (1)      INIT ('1'B);         
+ DCL     samlet_ejerkreds       BIT       (1)      INIT ('1'B);         
+ //DCL     EjerskabOver100        BIT       (1)      INIT ('1'B);       
+ //DCL     ADVIS_FUNDET           BIT       (1)      INIT ('1'B);       
+ DCL     Opsætte_fejlnr         BIT       (1)      INIT ('1'B);         
+ DCL     Fundet_Over_100        BIT       (1)      INIT ('0'B);         
+ DCL     Del1                   BIT       (1)      INIT ('0'B);         
+ DCL     Del2                   BIT       (1)      INIT ('0'B);         
+ DCL     JA                     BIT       (1)      INIT ('1'B);         
+ DCL     NEJ                    BIT       (1)      INIT ('0'B);         
+                                                                        
+ DCL  HJ_LOG1             CHAR(12);                                     
+ DCL     MT_FUNDET              BIT       (1);                          
+ DCL     SLUT_FUNDET            BIT       (1);                          
+                                                                        
+ DCL MÅNED CHAR(3) dimension(12) STATIC INIT ('JAN','FEB','MAR','APR'   
+           ,'MAJ','JUN','JUL','AUG','SEP','OKT','NOV','DEC');           
+                                                                        
+                                                                        
+ DCL     DATODOV                PIC '(8)9';                             
+ DCL     DgAFST               PIC '(8)9';                               
+ DCL     FraMd                  PIC '(2)9';                             
+ DCL     TilMd                  PIC '(2)9';                             
+                                                                        
+ DCL     1 DATO_DOV         DEF DATODOV,                                
+           2 ÅR          PIC     '(4)9',                                
+           2 MD          PIC     '(2)9',                                
+           2 DG          PIC     '(2)9';                                
+                                                                        
+ DCL     1 DATO_AFST        DEF DgAFST,                                 
+           2 ÅR          PIC     '(4)9',                                
+           2 MD          PIC     '(2)9',                                
+           2 DG          PIC     '(2)9';                                
+                                                                        
+                                                                        
+ DCL     1 TV,  /* TÆLLEVÆRKER TIL TOTALLISTEN */                       
+           2 FETCH_RESULT     FIXED DEC (10),                           
+           2 SELECT_MT        FIXED DEC (10),                           
+           2 SELECT_ESR       FIXED DEC (10),                           
+           2 SELECT_SLUT      FIXED DEC (10),                           
+           2 ANT_COMM         FIXED DEC (10),                           
+           2 ANT_UPD          FIXED DEC (10);                           
+                                                                        
+                                                                        
+ DCL 1 Ejendom(100),                                                    
+    2 DCPRN                     FIXED DEC (10),                         
+    2 EKOMNR                    FIXED BIN (15),                         
+    2 EEJDNR                    FIXED BIN (31),                         
+    2 EENHEDLBNR                FIXED BIN (15),                         
+    2 EJERSKAB_CEJDTYPE         CHAR      (1),                          
+    2 TILEVS_CEJBEVS            CHAR      (1),                          
+    2 TILEVS_GPCTEJER           FIXED DEC (7,2),                        
+    2 TILEVS_DAFSTAA            PIC '(8)9',                             
+    2 TILEVS_DOVTG              PIC '(8)9',                             
+    2 FEJLNR                    FIXED DEC (4);                          
+                                                                        
+                                                                        
+                                                                        
+ DCL 1 MånedsSum(12),                                                   
+    2 SumMånedDel1              FIXED DEC (15,2),                       
+    2 DagAFST                   PIC       '(2)9',                       
+    2 SumMånedDel2              FIXED DEC (15,2),                       
+    2 DagOver                   PIC      '(2)9';                        
+                                                                        
+ /*********************************************************************/
+ /****** PRINTLINIER TIL INTERN FEJL- OG KONTROLLISTE                 */
+ /*********************************************************************/
+   % INCLUDE ZZ20301M;                  /* STANDARD KONTROLKARAKTERER */
+                                                                        
+   DCL     1   LINIE,                                                   
+             3  CCHAR      CHAR      (1),                               
+             3  TEXT       CHAR      (132);                             
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     TRANSLATE       BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     STG             BUILTIN;                                       
+ DCL     CHAR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+            ON ERROR                                                    
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                PUT SKIP LIST ('DCLBE78000T',DCLBE78000T);              
+                CALL PLIDUMP  ('SHOB','PROGRAM BE84900L');              
+            END;                                                        
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                       /* SQL-ABEND    */
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES AF FILES                                            */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT           EXTERNAL FILE PRINT;                        
+                                                                        
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF DIV. FÆLLESMACROER                                * 
+ *********************************************************************/ 
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ /********************************************************************* 
+ *       DB2                                                          * 
+ *********************************************************************/ 
+         EXEC SQL INCLUDE SQLCA;       /* SQL KOMMUNIKATIONSAREAL    */ 
+         EXEC SQL INCLUDE BE78000T;    /* EVS_RESULTAT (FORSKUD)     */ 
+         EXEC SQL INCLUDE BE77000T;   /* EVS_UDTRÆK (FORSKUD)         */
+         EXEC SQL INCLUDE BE76000T;   /* BEHANDLET MT                 */
+         EXEC SQL INCLUDE BE89000T;   /* HISTORISKE EJERFORHOLD       */
+                                                                        
+                                                                        
+         /* BE780_SW Indikatorvariable til BE78000T                   */
+         %INCLUDE BE85501N;                                             
+                                                                        
+         DCL     1 BE770_SW,                                            
+          2 EVSFEJ_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFEJ_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFEJ_EJERANDEL_SW              BIN FIXED (15),            
+          2 EVSFÆG_EVSEFTERRABAT_SW          BIN FIXED (15),            
+          2 EVSFÆG_RABATBER_EJERANDEL_SW     BIN FIXED (15),            
+          2 EVSFÆG_EJERANDEL_SW              BIN FIXED (15);            
+                                                                        
+ /*********************************************************************/
+ /* Declare af CURSORS                                                */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL DECLARE RESULTCURS CURSOR WITH HOLD FOR               
+              SELECT                                                    
+                T78.TIL_EVS_AAR,                                        
+                T78.AFVIKLINGS_ID,                                      
+                T78.DATA_ID,                                            
+                T78.DCPRN,                                              
+                T78.EKOMNR,                                             
+                T78.EEJDNR,                                             
+                T78.EENHEDLBNR,                                         
+                T78.EGENNR,                                             
+                T78.FEJLNR,                                             
+                T78.TILEVS_GPCTEJER,                                    
+                T78.TILEVS_DAFSTAA,                                     
+                T78.TILEVS_DOVTG,                                       
+                T78.VURD_A_CEJDTYPE_AKT,                                
+                T78.EJERSKAB_CEJDTYPE_AKT,                              
+                T78.EJERSKAB_CEJDTYPE,                                  
+                T78.EJENDOM_CEJDTYPE,                                   
+                T78.TILEVS_A_EJ_DCPRCIR,                                
+                T78.TILEVS_A_EJ_DAFSTÅ,                                 
+                T78.TILEVS_A_V_CBENYT,                                  
+                T78.TILEVS_A_EJ_COMPLA,                                 
+                T78.TILEVS_CEJBEVS,                                     
+                T78.TILEVS_CINVPNR,                                     
+                T78.TILEVS_DAFSTAA,                                     
+                T78.TILEVS_DFRAFLYT,                                    
+                T78.TILEVS_A_V_CBENYT,                                  
+                T78.TILEVS_A_V_ANT_FOR_4,                               
+                T78.TILEVS_A_V_ANT_FOR_5,                               
+                T78.TILEVS_A_V_ANT_FOR_6,                               
+                T78.TILEVS_A_V_ANT_FOR_8,                               
+                T78.TILEVS_A_V_ANT_FOR_9                                
+                                                                        
+          FROM BE78000T T78                                             
+          WHERE T78.TIL_EVS_AAR = :WS_TIL_EVS_AAR                       
+          AND   T78.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          AND   T78.DATA_ID = :BE55600M.DATA_ID                         
+          AND   T78.DCPRN > 0100000000                                  
+          ORDER BY T78.EKOMNR, T78.EEJDNR,                              
+                   T78.EENHEDLBNR,T78.TILEVS_DOVTG,                     
+                   T78.TILEVS_DAFSTAA;                                  
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         TV = '';                                                       
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SLUT kørsel');         
+              END;                                                      
+            WHEN ('OPRET_EVS_FORSK')                                    
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS FORSKUD kørsel');      
+              END;                                                      
+            WHEN ('SUPPL_EVS_SLUT')                                     
+              DO;                                                       
+                 PUT SKIP LIST ('Dette er en EVS SUPPLEMENT kørsel');   
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                 ABEND_TEXT = 'Afviklings_id skal være '           !!   
+                            'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!       
+                            'eller SUPPL_EVS_SLUT';                     
+                 CALL SQL_ERROR(PROCNAME,104,ABEND_TEXT);               
+              END;                                                      
+         END;                                                           
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  AFVIKL_ID_CSRP = BE55600M.AFVIKLINGS_ID;              
+                  WS_TIL_EVS_AAR = BE55600M.FORSKÅR;                    
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  AFVIKL_ID_CSRP = BE55600M.AFVIKLINGS_ID;              
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;         
+                  AFVIKL_ID_CSRP = 'OPRET_EVS_SLUT';  /* altid SLUT */  
+                  WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                     
+                  /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */       
+                  WS_TIL_EVS_AAR_GL = BE55600M.SLUTÅR - 1;              
+                  /* afviklings-id til læs gammelt år altid SLUT */     
+                  WS_SLUT_AFVIKLINGS_ID = 'OPRET_EVS_SLUT';             
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  CALL SQL_ERROR(PROCNAME,105,'PARAMETERFEJL');         
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+                                                                        
+                                                                        
+         /********************************************************/     
+         /*               HOVEDFLOW                              */     
+         /********************************************************/     
+                                                                        
+ put skip list('WS_FORSKUD_SLUT_TXT',WS_FORSKUD_SLUT_TXT);              
+ put skip list('WS_TIL_EVS_AAR',WS_TIL_EVS_AAR);                        
+ put skip list('BE55600M.DATA_ID',BE55600M.DATA_ID);                    
+                                                                        
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE84989Y'); /* KONTROLLISTE */          
+         CALL SKRIV_HEADER;                                             
+         Ejendom(*) = '';                                               
+         CALL OPEN_RESULTCURS;                                          
+         CALL FETCH_RESULT;  /* BE78 */                                 
+                                                                        
+                                                                        
+         DO WHILE (RESULT_FUNDET);                                      
+                                                                        
+            CALL FETCH_RESULT;  /* BE78 */                              
+                                                                        
+            // Hvis vi har en samlet ejerkreds behandler vi den nu      
+            If samlet_ejerkreds  Then                                   
+            Do;                                                         
+                                                                        
+               // Samlet ejerskab over 100                              
+               // vi behandler ejere af ejendommen                      
+               // og ingen advis fundet                                 
+               If sum > 100 then                                        
+                  CALL BEHANDL;                                         
+                                                                        
+                                                                        
+              //reset variabler                                         
+              //og gem den nye ejendom fra seneste fetch                
+              Ejendom(*) = '';                                          
+              sum = 0;                                                  
+              //Opsætte_fejlnr  = JA;                                   
+              //ADVIS_FUNDET = NEJ;                                     
+              If RESULT_FUNDET  Then                                    
+              DO;                                                       
+                 Ant_Ejere = 1;                                         
+                 Ejendom(Ant_Ejere) = DCLBE78000T, BY NAME;             
+                 sum = sum + EJENDOM.TILEVS_GPCTEJER(Ant_Ejere);        
+                                                                        
+               //tjek om 158 = 0 på en af ejerene                       
+                //IF EJENDOM.TILEVS_CEJBEVS(Ant_Ejere) ^= '0' Then      
+                //   Opsætte_fejlnr  = NEJ;                             
+                                                                        
+               // IF EJENDOM.FEJLNR(Ant_Ejere) = 5242  Then             
+               //    ADVIS_FUNDET = JA;                                 
+              End;                                                      
+                                                                        
+                                                                        
+            END;                                                        
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       Behandler en given ejendom                                   * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+                                                                        
+ MånedsSum = '';                                                        
+                                                                        
+                                                                        
+ //Vi kigger på ejendomme hvor ejerskab er større end 100               
+ //Fordeler ejernes ejerskab ud på de måneder, de har ejet ejendommen   
+ //Hvis skilledato er midt i en måned (måneder er delt i to)            
+ //registreres ejerskabet på rette del                                  
+ //Sælger på første del via TILEVS_DAFSTAA                              
+ //Køber på anden del via TILEVS_DOVTG                                  
+                                                                        
+                                                                        
+         K = 1;                                                         
+         DO WHILE (K <= Ant_Ejere );                                    
+            DATODOV = EJENDOM.TILEVS_DOVTG(k);                          
+            DgAFST = EJENDOM.TILEVS_DAFSTAA(k);                         
+                                                                        
+            //Finder start måned og slut måned for ejerskab             
+            FraMd = 1;  //ændres for køber                              
+            TilMd = 12; // ændres for sælger                            
+                                                                        
+            //Hvis overtaget ejendommen i årets løb ændres FraMd        
+            //Overtaget dato er ejet fra og med datoen                  
+            If DATO_DOV.ÅR = WS_TIL_EVS_AAR Then                        
+            Do;                                                         
+                   FraMd =  DATO_DOV.MD;                                
+                   //overtaget midt i måneden - ejer sidste del         
+                   //Hvis lig 1 da ejer hele måneden                    
+                   If DATO_DOV.DG > 1 Then                              
+                      Del2 = Ja;  //ejer så ikke i første del           
+            End;                                                        
+            //Hvis afstået ejendommen i årets løb ændres TilMd          
+            //Afstået dato er ejet til men ikke med datoen              
+            // Hvis 1/1 da ingen ejerskab dette år                      
+            If DATO_AFST.ÅR = WS_TIL_EVS_AAR  Then                      
+            Do;                                                         
+                   TilMd =  DATO_AFST.MD;                               
+                   //afstået midt i måneden - ejer første del           
+                   //Hvis d.1. da ingen ejerskab i denne måned          
+                                                                        
+                   //ejer så ikke sidste del                            
+                   If DATO_AFST.DG > 1 Then                             
+                      Del1 = Ja;                                        
+                                                                        
+                   //ejer så ikke noget denne md                        
+                   If DATO_AFST.DG = 1 & TilMd > 1 Then                 
+                      TilMd = TilMd - 1;                                
+                                                                        
+                   //ejer intet dette år                                
+                   If DATO_AFST.DG = 1 & TilMd = 1 Then                 
+                      TilMd = 0;                                        
+                                                                        
+                                                                        
+            End;                                                        
+                                                                        
+                                                                        
+                                                                        
+            //Finder ejerskab pr måned                                  
+            If FraMd <= TilMd Then                                      
+            Do;                                                         
+               j = FraMd;                                               
+               DO WHILE (j <= TilMd );                                  
+                   SELECT;                                              
+                      //køber ejer kun i del 2                          
+                      When ( FraMd = j & Del2)                          
+                        Do;                                             
+                           MånedsSum.SumMånedDel2(j)                    
+                           = MånedsSum.SumMånedDel2(j)                  
+                           + EJENDOM.TILEVS_GPCTEJER(k);                
+                           If DATO_DOV.DG > 1                           
+                              & (DATO_DOV.DG < MånedsSum.DagOver(j)     
+                              ! MånedsSum.DagOver(j) = 0) Then          
+                              MånedsSum.DagOver(j) = DATO_DOV.DG;       
+                        End;                                            
+                      //sælger ejer kun i del 1                         
+                      When (TilMd = j & Del1)                           
+                        Do;                                             
+                           MånedsSum.SumMånedDel1(j)                    
+                           = MånedsSum.SumMånedDel1(j)                  
+                           + EJENDOM.TILEVS_GPCTEJER(k);                
+                           If DATO_AFST.DG > 1                          
+                              & (DATO_AFST.DG > MånedsSum.DagAFST(j)    
+                              ! MånedsSum.DagAFST(j) = 0) Then          
+                              MånedsSum.DagAFST(j) = DATO_AFST.DG;      
+                        End;                                            
+                      //ejerskab hele måneden                           
+                      Otherwise                                         
+                        Do;                                             
+                           MånedsSum.SumMånedDel1(j)                    
+                           = MånedsSum.SumMånedDel1(j)                  
+                           + EJENDOM.TILEVS_GPCTEJER(k);                
+                                                                        
+                           MånedsSum.SumMånedDel2(j)                    
+                           = MånedsSum.SumMånedDel2(j)                  
+                           + EJENDOM.TILEVS_GPCTEJER(k);                
+                        End;                                            
+                   End;  //Select                                       
+                   j = j + 1;                                           
+               END;                                                     
+            End;                                                        
+                                                                        
+            Del1 = Nej;                                                 
+            Del2 = Nej;                                                 
+                                                                        
+                                                                        
+            K = k+1;                                                    
+                                                                        
+         END;                                                           
+                                                                        
+                                                                        
+         //Tjekker om der er ejerskab over 100% i en delmåned           
+         j = 1;                                                         
+         Fundet_Over_100 = NEJ;                                         
+         Do While (j <= 12 & ^Fundet_Over_100);                         
+                                                                        
+            //Hvis dato midt i måneden da en del1 og del2               
+            //overlap; der er afstået efter overtaglese                 
+            //og begger perioder har ejerskab på 100                    
+            //hvis ens datoer da ejer begge ejendommen på dagen.        
+            If MånedsSum.DagAFST(j) > 1 &                               
+               MånedsSum.DagOver(j) > 1 &                               
+               MånedsSum.DagAFST(j) >                                   
+               MånedsSum.DagOver(j) &                                   
+               (MånedsSum.SumMånedDel1(j) = 100                         
+                & MånedsSum.SumMånedDel2(j) = 100) Then                 
+            Do;                                                         
+               Fundet_Over_100 = Ja;                                    
+               SUM_PIC = 195;  //ikke korrekt                           
+            End;                                                        
+                                                                        
+                                                                        
+            //En af perioderne er over 100%                             
+            If MånedsSum.SumMånedDel1(j) > 100                          
+               ! MånedsSum.SumMånedDel2(j) > 100 Then                   
+            Do;                                                         
+               Fundet_Over_100 = Ja;                                    
+               If MånedsSum.SumMånedDel1(j) > 100 Then                  
+                  SUM_PIC = MånedsSum.SumMånedDel1(j);                  
+               Else SUM_PIC = MånedsSum.SumMånedDel2(j);                
+            End;                                                        
+                                                                        
+            If  Fundet_Over_100 Then                                    
+            Do;                                                         
+                                                                        
+               CALL SKRIV_OVER_100;              //TODO                 
+                                                                        
+                                                                        
+               //to fam. huse advis 5240 ellers 5238                    
+               If Ejendom(1).EJERSKAB_CEJDTYPE = '4'                    
+                  Then ADVIS_FEJLNR = 5240;                             
+                  Else ADVIS_FEJLNR = 5238;                             
+                                                                        
+                                                                        
+               Call UPDATE_RESULT;                                      
+            End;                                                        
+            j = j + 1;                                                  
+         End;                                                           
+                                                                        
+                                                                        
+                                                                        
+ End BEHANDL;                                                           
+                                                                        
+ RÆKKE_FRAVÆLGES:PROC RETURNS(BIT(1));                                  
+                                                                        
+   /* Nogen rækker frasorters i BE85100 ift. forskellige kriterier. */  
+   /* se macro BE85103M betingelser er genskabt her                 */  
+   /* De skal ikke tælles op her eller have sat fejlnummer 5242     */  
+                                                                        
+   DCL    HJ_FRAVÆLGES    BIT       (1);                                
+                                                                        
+   HJ_FRAVÆLGES  = NEJ;                                                 
+   HJ_LOG1       = '';                                                  
+                                                                        
+                                                                        
+   IF DCLBE78000T.TILEVS_A_V_CBENYT = '78'                              
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R01';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF DCLBE78000T.TILEVS_A_EJ_COMPLA = '1'                              
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R02';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF DCLBE76000T.CSTATUS = '2'           /* OMPLACERET */              
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R03';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF DCLBE76000T.CCIVS = 'D'            /* ALTID HVIS DØD */           
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R04';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   /* Disse skal ikke oprettes fejlnummer 5060 findes */                
+   /* kun internt i EVS oprettelsen se BH85000        */                
+   IF DCLBE78000T.FEJLNR = 5060                                         
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R05';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   /* Disse skal ikke oprettes fejlnummer 5500 findes */                
+   /* kun internt i EVS oprettelsen se BH85000 KS25   */                
+   IF DCLBE78000T.FEJLNR = 5500 &                                       
+      DCLBE78000T.EKOMNR = 999                                          
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R06';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   //* Forskud 2023 de skal nu oprettes med CSLET lig 1                 
+   /* Disse skal ikke oprettes fejlnummer 5502 findes */                
+   /* kun internt i EVS oprettelsen se BH85000  D864  */                
+   //IF DCLBE78000T.FEJLNR = 5502                                       
+   //THEN                                                               
+   //   RETURN;                                                         
+                                                                        
+   /* Disse skal ikke oprettes fejlnummer 5503 findes */                
+   /* kun internt i EVS oprettelsen se BH85000  D782  */                
+   IF DCLBE78000T.FEJLNR = 5503                                         
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R07';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   /* HVIS IKKE FREMSKREVET */                                          
+   IF DCLBE78000T.TILEVS_CEJBEVS ^= 'A' &                               
+     (DCLBE78000T.FEJLNR = 5001 !                                       
+      DCLBE78000T.FEJLNR = 5020)                                        
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R08';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF DCLBE78000T.TILEVS_CINVPNR ^= '0'                                 
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R09';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF DCLBE78000T.TILEVS_A_EJ_DCPRCIR > 0 &                             
+     (DCLBE78000T.TILEVS_A_EJ_DAFSTÅ  > 0 &                             
+      DCLBE78000T.TILEVS_A_EJ_DAFSTÅ  <= DCLBE76000T.DRGNÅRTIL)         
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R10';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   /* F2005 */                                                          
+   IF DCLBE78000T.TILEVS_A_EJ_DCPRCIR > 0 &                             
+     (DCLBE78000T.TILEVS_CEJBEVS = '0' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '1' !/*Forskud 2020 defect 15*/      
+      DCLBE78000T.TILEVS_CEJBEVS = '2' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '3' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '7' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '8' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = 'A' ! /* defect 1910 F24 */          
+      DCLBE78000T.TILEVS_CEJBEVS = 'B' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = 'C') &                               
+      DCLBE77000T.EVSSEJ_DCPRN > 0 &                                    
+      DCLBE77000T.EVSSEJ_SID_CSLET < '1' &                              
+     (DCLBE77000T.EVSSEJ_SID_CEJBEVS = '0' !                            
+      DCLBE77000T.EVSSEJ_SID_CEJBEVS = '4' !                            
+      DCLBE77000T.EVSSEJ_SID_CEJBEVS = '5') &                           
+    ((DCLBE77000T.EVSSEJ_SID_DAFSTAA > 0 &                              
+      DCLBE77000T.EVSSEJ_SID_DAFSTAA <=                                 
+                                   DCLBE76000T.DRGNÅRTIL) !             
+     (DCLBE77000T.EVSSEJ_SID_DFRAFLYT > 0 &                             
+      DCLBE77000T.EVSSEJ_SID_DFRAFLYT <=                                
+                                   DCLBE76000T.DRGNÅRTIL))              
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R11';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+    /* F2005 */                                                         
+   IF DCLBE78000T.TILEVS_A_EJ_DCPRCIR > 0 &                             
+     (DCLBE78000T.TILEVS_CEJBEVS = '0' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '1' !/*Forskud 2020 defect 15*/      
+      DCLBE78000T.TILEVS_CEJBEVS = '2' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '3' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '7' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = '8' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = 'A' ! /* defect 1910 F24 */          
+      DCLBE78000T.TILEVS_CEJBEVS = 'B' !                                
+      DCLBE78000T.TILEVS_CEJBEVS = 'C') &                               
+      DCLBE77000T.EVSFEJ_DCPRN > 0 &                                    
+     (DCLBE77000T.EVSFEJ_CEJBEVS = '0' !                                
+      DCLBE77000T.EVSFEJ_CEJBEVS = '4') &                               
+    ((DCLBE77000T.EVSFEJ_DAFSTAA > 0 &                                  
+      DCLBE77000T.EVSFEJ_DAFSTAA <=                                     
+                                 DCLBE76000T.DRGNÅRTIL) !               
+     (DCLBE77000T.EVSFEJ_DFRAFLYT > 0 &                                 
+      DCLBE77000T.EVSFEJ_DFRAFLYT <=                                    
+                                 DCLBE76000T.DRGNÅRTIL))                
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R12';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+    /* F2005 */                                                         
+   IF DCLBE78000T.TILEVS_A_EJ_DCPRCIR = 0 &                             
+      DCLBE78000T.EKOMNR < 999                                          
+   THEN                                                                 
+     DO;                                                                
+       IF (DCLBE77000T.EVSSEJ_DCPRN > 0 &                               
+           DCLBE77000T.EVSSEJ_SID_CSLET < '1' &                         
+          (DCLBE77000T.EVSSEJ_SID_CEJBEVS = '0' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = '4' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = '5' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = '6' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = '7' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = '8' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = 'A' ! /* defect 1910 */     
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = 'B' !                       
+           DCLBE77000T.EVSSEJ_SID_CEJBEVS = 'C')) !                     
+          (DCLBE77000T.EVSFEJ_DCPRN > 0 &                               
+          (DCLBE77000T.EVSFEJ_CEJBEVS = '0' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = '4' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = '5' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = '6' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = '7' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = '8' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = 'A' !  /* defect 1910 */        
+           DCLBE77000T.EVSFEJ_CEJBEVS = 'B' !                           
+           DCLBE77000T.EVSFEJ_CEJBEVS = 'C'))                           
+       THEN                                                             
+         DO;                                                            
+           IF DCLBE77000T.EVSSEJ_DCPRN > 0 &                            
+              DCLBE77000T.EVSSEJ_SID_CSLET < '1' &                      
+            ((DCLBE77000T.EVSSEJ_SID_DAFSTAA  > 0 &                     
+              DCLBE77000T.EVSSEJ_SID_DAFSTAA  <=                        
+                                      DCLBE76000T.DRGNÅRTIL) !          
+             (DCLBE77000T.EVSSEJ_SID_DFRAFLYT > 0 &                     
+              DCLBE77000T.EVSSEJ_SID_DFRAFLYT <=                        
+                                      DCLBE76000T.DRGNÅRTIL))           
+           THEN                                                         
+             DO;                                                        
+                HJ_LOG1 = 'FRAVALG_R13';                                
+                RETURN(JA);                                             
+              END;                                                      
+                                                                        
+           IF DCLBE77000T.EVSFEJ_DCPRN > 0 &                            
+            ((DCLBE77000T.EVSFEJ_DAFSTAA  > 0 &                         
+              DCLBE77000T.EVSFEJ_DAFSTAA  <=                            
+                                      DCLBE76000T.DRGNÅRTIL) !          
+             (DCLBE77000T.EVSFEJ_DFRAFLYT > 0 &                         
+              DCLBE77000T.EVSFEJ_DFRAFLYT <=                            
+                                      DCLBE76000T.DRGNÅRTIL))           
+           THEN                                                         
+             DO;                                                        
+                HJ_LOG1 = 'FRAVALG_R14';                                
+                RETURN(JA);                                             
+              END;                                                      
+         END;                                                           
+       ELSE                                                             
+         DO;                                                            
+           HJ_LOG1 = 'FRAVALG_R15';                                     
+           RETURN(JA);                                                  
+         END;                                                           
+     END;                                                               
+                                                                        
+   IF DCLBE78000T.EKOMNR = 999 &                                        
+     (DCLBE78000T.TILEVS_DAFSTAA > 0 !                                  
+      DCLBE78000T.TILEVS_DFRAFLYT > 0)                                  
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R16';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+                                                                        
+   /* ny kode til Forskud 2020 defect 15 */                             
+   IF DCLBE78000T.FEJLNR = 5001 !                                       
+      DCLBE78000T.FEJLNR = 5014 !                                       
+      DCLBE78000T.FEJLNR = 5055                                         
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R17';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   /* defect 285 frasortering af ejendomme med benyttelse 34 */         
+   IF  DCLBE78000T.TILEVS_A_V_CBENYT = '34'  &                          
+      (DCLBE78000T.TILEVS_A_V_ANT_FOR_4 +                               
+       DCLBE78000T.TILEVS_A_V_ANT_FOR_5 +                               
+       DCLBE78000T.TILEVS_A_V_ANT_FOR_6 +                               
+       DCLBE78000T.TILEVS_A_V_ANT_FOR_8 +                               
+       DCLBE78000T.TILEVS_A_V_ANT_FOR_9) = 0                            
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R18';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   IF RÆKKE_SLETTES()                                                   
+   THEN                                                                 
+     DO;                                                                
+       HJ_LOG1 = 'FRAVALG_R19';                                         
+       RETURN(JA);                                                      
+     END;                                                               
+                                                                        
+   RETURN(HJ_FRAVÆLGES);                                                
+                                                                        
+ END RÆKKE_FRAVÆLGES;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS BEREGNINGSBÅND                                           * 
+ *********************************************************************/ 
+ FETCH_RESULT: PROC;                                                    
+                                                                        
+         DCLBE78000T = '';                                              
+         RESULT_FUNDET = '0'B;                                          
+         samlet_ejerkreds = nej;                                        
+                                                                        
+         EXEC SQL FETCH RESULTCURS                                      
+                                                                        
+         INTO                                                           
+            :DCLBE78000T.TIL_EVS_AAR,                                   
+            :DCLBE78000T.AFVIKLINGS_ID,                                 
+            :DCLBE78000T.DATA_ID,                                       
+            :DCLBE78000T.DCPRN,                                         
+            :DCLBE78000T.EKOMNR,                                        
+            :DCLBE78000T.EEJDNR,                                        
+            :DCLBE78000T.EENHEDLBNR,                                    
+            :DCLBE78000T.EGENNR,                                        
+            :DCLBE78000T.FEJLNR,                                        
+            :DCLBE78000T.TILEVS_GPCTEJER,                               
+            :DCLBE78000T.TILEVS_DAFSTAA,                                
+            :DCLBE78000T.TILEVS_DOVTG,                                  
+            :DCLBE78000T.VURD_A_CEJDTYPE_AKT,                           
+            :DCLBE78000T.EJERSKAB_CEJDTYPE_AKT,                         
+            :DCLBE78000T.EJERSKAB_CEJDTYPE,                             
+            :DCLBE78000T.EJENDOM_CEJDTYPE,                              
+            :DCLBE78000T.TILEVS_A_EJ_DCPRCIR,                           
+            :DCLBE78000T.TILEVS_A_EJ_DAFSTÅ,                            
+            :DCLBE78000T.TILEVS_A_V_CBENYT,                             
+            :DCLBE78000T.TILEVS_A_EJ_COMPLA,                            
+            :DCLBE78000T.TILEVS_CEJBEVS,                                
+            :DCLBE78000T.TILEVS_CINVPNR,                                
+            :DCLBE78000T.TILEVS_DAFSTAA,                                
+            :DCLBE78000T.TILEVS_DFRAFLYT,                               
+            :DCLBE78000T.TILEVS_A_V_CBENYT,                             
+            :DCLBE78000T.TILEVS_A_V_ANT_FOR_4,                          
+            :DCLBE78000T.TILEVS_A_V_ANT_FOR_5,                          
+            :DCLBE78000T.TILEVS_A_V_ANT_FOR_6,                          
+            :DCLBE78000T.TILEVS_A_V_ANT_FOR_8,                          
+            :DCLBE78000T.TILEVS_A_V_ANT_FOR_9;                          
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+                RESULT_FUNDET = '1'B;                                   
+                                                                        
+                CALL SELECT_SLUT;                                       
+                CALL SELECT_MT;                                         
+                IF ^RÆKKE_FRAVÆLGES()                                   
+                Then                                                    
+                   Call Tjek_flere_ejere;                               
+                ANT_COMM = ANT_COMM + 1;                                
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+                RESULT_FUNDET = '0'B;                                   
+                //sidste fundet ejendom skal også behandles             
+                samlet_ejerkreds = ja;                                  
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               CALL SQL_ERROR(PROCNAME,101,'FETCH RESULTCURS');         
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+                                                                        
+ END FETCH_RESULT;                                                      
+                                                                        
+ /*********************************************************************/
+ /* Tjek om flere ejere til ejendommen                                */
+ /*********************************************************************/
+ Tjek_flere_ejere: PROC;                                                
+                                                                        
+ //Aller første fetch bliver gemt som nr. 1 (else do nederst)           
+ //Herefter fetcher vi til vi får en ny ejendom.                        
+ //Vi har nu en samlet ejerkreds                                        
+                                                                        
+ //Bemærk                                                               
+ //den ny ejendom bliver gemt i hoved flowet                            
+ //efter at vi har behandlet den fundne ejerekreds                      
+ //den gemmes som den nye nr. 1                                         
+                                                                        
+  if Ant_Ejere > 0 Then                                                 
+  Do;                                                                   
+     If                                                                 
+       Ejendom(Ant_Ejere).EKOMNR =   DCLBE78000T.EKOMNR                 
+     & Ejendom(Ant_Ejere).EEJDNR =   DCLBE78000T.EEJDNR                 
+     & Ejendom(Ant_Ejere).EENHEDLBNR = DCLBE78000T.EENHEDLBNR Then      
+     Do;                                                                
+         Ant_Ejere = Ant_Ejere + 1;                                     
+         (subrg):                                                       
+         Ejendom(Ant_Ejere) = DCLBE78000T, BY NAME;                     
+         sum = sum + EJENDOM.TILEVS_GPCTEJER(Ant_Ejere);                
+                                                                        
+                                                                        
+         //tjek om 158 = 0 på en af ejerene                             
+         //IF EJENDOM.TILEVS_CEJBEVS(Ant_Ejere) ^= '0' Then             
+         //    Opsætte_fejlnr  = NEJ;                                   
+                                                                        
+         // IF EJENDOM.FEJLNR(Ant_Ejere) = 5242 Then                    
+         //   ADVIS_FUNDET = JA;                                        
+     End;                                                               
+     Else do;                                                           
+         samlet_ejerkreds = ja;                                         
+     End;                                                               
+  End;                                                                  
+  Else do;  //Aller første fetch bliver gemt som nr. 1                  
+                                                                        
+     Ant_Ejere = Ant_Ejere + 1;                                         
+     (subrg):                                                           
+     Ejendom(Ant_Ejere) = DCLBE78000T, BY NAME;                         
+     sum = sum + EJENDOM.TILEVS_GPCTEJER(Ant_Ejere);                    
+                                                                        
+     //tjek om 158 = 0 på en af ejerene                                 
+     //IF EJENDOM.TILEVS_CEJBEVS(Ant_Ejere) ^= '0' Then                 
+     //   Opsætte_fejlnr  = NEJ;                                        
+                                                                        
+     //IF EJENDOM.FEJLNR(Ant_Ejere) = 5242  Then                        
+     //   ADVIS_FUNDET = JA;                                            
+  End;                                                                  
+                                                                        
+                                                                        
+                                                                        
+ End Tjek_flere_ejere;                                                  
+ /*********************************************************************/
+ /* UPDATE Fejlnr på andre ejerforhold  (5238,5240)            RUTINE */
+ /*********************************************************************/
+ UPDATE_RESULT: PROC;                                                   
+                                                                        
+        DCL Upd_EKOMNR                    FIXED BIN (15);               
+        DCL Upd_EEJDNR                    FIXED BIN (31);               
+        DCL Upd_EENHEDLBNR                FIXED BIN (15);               
+                                                                        
+          Upd_EKOMNR        = Ejendom(1).EKOMNR;                        
+          Upd_EEJDNR        = Ejendom(1).EEJDNR;                        
+          Upd_EENHEDLBNR    = Ejendom(1).EENHEDLBNR;                    
+                                                                        
+                                                                        
+         EXEC SQL                                                       
+            UPDATE BE78000T                                             
+            SET                                                         
+             PROGRAMNAVN          = :WS_PROGRAMNAVN,                    
+             DB2FUNKTION          = 'U',                                
+             FEJLNR               = :ADVIS_FEJLNR                       
+                                                                        
+            WHERE TIL_EVS_AAR    = :WS_TIL_EVS_AAR                      
+            AND   AFVIKLINGS_ID  = :WS_FORSKUD_SLUT_TXT                 
+            AND   DATA_ID        = :BE55600M.DATA_ID                    
+            AND   EKOMNR         = :Upd_EKOMNR                          
+            AND   EEJDNR         = :Upd_EEJDNR                          
+            AND   EENHEDLBNR     = :Upd_EENHEDLBNR                      
+            AND   TILEVS_CEJBEVS = '0'                                  
+            AND   FEJLNR         ^= 5242;                               
+                                                                        
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_UPD = ANT_UPD + 1;                                   
+            END;                                                        
+            WHEN(100) DO;                                               
+               ANT_EJ_UPD = ANT_EJ_UPD + 1;                             
+            END;                                                        
+            OTHERWISE DO;                                               
+               CALL SQL_ERROR(PROCNAME,102,'UPDATE RESULT');            
+            END;                                                        
+         END;                                                           
+                                                                        
+ END UPDATE_RESULT;                                                     
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF ESR-OPLYSNINGER                     RUTINE */
+ /*********************************************************************/
+ OPEN_RESULTCURS: PROC;                                                 
+                                                                        
+         EXEC SQL OPEN RESULTCURS;                                      
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+               CALL SQL_ERROR(PROCNAME,103,'OPEN RESULTCURS');          
+            END;                                                        
+                                                                        
+ END OPEN_RESULTCURS;                                                   
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF ESR                                RUTINE */
+ /*********************************************************************/
+ CLOSE_RESULTCURS: PROC;                                                
+                                                                        
+         EXEC SQL CLOSE RESULTCURS;                                     
+                                                                        
+                  IF SQLCA.SQLCODE ^= 0                                 
+         THEN                                                           
+            DO;                                                         
+               CALL SQL_ERROR(PROCNAME,109,'CLOSE RESULTCURS');         
+            END;                                                        
+                                                                        
+                                                                        
+ END CLOSE_RESULTCURS;                                                  
+ /*********************************************************************/
+ /*      SKRIV TOTALER                                                */
+ /*********************************************************************/
+ SKRIV_OVER_100: PROC;                                                  
+                                                                        
+                                                                        
+        K = 1;                                                          
+        DO WHILE (K <= Ant_Ejere );                                     
+                                                                        
+        LINIE.TEXT = Ejendom(K).EKOMNR !! ' ' !! Ejendom(K).EEJDNR      
+        !! ' ' !! Ejendom(K).EENHEDLBNR !! ' ' !!                       
+        Ejendom(K).DCPRN  !! ' ' !! Ejendom(K).TILEVS_GPCTEJER          
+        !! ' ' !! Ejendom(K).TILEVS_DAFSTAA                             
+        !! ' ' !! Ejendom(K).TILEVS_DOVTG                               
+        !! ' ' !! Ejendom(K).TILEVS_CEJBEVS;                            
+        CALL ZZ20300(LINIE,'89');                                       
+                                                                        
+           K = k + 1;                                                   
+        END;                                                            
+                                                                        
+                                                                        
+ END SKRIV_OVER_100;                                                    
+ /*********************************************************************/
+ /*      SKRIV TOTALER                                                */
+ /*********************************************************************/
+ SKRIV_HEADER: PROC;                                                    
+                                                                        
+         LINIE = '';                                                    
+         CCHAR = ZZWS1;                                                 
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+         LINIE.TEXT = 'Ejerskab over 100%   ' !! WS_FORSKUD_SLUT_TXT;   
+         CALL ZZ20300(LINIE,'89');                                      
+         LINIE.TEXT = 'Indkomstår: '!!WS_TIL_EVS_AAR!!                  
+                      ' DATA_ID.: '!!BE55600M.DATA_ID;                  
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+         LINIE.TEXT = '';                                               
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+         LINIE = '';                                                    
+         CCHAR = ZZWS1;                                                 
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+                                                                        
+         LINIE.TEXT = '';                                               
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+                                                                        
+                                                                        
+        LINIE.TEXT = 'EKOMNR ' !! ' ' !! 'EEJDNR '                      
+        !! ' ' !! 'EENHEDLBNR ' !! ' ' !!                               
+        'DCPRN '  !! ' ' !! 'TILEVS_GPCTEJER '                          
+        !! ' ' !! 'TILEVS_DAFSTAA '                                     
+        !! ' ' !! 'TILEVS_DOVTG '                                       
+        !! ' ' !! 'TILEVS_CEJBEVS';                                     
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+                                                                        
+ END SKRIV_HEADER;                                                      
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL CLOSE_RESULTCURS;                                         
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+                                                                        
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /* Læs EVS SLUT BE77000T                                      RUTINE */
+ /*********************************************************************/
+ SELECT_SLUT: PROC;                                                     
+                                                                        
+         SLUT_FUNDET = NEJ;                                             
+                                                                        
+         DCLBE77000T = '';                                              
+         DCLBE77000T.TIL_EVS_AAR    = DCLBE78000T.TIL_EVS_AAR;          
+         DCLBE77000T.AFVIKLINGS_ID  = DCLBE78000T.AFVIKLINGS_ID;        
+         DCLBE77000T.DATA_ID        = DCLBE78000T.DATA_ID;              
+         DCLBE77000T.DCPRN          = DCLBE78000T.DCPRN;                
+         DCLBE77000T.EKOMNR         = DCLBE78000T.EKOMNR;               
+         DCLBE77000T.EEJDNR         = DCLBE78000T.EEJDNR;               
+         DCLBE77000T.EENHEDLBNR     = DCLBE78000T.EENHEDLBNR;           
+         DCLBE77000T.EGENNR         = DCLBE78000T.EGENNR;               
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+            TIL_EVS_AAR                                                 
+            ,AFVIKLINGS_ID                                              
+            ,DATA_ID                                                    
+            ,DCPRN                                                      
+            ,EKOMNR                                                     
+            ,EEJDNR                                                     
+            ,EENHEDLBNR                                                 
+            ,EGENNR                                                     
+            ,PROGRAMNAVN                                                
+            ,DB2FUNKTION                                                
+            ,CITYP                                                      
+            ,CUDLAND                                                    
+            ,CSBSK                                                      
+            ,EVSSEJ_DCPRN                                               
+            ,EVSSEJ_EKOMNR                                              
+            ,EVSSEJ_EEJDNR                                              
+            ,EVSSEJ_EENHEDLBNR                                          
+            ,EVSSEJ_CFRATYPE                                            
+            ,EVSSEJ_DSORTDAT1                                           
+            ,EVSSEJ_DSORTDAT2                                           
+            ,EVSSEJ_EJDBELIG                                            
+            ,EVSSEJ_CLANDEKODE                                          
+            ,EVSSEJ_CBENYT                                              
+            ,EVSSEJ_CEJBOLTYP1                                          
+            ,EVSSEJ_CEJBOLTYP2                                          
+            ,EVSSEJ_FST_ELBNR                                           
+            ,EVSSEJ_FST_EGENNR                                          
+            ,EVSSEJ_FST_DFRAGLD                                         
+            ,EVSSEJ_FST_DTILGLD                                         
+            ,EVSSEJ_FST_CDATAFRA                                        
+            ,EVSSEJ_FST_CAJOUR                                          
+            ,EVSSEJ_FST_CSUPPL                                          
+            ,EVSSEJ_FST_DHENVN                                          
+            ,EVSSEJ_FST_FEJLNR                                          
+            ,EVSSEJ_FST_CÆGTOPR                                         
+            ,EVSSEJ_FST_CSKPLOMF                                        
+            ,EVSSEJ_FST_CEJBEVS                                         
+            ,EVSSEJ_FST_CEJDTYPE                                        
+            ,EVSSEJ_FST_FELT760                                         
+            ,EVSSEJ_FST_CNEDSL1                                         
+            ,EVSSEJ_FST_DATO0107                                        
+           , EVSSEJ_FST_DOVTG                                           
+           , EVSSEJ_FST_DAFSTAA                                         
+           , EVSSEJ_FST_DINDFLYT                                        
+           , EVSSEJ_FST_DFRAFLYT                                        
+           , EVSSEJ_FST_CINDFLYT                                        
+           , EVSSEJ_FST_GPCTEJER                                        
+           , EVSSEJ_FST_GPCTEJER_SW                                     
+           , EVSSEJ_FST_FDAGUDLE                                        
+           , EVSSEJ_FST_GPCTUDLE                                        
+           , EVSSEJ_FST_FUDL100                                         
+           , EVSSEJ_FST_FDAGERHV                                        
+           , EVSSEJ_FST_GPCTERHV                                        
+           , EVSSEJ_FST_FERHVFLER                                       
+           , EVSSEJ_FST_CBERGROP                                        
+           , EVSSEJ_FST_BBERGRL                                         
+           , EVSSEJ_FST_BBERGRL_SW                                      
+           , EVSSEJ_FST_BBER2FAM                                        
+           , EVSSEJ_FST_BBER2FAM_SW                                     
+           , EVSSEJ_FST_BBERGRL_AKT                                     
+           , EVSSEJ_FST_BBERGRL_AKT_SW                                  
+           , EVSSEJ_FST_BBER2FAM_AKT                                    
+           , EVSSEJ_FST_BBER2FAM_AKT_SW                                 
+           , EVSSEJ_FST_BPROM1                                          
+           , EVSSEJ_FST_BPENSNED                                        
+           , EVSSEJ_FST_BPENSNÆ                                         
+           , EVSSEJ_FST_BSUM1                                           
+           , EVSSEJ_FST_BSUM1_SW                                        
+           , EVSSEJ_FST_BSUM3                                           
+           , EVSSEJ_FST_BSUM3_SW                                        
+           , EVSSEJ_FST_BNETTO                                          
+           , EVSSEJ_FST_BNETTO_SW                                       
+           , EVSSEJ_FST_BEJERAN                                         
+           , EVSSEJ_FST_BEJERAN_SW                                      
+           , EVSSEJ_FST_BEVSMAN                                         
+           , EVSSEJ_FST_BEVSMAN_SW                                      
+           , EVSSEJ_FST_BMANNEDSL                                       
+           , EVSSEJ_FST_CENKE                                           
+           , EVSSEJ_FST_CENKEBOH                                        
+           , EVSSEJ_FST_BOBEHAKOD                                       
+           , EVSSEJ_FST_CIVILSTAND                                      
+           , EVSSEJ_FST_CSLET                                           
+           , EVSSEJ_FST_BEJBOL1                                         
+           , EVSSEJ_FST_BEJBOL1_SW                                      
+           , EVSSEJ_FST_BEJBOL2                                         
+           , EVSSEJ_FST_BEJBOL2_SW                                      
+           , EVSSEJ_FST_CANVEBOL                                        
+           , EVSSEJ_FST_CPTYPSLUT                                       
+           , EVSSEJ_FST_FELT759                                         
+           , EVSSEJ_FST_CEKSEMP                                         
+           , EVSSEJ_FST_CFRÅR                                           
+           , EVSSEJ_FST_DRGNÅRFRA                                       
+           , EVSSEJ_FST_DRGNÅRTIL                                       
+           , EVSSEJ_FST_COMPLA                                          
+           , EVSSEJ_FST_DOMPLACPR                                       
+           , EVSSEJ_FST_BUDLSKC                                         
+           , EVSSEJ_FST_BUDLSKC_SW                                      
+           , EVSSEJ_FST_BEVSMANFSI                                      
+           , EVSSEJ_FST_BEVSMANFSI_SW                                   
+           , EVSSEJ_SID_ELBNR                                           
+           , EVSSEJ_SID_EGENNR                                          
+           , EVSSEJ_SID_DFRAGLD                                         
+           , EVSSEJ_SID_DTILGLD                                         
+           , EVSSEJ_SID_CDATAFRA                                        
+           , EVSSEJ_SID_CAJOUR                                          
+           , EVSSEJ_SID_CSUPPL                                          
+           , EVSSEJ_SID_DHENVN                                          
+           , EVSSEJ_SID_FEJLNR                                          
+           , EVSSEJ_SID_CÆGTOPR                                         
+           , EVSSEJ_SID_CSKPLOMF                                        
+           , EVSSEJ_SID_CEJBEVS                                         
+           , EVSSEJ_SID_CEJDTYPE                                        
+           , EVSSEJ_SID_FELT760                                         
+           , EVSSEJ_SID_CNEDSL1                                         
+           , EVSSEJ_SID_DATO0107                                        
+           , EVSSEJ_SID_DOVTG                                           
+           , EVSSEJ_SID_DAFSTAA                                         
+           , EVSSEJ_SID_DINDFLYT                                        
+           , EVSSEJ_SID_DFRAFLYT                                        
+           , EVSSEJ_SID_CINDFLYT                                        
+           , EVSSEJ_SID_GPCTEJER                                        
+           , EVSSEJ_SID_GPCTEJER_SW                                     
+           , EVSSEJ_SID_FDAGUDLE                                        
+           , EVSSEJ_SID_GPCTUDLE                                        
+           , EVSSEJ_SID_FUDL100                                         
+           , EVSSEJ_SID_FDAGERHV                                        
+           , EVSSEJ_SID_GPCTERHV                                        
+           , EVSSEJ_SID_FERHVFLER                                       
+           , EVSSEJ_SID_CBERGROP                                        
+           , EVSSEJ_SID_BBERGRL                                         
+           , EVSSEJ_SID_BBERGRL_SW                                      
+           , EVSSEJ_SID_BBER2FAM                                        
+           , EVSSEJ_SID_BBER2FAM_SW                                     
+           , EVSSEJ_SID_BBERGRL_AKT                                     
+           , EVSSEJ_SID_BBERGRL_AKT_SW                                  
+           , EVSSEJ_SID_BBER2FAM_AKT                                    
+           , EVSSEJ_SID_BBER2FAM_AKT_SW                                 
+           , EVSSEJ_SID_BPROM1                                          
+           , EVSSEJ_SID_BPENSNED                                        
+           , EVSSEJ_SID_BPENSNÆ                                         
+           , EVSSEJ_SID_BSUM1                                           
+           , EVSSEJ_SID_BSUM1_SW                                        
+           , EVSSEJ_SID_BSUM3                                           
+           , EVSSEJ_SID_BSUM3_SW                                        
+           , EVSSEJ_SID_BNETTO                                          
+           , EVSSEJ_SID_BNETTO_SW                                       
+           , EVSSEJ_SID_BEJERAN                                         
+           , EVSSEJ_SID_BEJERAN_SW                                      
+           , EVSSEJ_SID_BEVSMAN                                         
+           , EVSSEJ_SID_BEVSMAN_SW                                      
+           , EVSSEJ_SID_BMANNEDSL                                       
+           , EVSSEJ_SID_CENKE                                           
+           , EVSSEJ_SID_CENKEBOH                                        
+           , EVSSEJ_SID_BOBEHAKOD                                       
+           , EVSSEJ_SID_CIVILSTAND                                      
+           , EVSSEJ_SID_CSLET                                           
+           , EVSSEJ_SID_BEJBOL1                                         
+           , EVSSEJ_SID_BEJBOL1_SW                                      
+           , EVSSEJ_SID_BEJBOL2                                         
+           , EVSSEJ_SID_BEJBOL2_SW                                      
+           , EVSSEJ_SID_CANVEBOL                                        
+           , EVSSEJ_SID_CPTYPSLUT                                       
+           , EVSSEJ_SID_FELT759                                         
+           , EVSSEJ_SID_CEKSEMP                                         
+           , EVSSEJ_SID_CFRÅR                                           
+           , EVSSEJ_SID_DRGNÅRFRA                                       
+           , EVSSEJ_SID_DRGNÅRTIL                                       
+           , EVSSEJ_SID_COMPLA                                          
+           , EVSSEJ_SID_DOMPLACPR                                       
+           , EVSSEJ_SID_BUDLSKC                                         
+           , EVSSEJ_SID_BUDLSKC_SW                                      
+           , EVSSEJ_SID_BEVSMANFSI                                      
+           , EVSSEJ_SID_BEVSMANFSI_SW                                   
+           , EVSSÆG_DCPRN                                               
+           , EVSSÆG_EKOMNR                                              
+           , EVSSÆG_EEJDNR                                              
+           , EVSSÆG_EENHEDLBNR                                          
+           , EVSSÆG_CFRATYPE                                            
+           , EVSSÆG_DSORTDAT1                                           
+           , EVSSÆG_DSORTDAT2                                           
+           , EVSSÆG_EJDBELIG                                            
+           , EVSSÆG_CLANDEKODE                                          
+           , EVSSÆG_CBENYT                                              
+           , EVSSÆG_CEJBOLTYP1                                          
+           , EVSSÆG_CEJBOLTYP2                                          
+           , EVSSÆG_FST_ELBNR                                           
+           , EVSSÆG_FST_EGENNR                                          
+           , EVSSÆG_FST_DFRAGLD                                         
+           , EVSSÆG_FST_DTILGLD                                         
+           , EVSSÆG_FST_CDATAFRA                                        
+           , EVSSÆG_FST_CAJOUR                                          
+           , EVSSÆG_FST_CSUPPL                                          
+           , EVSSÆG_FST_DHENVN                                          
+           , EVSSÆG_FST_FEJLNR                                          
+           , EVSSÆG_FST_CÆGTOPR                                         
+           , EVSSÆG_FST_CSKPLOMF                                        
+           , EVSSÆG_FST_CEJBEVS                                         
+           , EVSSÆG_FST_CEJDTYPE                                        
+           , EVSSÆG_FST_FELT760                                         
+           , EVSSÆG_FST_CNEDSL1                                         
+           , EVSSÆG_FST_DATO0107                                        
+           , EVSSÆG_FST_DOVTG                                           
+           , EVSSÆG_FST_DAFSTAA                                         
+           , EVSSÆG_FST_DINDFLYT                                        
+           , EVSSÆG_FST_DFRAFLYT                                        
+           , EVSSÆG_FST_CINDFLYT                                        
+           , EVSSÆG_FST_GPCTEJER                                        
+           , EVSSÆG_FST_GPCTEJER_SW                                     
+           , EVSSÆG_FST_FDAGUDLE                                        
+           , EVSSÆG_FST_GPCTUDLE                                        
+           , EVSSÆG_FST_FUDL100                                         
+           , EVSSÆG_FST_FDAGERHV                                        
+           , EVSSÆG_FST_GPCTERHV                                        
+           , EVSSÆG_FST_FERHVFLER                                       
+           , EVSSÆG_FST_CBERGROP                                        
+           , EVSSÆG_FST_BBERGRL                                         
+           , EVSSÆG_FST_BBERGRL_SW                                      
+           , EVSSÆG_FST_BBER2FAM                                        
+           , EVSSÆG_FST_BBER2FAM_SW                                     
+           , EVSSÆG_FST_BBERGRL_AKT                                     
+           , EVSSÆG_FST_BBERGRL_AKT_SW                                  
+           , EVSSÆG_FST_BBER2FAM_AKT                                    
+           , EVSSÆG_FST_BBER2FAM_AKT_SW                                 
+           , EVSSÆG_FST_BPROM1                                          
+           , EVSSÆG_FST_BPENSNED                                        
+           , EVSSÆG_FST_BPENSNÆ                                         
+           , EVSSÆG_FST_BSUM1                                           
+           , EVSSÆG_FST_BSUM1_SW                                        
+           , EVSSÆG_FST_BSUM3                                           
+           , EVSSÆG_FST_BSUM3_SW                                        
+           , EVSSÆG_FST_BNETTO                                          
+           , EVSSÆG_FST_BNETTO_SW                                       
+           , EVSSÆG_FST_BEJERAN                                         
+           , EVSSÆG_FST_BEJERAN_SW                                      
+           , EVSSÆG_FST_BEVSMAN                                         
+           , EVSSÆG_FST_BEVSMAN_SW                                      
+           , EVSSÆG_FST_BMANNEDSL                                       
+           , EVSSÆG_FST_CENKE                                           
+           , EVSSÆG_FST_CENKEBOH                                        
+           , EVSSÆG_FST_BOBEHAKOD                                       
+           , EVSSÆG_FST_CIVILSTAND                                      
+           , EVSSÆG_FST_CSLET                                           
+           , EVSSÆG_FST_BEJBOL1                                         
+           , EVSSÆG_FST_BEJBOL1_SW                                      
+           , EVSSÆG_FST_BEJBOL2                                         
+           , EVSSÆG_FST_BEJBOL2_SW                                      
+           , EVSSÆG_FST_CANVEBOL                                        
+           , EVSSÆG_FST_CPTYPSLUT                                       
+           , EVSSÆG_FST_FELT759                                         
+           , EVSSÆG_FST_CEKSEMP                                         
+           , EVSSÆG_FST_CFRÅR                                           
+           , EVSSÆG_FST_DRGNÅRFRA                                       
+           , EVSSÆG_FST_DRGNÅRTIL                                       
+           , EVSSÆG_FST_COMPLA                                          
+           , EVSSÆG_FST_DOMPLACPR                                       
+           , EVSSÆG_FST_BUDLSKC                                         
+           , EVSSÆG_FST_BUDLSKC_SW                                      
+           , EVSSÆG_FST_BEVSMANFSI                                      
+           , EVSSÆG_FST_BEVSMANFSI_SW                                   
+           , EVSSÆG_SID_ELBNR                                           
+           , EVSSÆG_SID_EGENNR                                          
+           , EVSSÆG_SID_DFRAGLD                                         
+           , EVSSÆG_SID_DTILGLD                                         
+           , EVSSÆG_SID_CDATAFRA                                        
+           , EVSSÆG_SID_CAJOUR                                          
+           , EVSSÆG_SID_CSUPPL                                          
+           , EVSSÆG_SID_DHENVN                                          
+           , EVSSÆG_SID_FEJLNR                                          
+           , EVSSÆG_SID_CÆGTOPR                                         
+           , EVSSÆG_SID_CSKPLOMF                                        
+           , EVSSÆG_SID_CEJBEVS                                         
+           , EVSSÆG_SID_CEJDTYPE                                        
+           , EVSSÆG_SID_FELT760                                         
+           , EVSSÆG_SID_CNEDSL1                                         
+           , EVSSÆG_SID_DATO0107                                        
+           , EVSSÆG_SID_DOVTG                                           
+           , EVSSÆG_SID_DAFSTAA                                         
+           , EVSSÆG_SID_DINDFLYT                                        
+           , EVSSÆG_SID_DFRAFLYT                                        
+           , EVSSÆG_SID_CINDFLYT                                        
+           , EVSSÆG_SID_GPCTEJER                                        
+           , EVSSÆG_SID_GPCTEJER_SW                                     
+           , EVSSÆG_SID_FDAGUDLE                                        
+           , EVSSÆG_SID_GPCTUDLE                                        
+           , EVSSÆG_SID_FUDL100                                         
+           , EVSSÆG_SID_FDAGERHV                                        
+           , EVSSÆG_SID_GPCTERHV                                        
+           , EVSSÆG_SID_FERHVFLER                                       
+           , EVSSÆG_SID_CBERGROP                                        
+           , EVSSÆG_SID_BBERGRL                                         
+           , EVSSÆG_SID_BBERGRL_SW                                      
+           , EVSSÆG_SID_BBER2FAM                                        
+           , EVSSÆG_SID_BBER2FAM_SW                                     
+           , EVSSÆG_SID_BBERGRL_AKT                                     
+           , EVSSÆG_SID_BBERGRL_AKT_SW                                  
+           , EVSSÆG_SID_BBER2FAM_AKT                                    
+           , EVSSÆG_SID_BBER2FAM_AKT_SW                                 
+           , EVSSÆG_SID_BPROM1                                          
+           , EVSSÆG_SID_BPENSNED                                        
+           , EVSSÆG_SID_BPENSNÆ                                         
+           , EVSSÆG_SID_BSUM1                                           
+           , EVSSÆG_SID_BSUM1_SW                                        
+           , EVSSÆG_SID_BSUM3                                           
+           , EVSSÆG_SID_BSUM3_SW                                        
+           , EVSSÆG_SID_BNETTO                                          
+           , EVSSÆG_SID_BNETTO_SW                                       
+           , EVSSÆG_SID_BEJERAN                                         
+           , EVSSÆG_SID_BEJERAN_SW                                      
+           , EVSSÆG_SID_BEVSMAN                                         
+           , EVSSÆG_SID_BEVSMAN_SW                                      
+           , EVSSÆG_SID_BMANNEDSL                                       
+           , EVSSÆG_SID_CENKE                                           
+           , EVSSÆG_SID_CENKEBOH                                        
+           , EVSSÆG_SID_BOBEHAKOD                                       
+           , EVSSÆG_SID_CIVILSTAND                                      
+           , EVSSÆG_SID_CSLET                                           
+           , EVSSÆG_SID_BEJBOL1                                         
+           , EVSSÆG_SID_BEJBOL1_SW                                      
+           , EVSSÆG_SID_BEJBOL2                                         
+           , EVSSÆG_SID_BEJBOL2_SW                                      
+           , EVSSÆG_SID_CANVEBOL                                        
+           , EVSSÆG_SID_CPTYPSLUT                                       
+           , EVSSÆG_SID_FELT759                                         
+           , EVSSÆG_SID_CEKSEMP                                         
+           , EVSSÆG_SID_CFRÅR                                           
+           , EVSSÆG_SID_DRGNÅRFRA                                       
+           , EVSSÆG_SID_DRGNÅRTIL                                       
+           , EVSSÆG_SID_COMPLA                                          
+           , EVSSÆG_SID_DOMPLACPR                                       
+           , EVSSÆG_SID_BUDLSKC                                         
+           , EVSSÆG_SID_BUDLSKC_SW                                      
+           , EVSSÆG_SID_BEVSMANFSI                                      
+           , EVSSÆG_SID_BEVSMANFSI_SW                                   
+           , EVSFEJ_DCPRN                                               
+           , EVSFEJ_EKOMNR                                              
+           , EVSFEJ_EEJDNR                                              
+           , EVSFEJ_EENHEDLBNR                                          
+           , EVSFEJ_CFRATYPE                                            
+           , EVSFEJ_DSORTDAT1                                           
+           , EVSFEJ_DSORTDAT2                                           
+           , EVSFEJ_ELBNR                                               
+           , EVSFEJ_DFRAGLD                                             
+           , EVSFEJ_DTILGLD                                             
+           , EVSFEJ_CEVSBENY                                            
+           , EVSFEJ_CEJBEVS                                             
+           , EVSFEJ_COPR_CEJBEVS                                        
+           , EVSFEJ_CEJDTYPE                                            
+           , EVSFEJ_CFRED                                               
+           , EVSFEJ_CNEDSL1                                             
+           , EVSFEJ_DATO0107                                            
+           , EVSFEJ_DOVTG                                               
+           , EVSFEJ_DOVTG_GL                                            
+           , EVSFEJ_DAFSTAA                                             
+           , EVSFEJ_DINDFLYT                                            
+           , EVSFEJ_DFRAFLYT                                            
+           , EVSFEJ_FDAGEJ                                              
+           , EVSFEJ_GPCTEJER                                            
+           , EVSFEJ_FDAGUDLE                                            
+           , EVSFEJ_GPCTUDLE                                            
+           , EVSFEJ_FDAGERHV                                            
+           , EVSFEJ_GPCTERHV                                            
+           , EVSFEJ_BPROM1                                              
+           , EVSFEJ_B100                                                
+           , EVSFEJ_B100_SW                                             
+           , EVSFEJ_BBRUTTO                                             
+           , EVSFEJ_BBRUTTO_SW                                          
+           , EVSFEJ_BEJERAN                                             
+           , EVSFEJ_BEJERAN_SW                                          
+           , EVSFEJ_BNYMAN                                              
+           , EVSFEJ_BNYMAN_SW                                           
+           , EVSFEJ_BFORSKAT                                            
+           , EVSFEJ_BFORSKAT_SW                                         
+           , EVSFEJ_FDAGIALT                                            
+           , EVSFEJ_CEVSSUM                                             
+           , EVSFEJ_CENKE                                               
+           , EVSFEJ_EJDBELIG                                            
+           , EVSFEJ_CLANDEKODE                                          
+           , EVSFEJ_BBERGRL                                             
+           , EVSFEJ_BBER2FAM                                            
+           , EVSFEJ_CEKSEMP                                             
+           , EVSFEJ_COPR_EKSEMP                                         
+           , EVSFEJ_BUDLSKC                                             
+           , EVSFEJ_CRTEKORNS                                           
+           , EVSFEJ_COPR_CRTEKORNS                                      
+           , EVSFEJ_EJET20240101                                        
+           , EVSFEJ_RES_FAKTISKRABAT                                    
+           , EVSFEJ_RES_FAKTISKRABAT_SW                                 
+           , EVSFEJ_EVSEFTERRABAT                                       
+           , EVSFEJ_OVERFØRT_ÆGTEF                                      
+           , EVSFEJ_RABATBER_DFRAGLD                                    
+           , EVSFEJ_RABATBER_DTILGLD                                    
+           , EVSFEJ_RABATBER_EJERANDEL                                  
+           , EVSFEJ_COPR_RABATEJERANDEL                                 
+           , EVSFEJ_RABAT_DFRAGLD                                       
+           , EVSFEJ_RABAT_DTILGLD                                       
+           , EVSFEJ_SIMPELBASISRABAT                                    
+           , EVSFEJ_SIMPELBASISRABAT_NEG                                
+           , EVSFEJ_BASISRABAT_REGUL                                    
+           , EVSFEJ_COPR_BASISRABAT_REGUL                               
+           , EVSFEJ_BASISRABAT                                          
+           , EVSFEJ_EJERANDEL                                           
+           , EVSFÆG_DCPRN                                               
+           , EVSFÆG_EKOMNR                                              
+           , EVSFÆG_EEJDNR                                              
+           , EVSFÆG_EENHEDLBNR                                          
+           , EVSFÆG_CFRATYPE                                            
+           , EVSFÆG_DSORTDAT1                                           
+           , EVSFÆG_DSORTDAT2                                           
+           , EVSFÆG_ELBNR                                               
+           , EVSFÆG_DFRAGLD                                             
+           , EVSFÆG_DTILGLD                                             
+           , EVSFÆG_CEVSBENY                                            
+           , EVSFÆG_CEJBEVS                                             
+           , EVSFÆG_COPR_CEJBEVS                                        
+           , EVSFÆG_CEJDTYPE                                            
+           , EVSFÆG_CFRED                                               
+           , EVSFÆG_CNEDSL1                                             
+           , EVSFÆG_DATO0107                                            
+           , EVSFÆG_DOVTG                                               
+           , EVSFÆG_DOVTG_GL                                            
+           , EVSFÆG_DAFSTAA                                             
+           , EVSFÆG_DINDFLYT                                            
+           , EVSFÆG_DFRAFLYT                                            
+           , EVSFÆG_FDAGEJ                                              
+           , EVSFÆG_GPCTEJER                                            
+           , EVSFÆG_FDAGUDLE                                            
+           , EVSFÆG_GPCTUDLE                                            
+           , EVSFÆG_FDAGERHV                                            
+           , EVSFÆG_GPCTERHV                                            
+           , EVSFÆG_BPROM1                                              
+           , EVSFÆG_B100                                                
+           , EVSFÆG_B100_SW                                             
+           , EVSFÆG_BBRUTTO                                             
+           , EVSFÆG_BBRUTTO_SW                                          
+           , EVSFÆG_BEJERAN                                             
+           , EVSFÆG_BEJERAN_SW                                          
+           , EVSFÆG_BNYMAN                                              
+           , EVSFÆG_BNYMAN_SW                                           
+           , EVSFÆG_BFORSKAT                                            
+           , EVSFÆG_BFORSKAT_SW                                         
+           , EVSFÆG_FDAGIALT                                            
+           , EVSFÆG_CEVSSUM                                             
+           , EVSFÆG_CENKE                                               
+           , EVSFÆG_EJDBELIG                                            
+           , EVSFÆG_CLANDEKODE                                          
+           , EVSFÆG_BBERGRL                                             
+           , EVSFÆG_BBER2FAM                                            
+           , EVSFÆG_CEKSEMP                                             
+           , EVSFÆG_COPR_EKSEMP                                         
+           , EVSFÆG_BUDLSKC                                             
+           , EVSFÆG_CRTEKORNS                                           
+           , EVSFÆG_COPR_CRTEKORNS                                      
+           , EVSFÆG_EJET20240101                                        
+           , EVSFÆG_RES_FAKTISKRABAT                                    
+           , EVSFÆG_RES_FAKTISKRABAT_SW                                 
+           , EVSFÆG_EVSEFTERRABAT                                       
+           , EVSFÆG_OVERFØRT_ÆGTEF                                      
+           , EVSFÆG_RABATBER_DFRAGLD                                    
+           , EVSFÆG_RABATBER_DTILGLD                                    
+           , EVSFÆG_RABATBER_EJERANDEL                                  
+           , EVSFÆG_COPR_RABATEJERANDEL                                 
+           , EVSFÆG_RABAT_DFRAGLD                                       
+           , EVSFÆG_RABAT_DTILGLD                                       
+           , EVSFÆG_SIMPELBASISRABAT                                    
+           , EVSFÆG_SIMPELBASISRABAT_NEG                                
+           , EVSFÆG_BASISRABAT_REGUL                                    
+           , EVSFÆG_COPR_BASISRABAT_REGUL                               
+           , EVSFÆG_BASISRABAT                                          
+           , EVSFÆG_EJERANDEL                                           
+                                                                        
+                                                                        
+            INTO                                                        
+               :DCLBE77000T.TIL_EVS_AAR,                                
+               :DCLBE77000T.AFVIKLINGS_ID,                              
+               :DCLBE77000T.DATA_ID,                                    
+               :DCLBE77000T.DCPRN,                                      
+               :DCLBE77000T.EKOMNR,                                     
+               :DCLBE77000T.EEJDNR,                                     
+               :DCLBE77000T.EENHEDLBNR,                                 
+               :DCLBE77000T.EGENNR,                                     
+               :DCLBE77000T.PROGRAMNAVN,                                
+               :DCLBE77000T.DB2FUNKTION,                                
+               :DCLBE77000T.CITYP,                                      
+               :DCLBE77000T.CUDLAND,                                    
+               :DCLBE77000T.CSBSK,                                      
+               :DCLBE77000T.EVSSEJ_DCPRN,                               
+               :DCLBE77000T.EVSSEJ_EKOMNR,                              
+               :DCLBE77000T.EVSSEJ_EEJDNR,                              
+               :DCLBE77000T.EVSSEJ_EENHEDLBNR,                          
+               :DCLBE77000T.EVSSEJ_CFRATYPE,                            
+               :DCLBE77000T.EVSSEJ_DSORTDAT1,                           
+               :DCLBE77000T.EVSSEJ_DSORTDAT2,                           
+               :DCLBE77000T.EVSSEJ_EJDBELIG,                            
+               :DCLBE77000T.EVSSEJ_CLANDEKODE,                          
+               :DCLBE77000T.EVSSEJ_CBENYT,                              
+               :DCLBE77000T.EVSSEJ_CEJBOLTYP1,                          
+               :DCLBE77000T.EVSSEJ_CEJBOLTYP2,                          
+               :DCLBE77000T.EVSSEJ_FST_ELBNR,                           
+               :DCLBE77000T.EVSSEJ_FST_EGENNR,                          
+               :DCLBE77000T.EVSSEJ_FST_DFRAGLD,                         
+               :DCLBE77000T.EVSSEJ_FST_DTILGLD,                         
+               :DCLBE77000T.EVSSEJ_FST_CDATAFRA,                        
+               :DCLBE77000T.EVSSEJ_FST_CAJOUR,                          
+               :DCLBE77000T.EVSSEJ_FST_CSUPPL,                          
+               :DCLBE77000T.EVSSEJ_FST_DHENVN,                          
+               :DCLBE77000T.EVSSEJ_FST_FEJLNR,                          
+               :DCLBE77000T.EVSSEJ_FST_CÆGTOPR,                         
+               :DCLBE77000T.EVSSEJ_FST_CSKPLOMF,                        
+               :DCLBE77000T.EVSSEJ_FST_CEJBEVS,                         
+               :DCLBE77000T.EVSSEJ_FST_CEJDTYPE,                        
+               :DCLBE77000T.EVSSEJ_FST_FELT760,                         
+               :DCLBE77000T.EVSSEJ_FST_CNEDSL1,                         
+               :DCLBE77000T.EVSSEJ_FST_DATO0107,                        
+               :DCLBE77000T.EVSSEJ_FST_DOVTG,                           
+               :DCLBE77000T.EVSSEJ_FST_DAFSTAA,                         
+               :DCLBE77000T.EVSSEJ_FST_DINDFLYT,                        
+               :DCLBE77000T.EVSSEJ_FST_DFRAFLYT,                        
+               :DCLBE77000T.EVSSEJ_FST_CINDFLYT,                        
+               :DCLBE77000T.EVSSEJ_FST_GPCTEJER,                        
+               :DCLBE77000T.EVSSEJ_FST_GPCTEJER_SW,                     
+               :DCLBE77000T.EVSSEJ_FST_FDAGUDLE,                        
+               :DCLBE77000T.EVSSEJ_FST_GPCTUDLE,                        
+               :DCLBE77000T.EVSSEJ_FST_FUDL100,                         
+               :DCLBE77000T.EVSSEJ_FST_FDAGERHV,                        
+               :DCLBE77000T.EVSSEJ_FST_GPCTERHV,                        
+               :DCLBE77000T.EVSSEJ_FST_FERHVFLER,                       
+               :DCLBE77000T.EVSSEJ_FST_CBERGROP,                        
+               :DCLBE77000T.EVSSEJ_FST_BBERGRL,                         
+               :DCLBE77000T.EVSSEJ_FST_BBERGRL_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_BBER2FAM,                        
+               :DCLBE77000T.EVSSEJ_FST_BBER2FAM_SW,                     
+               :DCLBE77000T.EVSSEJ_FST_BBERGRL_AKT,                     
+               :DCLBE77000T.EVSSEJ_FST_BBERGRL_AKT_SW,                  
+               :DCLBE77000T.EVSSEJ_FST_BBER2FAM_AKT,                    
+               :DCLBE77000T.EVSSEJ_FST_BBER2FAM_AKT_SW,                 
+               :DCLBE77000T.EVSSEJ_FST_BPROM1,                          
+               :DCLBE77000T.EVSSEJ_FST_BPENSNED,                        
+               :DCLBE77000T.EVSSEJ_FST_BPENSNÆ,                         
+               :DCLBE77000T.EVSSEJ_FST_BSUM1,                           
+               :DCLBE77000T.EVSSEJ_FST_BSUM1_SW,                        
+               :DCLBE77000T.EVSSEJ_FST_BSUM3,                           
+               :DCLBE77000T.EVSSEJ_FST_BSUM3_SW,                        
+               :DCLBE77000T.EVSSEJ_FST_BNETTO,                          
+               :DCLBE77000T.EVSSEJ_FST_BNETTO_SW,                       
+               :DCLBE77000T.EVSSEJ_FST_BEJERAN,                         
+               :DCLBE77000T.EVSSEJ_FST_BEJERAN_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_BEVSMAN,                         
+               :DCLBE77000T.EVSSEJ_FST_BEVSMAN_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_BMANNEDSL,                       
+               :DCLBE77000T.EVSSEJ_FST_CENKE,                           
+               :DCLBE77000T.EVSSEJ_FST_CENKEBOH,                        
+               :DCLBE77000T.EVSSEJ_FST_BOBEHAKOD,                       
+               :DCLBE77000T.EVSSEJ_FST_CIVILSTAND,                      
+               :DCLBE77000T.EVSSEJ_FST_CSLET,                           
+               :DCLBE77000T.EVSSEJ_FST_BEJBOL1,                         
+               :DCLBE77000T.EVSSEJ_FST_BEJBOL1_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_BEJBOL2,                         
+               :DCLBE77000T.EVSSEJ_FST_BEJBOL2_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_CANVEBOL,                        
+               :DCLBE77000T.EVSSEJ_FST_CPTYPSLUT,                       
+               :DCLBE77000T.EVSSEJ_FST_FELT759,                         
+               :DCLBE77000T.EVSSEJ_FST_CEKSEMP,                         
+               :DCLBE77000T.EVSSEJ_FST_CFRÅR,                           
+               :DCLBE77000T.EVSSEJ_FST_DRGNÅRFRA,                       
+               :DCLBE77000T.EVSSEJ_FST_DRGNÅRTIL,                       
+               :DCLBE77000T.EVSSEJ_FST_COMPLA,                          
+               :DCLBE77000T.EVSSEJ_FST_DOMPLACPR,                       
+               :DCLBE77000T.EVSSEJ_FST_BUDLSKC,                         
+               :DCLBE77000T.EVSSEJ_FST_BUDLSKC_SW,                      
+               :DCLBE77000T.EVSSEJ_FST_BEVSMANFSI,                      
+               :DCLBE77000T.EVSSEJ_FST_BEVSMANFSI_SW,                   
+               :DCLBE77000T.EVSSEJ_SID_ELBNR,                           
+               :DCLBE77000T.EVSSEJ_SID_EGENNR,                          
+               :DCLBE77000T.EVSSEJ_SID_DFRAGLD,                         
+               :DCLBE77000T.EVSSEJ_SID_DTILGLD,                         
+               :DCLBE77000T.EVSSEJ_SID_CDATAFRA,                        
+               :DCLBE77000T.EVSSEJ_SID_CAJOUR,                          
+               :DCLBE77000T.EVSSEJ_SID_CSUPPL,                          
+               :DCLBE77000T.EVSSEJ_SID_DHENVN,                          
+               :DCLBE77000T.EVSSEJ_SID_FEJLNR,                          
+               :DCLBE77000T.EVSSEJ_SID_CÆGTOPR,                         
+               :DCLBE77000T.EVSSEJ_SID_CSKPLOMF,                        
+               :DCLBE77000T.EVSSEJ_SID_CEJBEVS,                         
+               :DCLBE77000T.EVSSEJ_SID_CEJDTYPE,                        
+               :DCLBE77000T.EVSSEJ_SID_FELT760,                         
+               :DCLBE77000T.EVSSEJ_SID_CNEDSL1,                         
+               :DCLBE77000T.EVSSEJ_SID_DATO0107,                        
+               :DCLBE77000T.EVSSEJ_SID_DOVTG,                           
+               :DCLBE77000T.EVSSEJ_SID_DAFSTAA,                         
+               :DCLBE77000T.EVSSEJ_SID_DINDFLYT,                        
+               :DCLBE77000T.EVSSEJ_SID_DFRAFLYT,                        
+               :DCLBE77000T.EVSSEJ_SID_CINDFLYT,                        
+               :DCLBE77000T.EVSSEJ_SID_GPCTEJER,                        
+               :DCLBE77000T.EVSSEJ_SID_GPCTEJER_SW,                     
+               :DCLBE77000T.EVSSEJ_SID_FDAGUDLE,                        
+               :DCLBE77000T.EVSSEJ_SID_GPCTUDLE,                        
+               :DCLBE77000T.EVSSEJ_SID_FUDL100,                         
+               :DCLBE77000T.EVSSEJ_SID_FDAGERHV,                        
+               :DCLBE77000T.EVSSEJ_SID_GPCTERHV,                        
+               :DCLBE77000T.EVSSEJ_SID_FERHVFLER,                       
+               :DCLBE77000T.EVSSEJ_SID_CBERGROP,                        
+               :DCLBE77000T.EVSSEJ_SID_BBERGRL,                         
+               :DCLBE77000T.EVSSEJ_SID_BBERGRL_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_BBER2FAM,                        
+               :DCLBE77000T.EVSSEJ_SID_BBER2FAM_SW,                     
+               :DCLBE77000T.EVSSEJ_SID_BBERGRL_AKT,                     
+               :DCLBE77000T.EVSSEJ_SID_BBERGRL_AKT_SW,                  
+               :DCLBE77000T.EVSSEJ_SID_BBER2FAM_AKT,                    
+               :DCLBE77000T.EVSSEJ_SID_BBER2FAM_AKT_SW,                 
+               :DCLBE77000T.EVSSEJ_SID_BPROM1,                          
+               :DCLBE77000T.EVSSEJ_SID_BPENSNED,                        
+               :DCLBE77000T.EVSSEJ_SID_BPENSNÆ,                         
+               :DCLBE77000T.EVSSEJ_SID_BSUM1,                           
+               :DCLBE77000T.EVSSEJ_SID_BSUM1_SW,                        
+               :DCLBE77000T.EVSSEJ_SID_BSUM3,                           
+               :DCLBE77000T.EVSSEJ_SID_BSUM3_SW,                        
+               :DCLBE77000T.EVSSEJ_SID_BNETTO,                          
+               :DCLBE77000T.EVSSEJ_SID_BNETTO_SW,                       
+               :DCLBE77000T.EVSSEJ_SID_BEJERAN,                         
+               :DCLBE77000T.EVSSEJ_SID_BEJERAN_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_BEVSMAN,                         
+               :DCLBE77000T.EVSSEJ_SID_BEVSMAN_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_BMANNEDSL,                       
+               :DCLBE77000T.EVSSEJ_SID_CENKE,                           
+               :DCLBE77000T.EVSSEJ_SID_CENKEBOH,                        
+               :DCLBE77000T.EVSSEJ_SID_BOBEHAKOD,                       
+               :DCLBE77000T.EVSSEJ_SID_CIVILSTAND,                      
+               :DCLBE77000T.EVSSEJ_SID_CSLET,                           
+               :DCLBE77000T.EVSSEJ_SID_BEJBOL1,                         
+               :DCLBE77000T.EVSSEJ_SID_BEJBOL1_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_BEJBOL2,                         
+               :DCLBE77000T.EVSSEJ_SID_BEJBOL2_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_CANVEBOL,                        
+               :DCLBE77000T.EVSSEJ_SID_CPTYPSLUT,                       
+               :DCLBE77000T.EVSSEJ_SID_FELT759,                         
+               :DCLBE77000T.EVSSEJ_SID_CEKSEMP,                         
+               :DCLBE77000T.EVSSEJ_SID_CFRÅR,                           
+               :DCLBE77000T.EVSSEJ_SID_DRGNÅRFRA,                       
+               :DCLBE77000T.EVSSEJ_SID_DRGNÅRTIL,                       
+               :DCLBE77000T.EVSSEJ_SID_COMPLA,                          
+               :DCLBE77000T.EVSSEJ_SID_DOMPLACPR,                       
+               :DCLBE77000T.EVSSEJ_SID_BUDLSKC,                         
+               :DCLBE77000T.EVSSEJ_SID_BUDLSKC_SW,                      
+               :DCLBE77000T.EVSSEJ_SID_BEVSMANFSI,                      
+               :DCLBE77000T.EVSSEJ_SID_BEVSMANFSI_SW,                   
+               :DCLBE77000T.EVSSÆG_DCPRN,                               
+               :DCLBE77000T.EVSSÆG_EKOMNR,                              
+               :DCLBE77000T.EVSSÆG_EEJDNR,                              
+               :DCLBE77000T.EVSSÆG_EENHEDLBNR,                          
+               :DCLBE77000T.EVSSÆG_CFRATYPE,                            
+               :DCLBE77000T.EVSSÆG_DSORTDAT1,                           
+               :DCLBE77000T.EVSSÆG_DSORTDAT2,                           
+               :DCLBE77000T.EVSSÆG_EJDBELIG,                            
+               :DCLBE77000T.EVSSÆG_CLANDEKODE,                          
+               :DCLBE77000T.EVSSÆG_CBENYT,                              
+               :DCLBE77000T.EVSSÆG_CEJBOLTYP1,                          
+               :DCLBE77000T.EVSSÆG_CEJBOLTYP2,                          
+               :DCLBE77000T.EVSSÆG_FST_ELBNR,                           
+               :DCLBE77000T.EVSSÆG_FST_EGENNR,                          
+               :DCLBE77000T.EVSSÆG_FST_DFRAGLD,                         
+               :DCLBE77000T.EVSSÆG_FST_DTILGLD,                         
+               :DCLBE77000T.EVSSÆG_FST_CDATAFRA,                        
+               :DCLBE77000T.EVSSÆG_FST_CAJOUR,                          
+               :DCLBE77000T.EVSSÆG_FST_CSUPPL,                          
+               :DCLBE77000T.EVSSÆG_FST_DHENVN,                          
+               :DCLBE77000T.EVSSÆG_FST_FEJLNR,                          
+               :DCLBE77000T.EVSSÆG_FST_CÆGTOPR,                         
+               :DCLBE77000T.EVSSÆG_FST_CSKPLOMF,                        
+               :DCLBE77000T.EVSSÆG_FST_CEJBEVS,                         
+               :DCLBE77000T.EVSSÆG_FST_CEJDTYPE,                        
+               :DCLBE77000T.EVSSÆG_FST_FELT760,                         
+               :DCLBE77000T.EVSSÆG_FST_CNEDSL1,                         
+               :DCLBE77000T.EVSSÆG_FST_DATO0107,                        
+               :DCLBE77000T.EVSSÆG_FST_DOVTG,                           
+               :DCLBE77000T.EVSSÆG_FST_DAFSTAA,                         
+               :DCLBE77000T.EVSSÆG_FST_DINDFLYT,                        
+               :DCLBE77000T.EVSSÆG_FST_DFRAFLYT,                        
+               :DCLBE77000T.EVSSÆG_FST_CINDFLYT,                        
+               :DCLBE77000T.EVSSÆG_FST_GPCTEJER,                        
+               :DCLBE77000T.EVSSÆG_FST_GPCTEJER_SW,                     
+               :DCLBE77000T.EVSSÆG_FST_FDAGUDLE,                        
+               :DCLBE77000T.EVSSÆG_FST_GPCTUDLE,                        
+               :DCLBE77000T.EVSSÆG_FST_FUDL100,                         
+               :DCLBE77000T.EVSSÆG_FST_FDAGERHV,                        
+               :DCLBE77000T.EVSSÆG_FST_GPCTERHV,                        
+               :DCLBE77000T.EVSSÆG_FST_FERHVFLER,                       
+               :DCLBE77000T.EVSSÆG_FST_CBERGROP,                        
+               :DCLBE77000T.EVSSÆG_FST_BBERGRL,                         
+               :DCLBE77000T.EVSSÆG_FST_BBERGRL_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_BBER2FAM,                        
+               :DCLBE77000T.EVSSÆG_FST_BBER2FAM_SW,                     
+               :DCLBE77000T.EVSSÆG_FST_BBERGRL_AKT,                     
+               :DCLBE77000T.EVSSÆG_FST_BBERGRL_AKT_SW,                  
+               :DCLBE77000T.EVSSÆG_FST_BBER2FAM_AKT,                    
+               :DCLBE77000T.EVSSÆG_FST_BBER2FAM_AKT_SW,                 
+               :DCLBE77000T.EVSSÆG_FST_BPROM1,                          
+               :DCLBE77000T.EVSSÆG_FST_BPENSNED,                        
+               :DCLBE77000T.EVSSÆG_FST_BPENSNÆ,                         
+               :DCLBE77000T.EVSSÆG_FST_BSUM1,                           
+               :DCLBE77000T.EVSSÆG_FST_BSUM1_SW,                        
+               :DCLBE77000T.EVSSÆG_FST_BSUM3,                           
+               :DCLBE77000T.EVSSÆG_FST_BSUM3_SW,                        
+               :DCLBE77000T.EVSSÆG_FST_BNETTO,                          
+               :DCLBE77000T.EVSSÆG_FST_BNETTO_SW,                       
+               :DCLBE77000T.EVSSÆG_FST_BEJERAN,                         
+               :DCLBE77000T.EVSSÆG_FST_BEJERAN_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_BEVSMAN,                         
+               :DCLBE77000T.EVSSÆG_FST_BEVSMAN_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_BMANNEDSL,                       
+               :DCLBE77000T.EVSSÆG_FST_CENKE,                           
+               :DCLBE77000T.EVSSÆG_FST_CENKEBOH,                        
+               :DCLBE77000T.EVSSÆG_FST_BOBEHAKOD,                       
+               :DCLBE77000T.EVSSÆG_FST_CIVILSTAND,                      
+               :DCLBE77000T.EVSSÆG_FST_CSLET,                           
+               :DCLBE77000T.EVSSÆG_FST_BEJBOL1,                         
+               :DCLBE77000T.EVSSÆG_FST_BEJBOL1_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_BEJBOL2,                         
+               :DCLBE77000T.EVSSÆG_FST_BEJBOL2_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_CANVEBOL,                        
+               :DCLBE77000T.EVSSÆG_FST_CPTYPSLUT,                       
+               :DCLBE77000T.EVSSÆG_FST_FELT759,                         
+               :DCLBE77000T.EVSSÆG_FST_CEKSEMP,                         
+               :DCLBE77000T.EVSSÆG_FST_CFRÅR,                           
+               :DCLBE77000T.EVSSÆG_FST_DRGNÅRFRA,                       
+               :DCLBE77000T.EVSSÆG_FST_DRGNÅRTIL,                       
+               :DCLBE77000T.EVSSÆG_FST_COMPLA,                          
+               :DCLBE77000T.EVSSÆG_FST_DOMPLACPR,                       
+               :DCLBE77000T.EVSSÆG_FST_BUDLSKC,                         
+               :DCLBE77000T.EVSSÆG_FST_BUDLSKC_SW,                      
+               :DCLBE77000T.EVSSÆG_FST_BEVSMANFSI,                      
+               :DCLBE77000T.EVSSÆG_FST_BEVSMANFSI_SW,                   
+               :DCLBE77000T.EVSSÆG_SID_ELBNR,                           
+               :DCLBE77000T.EVSSÆG_SID_EGENNR,                          
+               :DCLBE77000T.EVSSÆG_SID_DFRAGLD,                         
+               :DCLBE77000T.EVSSÆG_SID_DTILGLD,                         
+               :DCLBE77000T.EVSSÆG_SID_CDATAFRA,                        
+               :DCLBE77000T.EVSSÆG_SID_CAJOUR,                          
+               :DCLBE77000T.EVSSÆG_SID_CSUPPL,                          
+               :DCLBE77000T.EVSSÆG_SID_DHENVN,                          
+               :DCLBE77000T.EVSSÆG_SID_FEJLNR,                          
+               :DCLBE77000T.EVSSÆG_SID_CÆGTOPR,                         
+               :DCLBE77000T.EVSSÆG_SID_CSKPLOMF,                        
+               :DCLBE77000T.EVSSÆG_SID_CEJBEVS,                         
+               :DCLBE77000T.EVSSÆG_SID_CEJDTYPE,                        
+               :DCLBE77000T.EVSSÆG_SID_FELT760,                         
+               :DCLBE77000T.EVSSÆG_SID_CNEDSL1,                         
+               :DCLBE77000T.EVSSÆG_SID_DATO0107,                        
+               :DCLBE77000T.EVSSÆG_SID_DOVTG,                           
+               :DCLBE77000T.EVSSÆG_SID_DAFSTAA,                         
+               :DCLBE77000T.EVSSÆG_SID_DINDFLYT,                        
+               :DCLBE77000T.EVSSÆG_SID_DFRAFLYT,                        
+               :DCLBE77000T.EVSSÆG_SID_CINDFLYT,                        
+               :DCLBE77000T.EVSSÆG_SID_GPCTEJER,                        
+               :DCLBE77000T.EVSSÆG_SID_GPCTEJER_SW,                     
+               :DCLBE77000T.EVSSÆG_SID_FDAGUDLE,                        
+               :DCLBE77000T.EVSSÆG_SID_GPCTUDLE,                        
+               :DCLBE77000T.EVSSÆG_SID_FUDL100,                         
+               :DCLBE77000T.EVSSÆG_SID_FDAGERHV,                        
+               :DCLBE77000T.EVSSÆG_SID_GPCTERHV,                        
+               :DCLBE77000T.EVSSÆG_SID_FERHVFLER,                       
+               :DCLBE77000T.EVSSÆG_SID_CBERGROP,                        
+               :DCLBE77000T.EVSSÆG_SID_BBERGRL,                         
+               :DCLBE77000T.EVSSÆG_SID_BBERGRL_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_BBER2FAM,                        
+               :DCLBE77000T.EVSSÆG_SID_BBER2FAM_SW,                     
+               :DCLBE77000T.EVSSÆG_SID_BBERGRL_AKT,                     
+               :DCLBE77000T.EVSSÆG_SID_BBERGRL_AKT_SW,                  
+               :DCLBE77000T.EVSSÆG_SID_BBER2FAM_AKT,                    
+               :DCLBE77000T.EVSSÆG_SID_BBER2FAM_AKT_SW,                 
+               :DCLBE77000T.EVSSÆG_SID_BPROM1,                          
+               :DCLBE77000T.EVSSÆG_SID_BPENSNED,                        
+               :DCLBE77000T.EVSSÆG_SID_BPENSNÆ,                         
+               :DCLBE77000T.EVSSÆG_SID_BSUM1,                           
+               :DCLBE77000T.EVSSÆG_SID_BSUM1_SW,                        
+               :DCLBE77000T.EVSSÆG_SID_BSUM3,                           
+               :DCLBE77000T.EVSSÆG_SID_BSUM3_SW,                        
+               :DCLBE77000T.EVSSÆG_SID_BNETTO,                          
+               :DCLBE77000T.EVSSÆG_SID_BNETTO_SW,                       
+               :DCLBE77000T.EVSSÆG_SID_BEJERAN,                         
+               :DCLBE77000T.EVSSÆG_SID_BEJERAN_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_BEVSMAN,                         
+               :DCLBE77000T.EVSSÆG_SID_BEVSMAN_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_BMANNEDSL,                       
+               :DCLBE77000T.EVSSÆG_SID_CENKE,                           
+               :DCLBE77000T.EVSSÆG_SID_CENKEBOH,                        
+               :DCLBE77000T.EVSSÆG_SID_BOBEHAKOD,                       
+               :DCLBE77000T.EVSSÆG_SID_CIVILSTAND,                      
+               :DCLBE77000T.EVSSÆG_SID_CSLET,                           
+               :DCLBE77000T.EVSSÆG_SID_BEJBOL1,                         
+               :DCLBE77000T.EVSSÆG_SID_BEJBOL1_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_BEJBOL2,                         
+               :DCLBE77000T.EVSSÆG_SID_BEJBOL2_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_CANVEBOL,                        
+               :DCLBE77000T.EVSSÆG_SID_CPTYPSLUT,                       
+               :DCLBE77000T.EVSSÆG_SID_FELT759,                         
+               :DCLBE77000T.EVSSÆG_SID_CEKSEMP,                         
+               :DCLBE77000T.EVSSÆG_SID_CFRÅR,                           
+               :DCLBE77000T.EVSSÆG_SID_DRGNÅRFRA,                       
+               :DCLBE77000T.EVSSÆG_SID_DRGNÅRTIL,                       
+               :DCLBE77000T.EVSSÆG_SID_COMPLA,                          
+               :DCLBE77000T.EVSSÆG_SID_DOMPLACPR,                       
+               :DCLBE77000T.EVSSÆG_SID_BUDLSKC,                         
+               :DCLBE77000T.EVSSÆG_SID_BUDLSKC_SW,                      
+               :DCLBE77000T.EVSSÆG_SID_BEVSMANFSI,                      
+               :DCLBE77000T.EVSSÆG_SID_BEVSMANFSI_SW,                   
+               :DCLBE77000T.EVSFEJ_DCPRN,                               
+               :DCLBE77000T.EVSFEJ_EKOMNR,                              
+               :DCLBE77000T.EVSFEJ_EEJDNR,                              
+               :DCLBE77000T.EVSFEJ_EENHEDLBNR,                          
+               :DCLBE77000T.EVSFEJ_CFRATYPE,                            
+               :DCLBE77000T.EVSFEJ_DSORTDAT1,                           
+               :DCLBE77000T.EVSFEJ_DSORTDAT2,                           
+               :DCLBE77000T.EVSFEJ_ELBNR,                               
+               :DCLBE77000T.EVSFEJ_DFRAGLD,                             
+               :DCLBE77000T.EVSFEJ_DTILGLD,                             
+               :DCLBE77000T.EVSFEJ_CEVSBENY,                            
+               :DCLBE77000T.EVSFEJ_CEJBEVS,                             
+               :DCLBE77000T.EVSFEJ_COPR_CEJBEVS,                        
+               :DCLBE77000T.EVSFEJ_CEJDTYPE,                            
+               :DCLBE77000T.EVSFEJ_CFRED,                               
+               :DCLBE77000T.EVSFEJ_CNEDSL1,                             
+               :DCLBE77000T.EVSFEJ_DATO0107,                            
+               :DCLBE77000T.EVSFEJ_DOVTG,                               
+               :DCLBE77000T.EVSFEJ_DOVTG_GL,                            
+               :DCLBE77000T.EVSFEJ_DAFSTAA,                             
+               :DCLBE77000T.EVSFEJ_DINDFLYT,                            
+               :DCLBE77000T.EVSFEJ_DFRAFLYT,                            
+               :DCLBE77000T.EVSFEJ_FDAGEJ,                              
+               :DCLBE77000T.EVSFEJ_GPCTEJER,                            
+               :DCLBE77000T.EVSFEJ_FDAGUDLE,                            
+               :DCLBE77000T.EVSFEJ_GPCTUDLE,                            
+               :DCLBE77000T.EVSFEJ_FDAGERHV,                            
+               :DCLBE77000T.EVSFEJ_GPCTERHV,                            
+               :DCLBE77000T.EVSFEJ_BPROM1,                              
+               :DCLBE77000T.EVSFEJ_B100,                                
+               :DCLBE77000T.EVSFEJ_B100_SW,                             
+               :DCLBE77000T.EVSFEJ_BBRUTTO,                             
+               :DCLBE77000T.EVSFEJ_BBRUTTO_SW,                          
+               :DCLBE77000T.EVSFEJ_BEJERAN,                             
+               :DCLBE77000T.EVSFEJ_BEJERAN_SW,                          
+               :DCLBE77000T.EVSFEJ_BNYMAN,                              
+               :DCLBE77000T.EVSFEJ_BNYMAN_SW,                           
+               :DCLBE77000T.EVSFEJ_BFORSKAT,                            
+               :DCLBE77000T.EVSFEJ_BFORSKAT_SW,                         
+               :DCLBE77000T.EVSFEJ_FDAGIALT,                            
+               :DCLBE77000T.EVSFEJ_CEVSSUM,                             
+               :DCLBE77000T.EVSFEJ_CENKE,                               
+               :DCLBE77000T.EVSFEJ_EJDBELIG,                            
+               :DCLBE77000T.EVSFEJ_CLANDEKODE,                          
+               :DCLBE77000T.EVSFEJ_BBERGRL,                             
+               :DCLBE77000T.EVSFEJ_BBER2FAM,                            
+               :DCLBE77000T.EVSFEJ_CEKSEMP,                             
+               :DCLBE77000T.EVSFEJ_COPR_EKSEMP,                         
+               :DCLBE77000T.EVSFEJ_BUDLSKC,                             
+               :DCLBE77000T.EVSFEJ_CRTEKORNS,                           
+               :DCLBE77000T.EVSFEJ_COPR_CRTEKORNS,                      
+               :DCLBE77000T.EVSFEJ_EJET20240101,                        
+               :DCLBE77000T.EVSFEJ_RES_FAKTISKRABAT,                    
+               :DCLBE77000T.EVSFEJ_RES_FAKTISKRABAT_SW,                 
+               :DCLBE77000T.EVSFEJ_EVSEFTERRABAT                        
+                  :BE770_SW.EVSFEJ_EVSEFTERRABAT_SW,                    
+               :DCLBE77000T.EVSFEJ_OVERFØRT_ÆGTEF,                      
+               :DCLBE77000T.EVSFEJ_RABATBER_DFRAGLD,                    
+               :DCLBE77000T.EVSFEJ_RABATBER_DTILGLD,                    
+               :DCLBE77000T.EVSFEJ_RABATBER_EJERANDEL                   
+                  :BE770_SW.EVSFEJ_RABATBER_EJERANDEL_SW,               
+               :DCLBE77000T.EVSFEJ_COPR_RABATEJERANDEL,                 
+               :DCLBE77000T.EVSFEJ_RABAT_DFRAGLD,                       
+               :DCLBE77000T.EVSFEJ_RABAT_DTILGLD,                       
+               :DCLBE77000T.EVSFEJ_SIMPELBASISRABAT,                    
+               :DCLBE77000T.EVSFEJ_SIMPELBASISRABAT_NEG,                
+               :DCLBE77000T.EVSFEJ_BASISRABAT_REGUL,                    
+               :DCLBE77000T.EVSFEJ_COPR_BASISRABAT_REGUL,               
+               :DCLBE77000T.EVSFEJ_BASISRABAT,                          
+               :DCLBE77000T.EVSFEJ_EJERANDEL                            
+                  :BE770_SW.EVSFEJ_EJERANDEL_SW,                        
+               :DCLBE77000T.EVSFÆG_DCPRN,                               
+               :DCLBE77000T.EVSFÆG_EKOMNR,                              
+               :DCLBE77000T.EVSFÆG_EEJDNR,                              
+               :DCLBE77000T.EVSFÆG_EENHEDLBNR,                          
+               :DCLBE77000T.EVSFÆG_CFRATYPE,                            
+               :DCLBE77000T.EVSFÆG_DSORTDAT1,                           
+               :DCLBE77000T.EVSFÆG_DSORTDAT2,                           
+               :DCLBE77000T.EVSFÆG_ELBNR,                               
+               :DCLBE77000T.EVSFÆG_DFRAGLD,                             
+               :DCLBE77000T.EVSFÆG_DTILGLD,                             
+               :DCLBE77000T.EVSFÆG_CEVSBENY,                            
+               :DCLBE77000T.EVSFÆG_CEJBEVS,                             
+               :DCLBE77000T.EVSFÆG_COPR_CEJBEVS,                        
+               :DCLBE77000T.EVSFÆG_CEJDTYPE,                            
+               :DCLBE77000T.EVSFÆG_CFRED,                               
+               :DCLBE77000T.EVSFÆG_CNEDSL1,                             
+               :DCLBE77000T.EVSFÆG_DATO0107,                            
+               :DCLBE77000T.EVSFÆG_DOVTG,                               
+               :DCLBE77000T.EVSFÆG_DOVTG_GL,                            
+               :DCLBE77000T.EVSFÆG_DAFSTAA,                             
+               :DCLBE77000T.EVSFÆG_DINDFLYT,                            
+               :DCLBE77000T.EVSFÆG_DFRAFLYT,                            
+               :DCLBE77000T.EVSFÆG_FDAGEJ,                              
+               :DCLBE77000T.EVSFÆG_GPCTEJER,                            
+               :DCLBE77000T.EVSFÆG_FDAGUDLE,                            
+               :DCLBE77000T.EVSFÆG_GPCTUDLE,                            
+               :DCLBE77000T.EVSFÆG_FDAGERHV,                            
+               :DCLBE77000T.EVSFÆG_GPCTERHV,                            
+               :DCLBE77000T.EVSFÆG_BPROM1,                              
+               :DCLBE77000T.EVSFÆG_B100,                                
+               :DCLBE77000T.EVSFÆG_B100_SW,                             
+               :DCLBE77000T.EVSFÆG_BBRUTTO,                             
+               :DCLBE77000T.EVSFÆG_BBRUTTO_SW,                          
+               :DCLBE77000T.EVSFÆG_BEJERAN,                             
+               :DCLBE77000T.EVSFÆG_BEJERAN_SW,                          
+               :DCLBE77000T.EVSFÆG_BNYMAN,                              
+               :DCLBE77000T.EVSFÆG_BNYMAN_SW,                           
+               :DCLBE77000T.EVSFÆG_BFORSKAT,                            
+               :DCLBE77000T.EVSFÆG_BFORSKAT_SW,                         
+               :DCLBE77000T.EVSFÆG_FDAGIALT,                            
+               :DCLBE77000T.EVSFÆG_CEVSSUM,                             
+               :DCLBE77000T.EVSFÆG_CENKE,                               
+               :DCLBE77000T.EVSFÆG_EJDBELIG,                            
+               :DCLBE77000T.EVSFÆG_CLANDEKODE,                          
+               :DCLBE77000T.EVSFÆG_BBERGRL,                             
+               :DCLBE77000T.EVSFÆG_BBER2FAM,                            
+               :DCLBE77000T.EVSFÆG_CEKSEMP,                             
+               :DCLBE77000T.EVSFÆG_COPR_EKSEMP,                         
+               :DCLBE77000T.EVSFÆG_BUDLSKC,                             
+               :DCLBE77000T.EVSFÆG_CRTEKORNS,                           
+               :DCLBE77000T.EVSFÆG_COPR_CRTEKORNS,                      
+               :DCLBE77000T.EVSFÆG_EJET20240101,                        
+               :DCLBE77000T.EVSFÆG_RES_FAKTISKRABAT,                    
+               :DCLBE77000T.EVSFÆG_RES_FAKTISKRABAT_SW,                 
+               :DCLBE77000T.EVSFÆG_EVSEFTERRABAT                        
+                  :BE770_SW.EVSFÆG_EVSEFTERRABAT_SW,                    
+               :DCLBE77000T.EVSFÆG_OVERFØRT_ÆGTEF,                      
+               :DCLBE77000T.EVSFÆG_RABATBER_DFRAGLD,                    
+               :DCLBE77000T.EVSFÆG_RABATBER_DTILGLD,                    
+               :DCLBE77000T.EVSFÆG_RABATBER_EJERANDEL                   
+                  :BE770_SW.EVSFÆG_RABATBER_EJERANDEL_SW,               
+               :DCLBE77000T.EVSFÆG_COPR_RABATEJERANDEL,                 
+               :DCLBE77000T.EVSFÆG_RABAT_DFRAGLD,                       
+               :DCLBE77000T.EVSFÆG_RABAT_DTILGLD,                       
+               :DCLBE77000T.EVSFÆG_SIMPELBASISRABAT,                    
+               :DCLBE77000T.EVSFÆG_SIMPELBASISRABAT_NEG,                
+               :DCLBE77000T.EVSFÆG_BASISRABAT_REGUL,                    
+               :DCLBE77000T.EVSFÆG_COPR_BASISRABAT_REGUL,               
+               :DCLBE77000T.EVSFÆG_BASISRABAT,                          
+               :DCLBE77000T.EVSFÆG_EJERANDEL                            
+                  :BE770_SW.EVSFÆG_EJERANDEL_SW                         
+                                                                        
+            FROM BE77000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBE77000T.TIL_EVS_AAR              
+            AND   DCPRN         = :DCLBE77000T.DCPRN                    
+            AND   AFVIKLINGS_ID = :DCLBE77000T.AFVIKLINGS_ID            
+            AND   DATA_ID       = :DCLBE77000T.DATA_ID                  
+            AND   EKOMNR        = :DCLBE77000T.EKOMNR                   
+            AND   EEJDNR        = :DCLBE77000T.EEJDNR                   
+            AND   EENHEDLBNR    = :DCLBE77000T.EENHEDLBNR               
+            AND   EGENNR        = :DCLBE77000T.EGENNR;                  
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               SLUT_FUNDET = '1'B;                                      
+               TV.SELECT_SLUT = TV.SELECT_SLUT + 1;                     
+            END;                                                        
+            WHEN(100) DO;                                               
+               PUT SKIP LIST ('BE77000T - række ej fundet for:');       
+               PUT SKIP LIST ('TIL_EVS_AAR: ' !!                        
+                                         DCLBE77000T.TIL_EVS_AAR);      
+               PUT SKIP LIST ('AFVIKLINGS_ID ' !!                       
+                                     DCLBE77000T.AFVIKLINGS_ID);        
+               PUT SKIP LIST ('DATA_ID: ' !! DCLBE77000T.DATA_ID);      
+               PUT SKIP LIST ('DCPRN: ' !! DCLBE77000T.DCPRN);          
+               PUT SKIP LIST ('EKOMNR: ' !! DCLBE77000T.EKOMNR);        
+               PUT SKIP LIST ('EEJDNR: ' !! DCLBE77000T.EEJDNR);        
+               PUT SKIP LIST ('EENHEDLBNR: ' !! DCLBE77000T.EENHEDLBNR);
+               PUT SKIP LIST ('EGENNR: ' !! DCLBE77000T.EGENNR);        
+               ABEND_TEXT = 'SELECT BE77000T EJ FUNDET';                
+               CALL SQL_ERROR(PROCNAME,110,ABEND_TEXT);                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABEND_TEXT = 'SELECT BE77000T';                          
+               CALL SQL_ERROR(PROCNAME,111,ABEND_TEXT);                 
+            END;                                                        
+         END;                                                           
+                                                                        
+ END SELECT_SLUT;                                                       
+ /*********************************************************************/
+ RÆKKE_SLETTES:PROC RETURNS(BIT(1));                                    
+                                                                        
+                                                                        
+      DCL    HJ_SLETTES    BIT       (1);                               
+                                                                        
+      HJ_SLETTES = NEJ;                                                 
+                                                                        
+      EXEC SQL                                                          
+        SELECT                                                          
+          BE89000T.DAFSTÅ,                                              
+          BE89000T.DAFGDAT                                              
+        INTO                                                            
+          :DCLBE89000T.DAFSTÅ,                                          
+          :DCLBE89000T.DAFGDAT                                          
+        FROM  BE89000T                                                  
+      WHERE BE89000T.DCPRCIR       = :DCLBE78000T.DCPRN                 
+        AND BE89000T.EKOMNR        = :DCLBE78000T.EKOMNR                
+        AND BE89000T.EEJDNR        = :DCLBE78000T.EEJDNR                
+        ;                                                               
+                                                                        
+      SELECT(SQLCA.SQLCODE);                                            
+        WHEN(0)                                                         
+          DO;                                                           
+            IF (DCLBE89000T.DAFSTÅ  = 0  &                              
+                DCLBE89000T.DAFGDAT > 0 &                               
+                DCLBE89000T.DAFGDAT < FORSKÅR0101) !                    
+               (DCLBE89000T.DAFSTÅ > 0  &                               
+                DCLBE89000T.DAFSTÅ < FORSKÅR0101)                       
+            THEN                                                        
+              RETURN(JA);                                               
+          END;                                                          
+        WHEN(100)                                                       
+           DO;                                                          
+           END;                                                         
+        OTHERWISE                                                       
+           DO;                                                          
+             ABEND_TEXT = 'SELECT BE89000T';                            
+             CALL SQL_ERROR(PROCNAME,114,ABEND_TEXT);                   
+           END;                                                         
+      END;                                                              
+                                                                        
+    RETURN(HJ_SLETTES);                                                 
+                                                                        
+ END RÆKKE_SLETTES;                                                     
+ /*********************************************************************/
+ SELECT_MT: PROC;                                                       
+                                                                        
+         MT_FUNDET = NEJ;                                               
+                                                                        
+         DCLBE76000T = '';                                              
+         DCLBE76000T.TIL_EVS_AAR    = DCLBE78000T.TIL_EVS_AAR;          
+         DCLBE76000T.AFVIKLINGS_ID  = DCLBE78000T.AFVIKLINGS_ID;        
+         DCLBE76000T.DATA_ID        = DCLBE78000T.DATA_ID;              
+         DCLBE76000T.DCPRN          = DCLBE78000T.DCPRN;                
+         DCLBE76000T.EKOMNR         = DCLBE78000T.EKOMNR;               
+         DCLBE76000T.EEJDNR         = DCLBE78000T.EEJDNR;               
+         DCLBE76000T.EENHEDLBNR     = DCLBE78000T.EENHEDLBNR;           
+         DCLBE76000T.EGENNR         = DCLBE78000T.EGENNR;               
+                                                                        
+         EXEC SQL                                                       
+            SELECT                                                      
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DATA_ID,                                                 
+               DCPRN,                                                   
+               EKOMNR,                                                  
+               EEJDNR,                                                  
+               EENHEDLBNR,                                              
+               EGENNR,                                                  
+               PROGRAMNAVN,                                             
+               DB2FUNKTION,                                             
+               CCIVS,                                                   
+               CPENS,                                                   
+               CRGN,                                                    
+               DSORP,                                                   
+               CPART,                                                   
+               CFRÅR,                                                   
+               CFRÅROPR,                                                
+               DRGNÅRFRA,                                               
+               DRGNÅRTIL,                                               
+               BPENSIND,                                                
+               BPENSGR,                                                 
+               CSTATUS,                                                 
+               CDØDÆGTF,                                                
+               CDUBLET,                                                 
+               CÆGTF_OK,                                                
+               COVF_DHE,                                                
+               FØROPL_DCIÆN_GL,                                         
+               FØROPL_CCIVS_GL,                                         
+               HIST_OPD_SIDSTE_DHENVN,                                  
+               HIST_OPD_SIDSTE_CSBSK,                                   
+               HIST_OPD_SIDSTE_CSKPLOM,                                 
+               HIST_OPD_SIDSTE_DCIÆN,                                   
+               HIST_OPD_DETTE_DHENVN,                                   
+               HIST_OPD_DETTE_CSBSK,                                    
+               HIST_OPD_DETTE_CSKPLOM,                                  
+               HIST_OPD_DETTE_DCIÆN,                                    
+               HIST_OPD_NAESTE_DHENVN,                                  
+               HIST_OPD_NAESTE_CSBSK,                                   
+               HIST_OPD_NAESTE_CSKPLOM,                                 
+               HIST_OPD_NAESTE_DCIÆN,                                   
+               PER_DERHVPER_FRA1,                                       
+               PER_DERHVPER_TIL1,                                       
+               PER_DERHVPER_FRA2,                                       
+               PER_DERHVPER_TIL2,                                       
+               PER_DERHVPER_FRA3,                                       
+               PER_DERHVPER_TIL3,                                       
+               PER_DERHVPER_FRA4,                                       
+               PER_DERHVPER_TIL4,                                       
+               PER_DERHVPER_FRA5,                                       
+               PER_DERHVPER_TIL5                                        
+                                                                        
+            INTO                                                        
+               :DCLBE76000T.TIL_EVS_AAR,                                
+               :DCLBE76000T.AFVIKLINGS_ID,                              
+               :DCLBE76000T.DATA_ID,                                    
+               :DCLBE76000T.DCPRN,                                      
+               :DCLBE76000T.EKOMNR,                                     
+               :DCLBE76000T.EEJDNR,                                     
+               :DCLBE76000T.EENHEDLBNR,                                 
+               :DCLBE76000T.EGENNR,                                     
+               :DCLBE76000T.PROGRAMNAVN,                                
+               :DCLBE76000T.DB2FUNKTION,                                
+               :DCLBE76000T.CCIVS,                                      
+               :DCLBE76000T.CPENS,                                      
+               :DCLBE76000T.CRGN,                                       
+               :DCLBE76000T.DSORP,                                      
+               :DCLBE76000T.CPART,                                      
+               :DCLBE76000T.CFRÅR,                                      
+               :DCLBE76000T.CFRÅROPR,                                   
+               :DCLBE76000T.DRGNÅRFRA,                                  
+               :DCLBE76000T.DRGNÅRTIL,                                  
+               :DCLBE76000T.BPENSIND,                                   
+               :DCLBE76000T.BPENSGR,                                    
+               :DCLBE76000T.CSTATUS,                                    
+               :DCLBE76000T.CDØDÆGTF,                                   
+               :DCLBE76000T.CDUBLET,                                    
+               :DCLBE76000T.CÆGTF_OK,                                   
+               :DCLBE76000T.COVF_DHE,                                   
+               :DCLBE76000T.FØROPL_DCIÆN_GL,                            
+               :DCLBE76000T.FØROPL_CCIVS_GL,                            
+               :DCLBE76000T.HIST_OPD_SIDSTE_DHENVN,                     
+               :DCLBE76000T.HIST_OPD_SIDSTE_CSBSK,                      
+               :DCLBE76000T.HIST_OPD_SIDSTE_CSKPLOM,                    
+               :DCLBE76000T.HIST_OPD_SIDSTE_DCIÆN,                      
+               :DCLBE76000T.HIST_OPD_DETTE_DHENVN,                      
+               :DCLBE76000T.HIST_OPD_DETTE_CSBSK,                       
+               :DCLBE76000T.HIST_OPD_DETTE_CSKPLOM,                     
+               :DCLBE76000T.HIST_OPD_DETTE_DCIÆN,                       
+               :DCLBE76000T.HIST_OPD_NAESTE_DHENVN,                     
+               :DCLBE76000T.HIST_OPD_NAESTE_CSBSK,                      
+               :DCLBE76000T.HIST_OPD_NAESTE_CSKPLOM,                    
+               :DCLBE76000T.HIST_OPD_NAESTE_DCIÆN,                      
+               :DCLBE76000T.PER_DERHVPER_FRA1,                          
+               :DCLBE76000T.PER_DERHVPER_TIL1,                          
+               :DCLBE76000T.PER_DERHVPER_FRA2,                          
+               :DCLBE76000T.PER_DERHVPER_TIL2,                          
+               :DCLBE76000T.PER_DERHVPER_FRA3,                          
+               :DCLBE76000T.PER_DERHVPER_TIL3,                          
+               :DCLBE76000T.PER_DERHVPER_FRA4,                          
+               :DCLBE76000T.PER_DERHVPER_TIL4,                          
+               :DCLBE76000T.PER_DERHVPER_FRA5,                          
+               :DCLBE76000T.PER_DERHVPER_TIL5                           
+                                                                        
+                                                                        
+                                                                        
+            FROM BE76000T                                               
+            WHERE TIL_EVS_AAR   = :DCLBE76000T.TIL_EVS_AAR              
+              AND AFVIKLINGS_ID = :DCLBE76000T.AFVIKLINGS_ID            
+              AND DATA_ID       = :DCLBE76000T.DATA_ID                  
+              AND DCPRN         = :DCLBE76000T.DCPRN                    
+              AND EKOMNR        = :DCLBE76000T.EKOMNR                   
+              AND EEJDNR        = :DCLBE76000T.EEJDNR                   
+              AND EENHEDLBNR    = :DCLBE76000T.EENHEDLBNR               
+              AND EGENNR        = :DCLBE76000T.EGENNR;                  
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               MT_FUNDET = '1'B;                                        
+               TV.SELECT_MT = TV.SELECT_MT + 1;                         
+            END;                                                        
+            WHEN(100) DO;                                               
+               ABEND_TEXT = 'SELECT BE76000T EJ FUNDET';                
+               CALL SQL_ERROR(PROCNAME,112,ABEND_TEXT);                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABEND_TEXT = 'SELECT BE76000T';                          
+               CALL SQL_ERROR(PROCNAME,113,ABEND_TEXT);                 
+            END;                                                        
+         END;                                                           
+                                                                        
+ END SELECT_MT;                                                         
+                                                                        
+ /**********************************************************************
+                                                                        
+ * Inkluderede procedurer                                              *
+                                                                        
+ **********************************************************************/
+                                                                        
+ %INCLUDE BE99900M; /* SQL_ERROR                                      */
+                                                                        
+ %INCLUDE BE99901M; /* ABEND                                          */
+                                                                        
+ %INCLUDE BE99902M; /* AFSLUT_PROGRAM_FØR_ABEND                       */
+                                                                        
+                                                                        
+ END  BE84900;                                                          

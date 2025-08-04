@@ -1,0 +1,787 @@
+  XE10200T: PROC() OPTIONS (MAIN) REORDER;                              
+ /**********************************************************************
+ **                                                                     
+ **     NAVN              -   XE10200T                                  
+ **                                                                     
+ **     FUNKTION          -   UDTRÆK FRA SOURCE ANALYSE                 
+ **                                                                     
+ **     PROGRAMMØR        -   CLAUS MARCUSSEN, KMO, FEBRUAR 2016        
+ **                                                                     
+ **********************************************************************/
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+                                                                        
+ /**********************************************************************
+ * ØVRIGE FELTER                                                        
+ **********************************************************************/
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     STG             BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     LENGTH          BUILTIN;                                       
+ DCL     PLIRETC         BUILTIN;                                       
+                                                                        
+ DCL     ZS61900         ENTRY;                                         
+                                                                        
+ DCL     PGNAVN          CHAR (7) INIT ('XE10200T');                    
+                                                                        
+ DCL TRUE                BIT(1) VALUE('1'B);                            
+ DCL FALSE               BIT(1) VALUE('0'B);                            
+                                                                        
+    EXEC SQL INCLUDE SQLCA;                                             
+                                                                        
+ DCL 1 DCLMEMBER,                                                       
+      5 ZMF_APPL       CHAR(4),                                         
+      5 MEMBER         CHAR(8),                                         
+      5 MEMBER_TYP     CHAR(3),                                         
+      5 REL_MEMBER     CHAR(8),                                         
+      5 REL_ART        CHAR(8),                                         
+      5 CALL_MEMBER    CHAR(8),                                         
+      5 CALL_ART       CHAR(8),                                         
+      5 CALL_LEVEL     BIN FIXED(15),                                   
+      5 REL_LEVEL      BIN FIXED(15),                                   
+      5 OPR            CHAR(8);                                         
+                                                                        
+ /**********************************************************************
+ *      DCL DIVERSE                                                     
+ **********************************************************************/
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+                                                                        
+ DCL  BETINGELSE             CHAR(32000)  VAR;                          
+ DCL  SQL_CURSOR             CHAR(32000)  VAR;                          
+ DCL  FUNKTION               CHAR(16);                                  
+                                                                        
+ /*********************************************************************/
+ /*                     ON UNITS                                      */
+ /*********************************************************************/
+                                                                        
+     ON ERROR BEGIN;                                                    
+        ON ERROR SYSTEM;                                                
+           FLUSH FILE (*);                                              
+           CALL PLIDUMP ('SHBO');                                       
+     END;                                                               
+                                                                        
+                                                                        
+     ON ENDPAGE;                                                        
+                                                                        
+ /**********************************************************************
+ **     HOVEDSTYRING                                                    
+ **********************************************************************/
+                                                                        
+     CALL ZS61900;                          /* UDSKRIVNING AF SSI */    
+                                                                        
+     CALL INITIERING();                                                 
+                                                                        
+     BETINGELSE = FIND_BETINGELSE();                                    
+                                                                        
+     SELECT(FUNKTION);                                                  
+     WHEN ('FINDMAIN')                                                  
+        DO;                                                             
+           CALL OPBYG_CURSOR_FINDMAIN();                                
+           CALL UDFØR_SQL(1, 'CSV');                                    
+        END;                                                            
+     WHEN ('KALDETRÆ_OP')                                               
+        DO;                                                             
+           CALL OPBYG_CURSOR_KALDETRÆ_OP();                             
+           CALL UDFØR_SQL(2, 'CSV');                                    
+        END;                                                            
+     WHEN ('KALDETRÆ_NED')                                              
+        DO;                                                             
+           CALL OPBYG_CURSOR_FINDMAIN();                                
+           CALL UDFØR_SQL(0, 'WHERE');                                  
+           CALL OPBYG_CURSOR_KALDETRÆ_NED();                            
+           CALL UDFØR_SQL(4, 'CSV');                                    
+        END;                                                            
+     WHEN ('INDEHOLDER')                                                
+        DO;                                                             
+           CALL OPBYG_CURSOR_FINDMAIN();                                
+           CALL UDFØR_SQL(0, 'WHERE');                                  
+           CALL OPBYG_CURSOR_INDEHOLDER();                              
+           CALL UDFØR_SQL(3, 'CSV');                                    
+        END;                                                            
+     OTHERWISE                                                          
+        DO;                                                             
+           RC = 16;                                                     
+        END;                                                            
+     END;                                                               
+                                                                        
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ INITIERING: PROC() RETURNS(BIT(1));                                    
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL  KOMMANDO               FILE RECORD INPUT;                         
+ DCL  KOMMANDO_REC           CHAR(80);                                  
+ DCL  EOF_KOMMANDO           BIT(1);                                    
+                                                                        
+     RC =  0;                                                           
+                                                                        
+     ON ENDFILE(KOMMANDO) BEGIN;                                        
+        EOF_KOMMANDO = TRUE;                                            
+     END;                                                               
+                                                                        
+     FUNKTION = '';                                                     
+                                                                        
+     OPEN FILE(KOMMANDO)        TITLE('KOMMANDO');                      
+                                                                        
+     READ FILE(KOMMANDO) INTO(KOMMANDO_REC);                            
+                                                                        
+     IF ^EOF_KOMMANDO THEN                                              
+     DO;                                                                
+        FUNKTION = KOMMANDO_REC;                                        
+     END;                                                               
+     CLOSE FILE(KOMMANDO);                                              
+                                                                        
+     RETURN(RC);                                                        
+                                                                        
+ END INITIERING;                                                        
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ FIND_BETINGELSE: PROC() RETURNS(CHAR(32000)  VAR);                     
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL  FILTER                 FILE RECORD INPUT;                         
+ DCL  FILTER_REC             CHAR(80);                                  
+ DCL  EOF_FILTER             BIT(1);                                    
+ DCL  LIKE_BETINGELSE        CHAR(32000)  VAR;                          
+ DCL  IN_BETINGELSE          CHAR(32000)  VAR;                          
+ DCL  BETINGELSE             CHAR(32000)  VAR;                          
+ DCL  LIKE_FINDES            BIT(1);                                    
+ DCL  IN_FINDES              BIT(1);                                    
+                                                                        
+     ON ENDFILE(FILTER) BEGIN;                                          
+        EOF_FILTER = TRUE;                                              
+     END;                                                               
+                                                                        
+     RC =  0;                                                           
+                                                                        
+     LIKE_BETINGELSE = '';                                              
+     IN_BETINGELSE = '';                                                
+     LIKE_FINDES = FALSE;                                               
+     IN_FINDES = FALSE;                                                 
+                                                                        
+     EOF_FILTER = FALSE;                                                
+     OPEN FILE(FILTER)        TITLE('FILTER');                          
+                                                                        
+     READ FILE(FILTER) INTO(FILTER_REC);                                
+     DO WHILE(^EOF_FILTER);                                             
+        FILTER_REC = SUBSTR(FILTER_REC, 1, 72);                         
+        IF INDEX(FILTER_REC, '%') > 0 THEN                              
+        DO;                                                             
+           IF LIKE_FINDES THEN                                          
+           DO;                                                          
+              LIKE_BETINGELSE = LIKE_BETINGELSE !! 'OR ';               
+           END;                                                         
+           LIKE_FINDES = TRUE;                                          
+           LIKE_BETINGELSE = LIKE_BETINGELSE !! "MEMBER LIKE ('" !!     
+                             TRIM(FILTER_REC, ' ', ' ') !! "') ";       
+        END;                                                            
+        ELSE DO;                                                        
+           IF IN_FINDES THEN                                            
+           DO;                                                          
+              IN_BETINGELSE = IN_BETINGELSE !! ', ';                    
+           END;                                                         
+           IN_FINDES = TRUE;                                            
+           IN_BETINGELSE = IN_BETINGELSE !! "'" !!                      
+                           TRIM(FILTER_REC, ' ', ' ') !! "'";           
+        END;                                                            
+                                                                        
+        READ FILE(FILTER) INTO(FILTER_REC);                             
+     END;                                                               
+                                                                        
+     CLOSE FILE(FILTER);                                                
+                                                                        
+     IN_BETINGELSE   = 'MEMBER IN (' !! IN_BETINGELSE !! ')';           
+                                                                        
+     SELECT;                                                            
+     WHEN(IN_FINDES & LIKE_FINDES)                                      
+        DO;                                                             
+           BETINGELSE = IN_BETINGELSE !! ' OR ' !! LIKE_BETINGELSE;     
+        END;                                                            
+     WHEN(^IN_FINDES & LIKE_FINDES)                                     
+        DO;                                                             
+           BETINGELSE = LIKE_BETINGELSE;                                
+        END;                                                            
+     WHEN(IN_FINDES & ^LIKE_FINDES)                                     
+        DO;                                                             
+           BETINGELSE = IN_BETINGELSE;                                  
+        END;                                                            
+     OTHERWISE                                                          
+        DO;                                                             
+           BETINGELSE = ' 1=0 ';   /* DO NOTHING */                     
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN(BETINGELSE);                                                
+                                                                        
+ END FIND_BETINGELSE;                                                   
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ OPBYG_CURSOR_FINDMAIN: PROC();                                         
+                                                                        
+     SQL_CURSOR =                                                       
+         ' WITH EXPL ( ZMF_APPL  ' !!                                   
+         '          , MEMBER  ' !!                                      
+         '          , MEMBER_TYP  ' !!                                  
+         '          , REL_MEMBER  ' !!                                  
+         '          , REL_ART  ' !!                                     
+         '          , REL_LEVEL  ' !!                                   
+         '          , OPR) AS  ' !!                                     
+         '(  ' !!                                                       
+         '   SELECT DISTINCT  ' !!                                      
+         '          A.ZMF_APPL  ' !!                                    
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , A.REL_MEMBER  ' !!                                  
+         '        , A.REL_ART  ' !!                                     
+         '        , 0  ' !!                                             
+         '        , A.MEMBER  ' !!                                      
+         '   FROM   XE10100T A  ' !!                                    
+         '   WHERE A.REL_ART = ''MEMBER''  ' !!                         
+         '     AND (' !! BETINGELSE !! ')' !!                           
+         ' UNION ALL  ' !!                                              
+         '   SELECT B.ZMF_APPL  ' !!                                    
+         '        , B.MEMBER  ' !!                                      
+         '        , B.MEMBER_TYP  ' !!                                  
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , PARENT.REL_LEVEL + 1  ' !!                          
+         '        , PARENT.OPR  ' !!                                    
+         '   FROM   EXPL PARENT, XE10100T B  ' !!                       
+         '   WHERE  PARENT.MEMBER = B.REL_MEMBER  ' !!                  
+         '     AND  B.REL_ART IN (''INCLUDE'', ''SQL INC'')  ' !!       
+         '     AND  PARENT.REL_LEVEL < 100  ' !!                        
+         ')  ' !!                                                       
+         'SELECT ZMF_APPL  ' !!                                         
+         '     , MEMBER  ' !!                                           
+         '     , MEMBER_TYP  ' !!                                       
+         '     , REL_MEMBER  ' !!                                       
+         '     , REL_ART  ' !!                                          
+         '     , REL_LEVEL  ' !!                                        
+         '     , ''''  ' !!                                             
+         '     , ''''  ' !!                                             
+         '     , 0  ' !!                                                
+         '     , OPR  ' !!                                              
+         'FROM EXPL  ' !!                                               
+         'WHERE MEMBER_TYP IN (''SRC'', ''SRB'', ''SRX'')  ';           
+                                                                        
+ END OPBYG_CURSOR_FINDMAIN;                                             
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ OPBYG_CURSOR_KALDETRÆ_OP: PROC();                                      
+                                                                        
+     SQL_CURSOR =                                                       
+         ' WITH EXPL ( ZMF_APPL  ' !!                                   
+         '          , MEMBER  ' !!                                      
+         '          , MEMBER_TYP  ' !!                                  
+         '          , REL_MEMBER  ' !!                                  
+         '          , REL_ART  ' !!                                     
+         '          , CALL_MEMBER  ' !!                                 
+         '          , CALL_REL_ART  ' !!                                
+         '          , CALL_LEVEL  ' !!                                  
+         '          , REL_LEVEL  ' !!                                   
+         '          , OPR) AS  ' !!                                     
+         '(  ' !!                                                       
+         '   SELECT DISTINCT  ' !!                                      
+         '          A.ZMF_APPL  ' !!                                    
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , A.REL_MEMBER  ' !!                                  
+         '        , A.REL_ART  ' !!                                     
+         '        , ''        ''  ' !!                                  
+         '        , ''        ''  ' !!                                  
+         '        , 0  ' !!                                             
+         '        , 0  ' !!                                             
+         '        , A.MEMBER  ' !!                                      
+         '   FROM   XE10100T A  ' !!                                    
+         '   WHERE A.REL_ART = ''MEMBER''  ' !!                         
+         '     AND (' !! BETINGELSE !! ')' !!                           
+         ' UNION ALL  ' !!                                              
+         '   SELECT B.ZMF_APPL  ' !!                                    
+         '        , B.MEMBER  ' !!                                      
+         '        , B.MEMBER_TYP  ' !!                                  
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , PARENT.CALL_MEMBER  ' !!                            
+         '        , PARENT.CALL_REL_ART  ' !!                           
+         '        , PARENT.CALL_LEVEL  ' !!                             
+         '        , PARENT.REL_LEVEL + 1  ' !!                          
+         '        , PARENT.OPR  ' !!                                    
+         '   FROM   EXPL PARENT, XE10100T B  ' !!                       
+         '   WHERE  PARENT.MEMBER = B.REL_MEMBER  ' !!                  
+         '     AND  B.REL_ART IN (''INCLUDE'', ''SQL INC'')  ' !!       
+         '     AND  PARENT.REL_LEVEL < 100  ' !!                        
+         ' UNION ALL  ' !!                                              
+         '   SELECT B.ZMF_APPL  ' !!                                    
+         '        , B.MEMBER  ' !!                                      
+         '        , B.MEMBER_TYP  ' !!                                  
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , PARENT.CALL_LEVEL + 1  ' !!                         
+         '        , PARENT.REL_LEVEL + 1  ' !!                          
+         '        , PARENT.OPR  ' !!                                    
+         '   FROM   EXPL PARENT, XE10100T B  ' !!                       
+         '   WHERE  PARENT.MEMBER = B.REL_MEMBER  ' !!                  
+         '     AND  B.REL_ART NOT IN (''INCLUDE'', ''SQL INC'')  ' !!   
+         '     AND  PARENT.REL_LEVEL < 100  ' !!                        
+         ')  ' !!                                                       
+         'SELECT ZMF_APPL  ' !!                                         
+         '     , MEMBER  ' !!                                           
+         '     , MEMBER_TYP  ' !!                                       
+         '     , REL_MEMBER  ' !!                                       
+         '     , REL_ART  ' !!                                          
+         '     , REL_LEVEL  ' !!                                        
+         '     , CALL_MEMBER  ' !!                                      
+         '     , CALL_REL_ART  ' !!                                     
+         '     , CALL_LEVEL  ' !!                                       
+         '     , OPR  ' !!                                              
+         'FROM EXPL  ' !!                                               
+         'WHERE MEMBER_TYP IN (''SRC'', ''SRB'', ''SRX'')  ';           
+                                                                        
+ END OPBYG_CURSOR_KALDETRÆ_OP;                                          
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ OPBYG_CURSOR_KALDETRÆ_NED: PROC();                                     
+                                                                        
+     SQL_CURSOR =                                                       
+         ' WITH EXPL ( ZMF_APPL  ' !!                                   
+         '          , MAIN  ' !!                                        
+         '          , MEMBER  ' !!                                      
+         '          , MEMBER_TYP  ' !!                                  
+         '          , REL_MEMBER  ' !!                                  
+         '          , REL_ART  ' !!                                     
+         '          , CALL_MEMBER  ' !!                                 
+         '          , CALL_REL_ART  ' !!                                
+         '          , CALL_LEVEL  ' !!                                  
+         '          , ADD_LEVEL  ' !!                                   
+         '          , ADD_MEMBER  ' !!                                  
+         '          , REL_LEVEL  ' !!                                   
+         '          , OPR) AS  ' !!                                     
+         '(  ' !!                                                       
+         '   SELECT DISTINCT  ' !!                                      
+         '          A.ZMF_APPL  ' !!                                    
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , ''        ''  ' !!                                  
+         '        , ''        ''  ' !!                                  
+         '        , 0  ' !!                                             
+         '        , 0  ' !!                                             
+         '        , ''        ''  ' !!                                  
+         '        , 0  ' !!                                             
+         '        , A.MEMBER  ' !!                                      
+         '   FROM   XE10100T A  ' !!                                    
+         '   WHERE A.REL_ART = ''MEMBER''  ' !!                         
+         '     AND A.MEMBER IN (' !! BETINGELSE !! ')' !!               
+         ' UNION ALL  ' !!                                              
+         '   SELECT B.ZMF_APPL  ' !!                                    
+         '        , CASE PARENT.ADD_LEVEL ' !!                          
+         '            WHEN 0 THEN PARENT.MAIN  ' !!                     
+         '            ELSE        PARENT.ADD_MEMBER  ' !!               
+         '          END  ' !!                                           
+         '        , B.MEMBER  ' !!                                      
+         '        , B.MEMBER_TYP  ' !!                                  
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , PARENT.CALL_MEMBER  ' !!                            
+         '        , PARENT.CALL_REL_ART  ' !!                           
+         '        , (PARENT.CALL_LEVEL + PARENT.ADD_LEVEL)  ' !!        
+         '        , CASE B.REL_ART ' !!                                 
+         '            WHEN (''INCLUDE'')  THEN 0 ' !!                   
+         '            WHEN (''SQL INC'')  THEN 0 ' !!                   
+         '            ELSE 1 ' !!                                       
+         '          END ' !!                                            
+         '        , B.REL_MEMBER ' !!                                   
+         '        , PARENT.REL_LEVEL + 1  ' !!                          
+         '        , PARENT.OPR  ' !!                                    
+         '   FROM   EXPL PARENT, XE10100T B  ' !!                       
+         '   WHERE  PARENT.REL_MEMBER = B.MEMBER  ' !!                  
+         '     AND  PARENT.REL_LEVEL < 100  ' !!                        
+         ')  ' !!                                                       
+         'SELECT ZMF_APPL  ' !!                                         
+         '     , MAIN  ' !!                                             
+         '     , MEMBER_TYP  ' !!                                       
+         '     , REL_MEMBER  ' !!                                       
+         '     , REL_ART  ' !!                                          
+         '     , ADD_LEVEL  ' !!                                        
+         '     , CALL_MEMBER  ' !!                                      
+         '     , CALL_REL_ART  ' !!                                     
+         '     , CALL_LEVEL  ' !!                                       
+         '     , OPR  ' !!                                              
+         'FROM EXPL  '  !!                                              
+         'WHERE REL_ART IN (''CICSLINK'', ''ENTRY'')  '  !!             
+         'ORDER BY CALL_LEVEL ASC  '  !!                                
+         '       , MAIN       ASC  '  !!                                
+         '       , REL_MEMBER ASC' ;                                    
+                                                                        
+ END OPBYG_CURSOR_KALDETRÆ_NED;                                         
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ OPBYG_CURSOR_INDEHOLDER: PROC();                                       
+                                                                        
+     SQL_CURSOR =                                                       
+         ' WITH EXPL ( ZMF_APPL  ' !!                                   
+         '          , MEMBER  ' !!                                      
+         '          , MEMBER_TYP  ' !!                                  
+         '          , REL_MEMBER  ' !!                                  
+         '          , REL_ART  ' !!                                     
+         '          , REL_LEVEL  ' !!                                   
+         '          , OPR_TYP  ' !!                                     
+         '          , OPR) AS  ' !!                                     
+         '(  ' !!                                                       
+         '   SELECT DISTINCT  ' !!                                      
+         '          A.ZMF_APPL  ' !!                                    
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , A.MEMBER  ' !!                                      
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , 0  ' !!                                             
+         '        , A.MEMBER_TYP  ' !!                                  
+         '        , A.MEMBER  ' !!                                      
+         '   FROM   XE10100T A  ' !!                                    
+         '   WHERE A.REL_ART = ''MEMBER''  ' !!                         
+         '     AND A.MEMBER IN (' !! BETINGELSE !! ')' !!               
+         ' UNION ALL  ' !!                                              
+         '   SELECT B.ZMF_APPL  ' !!                                    
+         '        , B.MEMBER  ' !!                                      
+         '        , B.MEMBER_TYP  ' !!                                  
+         '        , B.REL_MEMBER  ' !!                                  
+         '        , B.REL_ART  ' !!                                     
+         '        , PARENT.REL_LEVEL + 1  ' !!                          
+         '        , PARENT.OPR_TYP  ' !!                                
+         '        , PARENT.OPR  ' !!                                    
+         '   FROM   EXPL PARENT, XE10100T B  ' !!                       
+         '   WHERE  PARENT.REL_MEMBER = B.MEMBER  ' !!                  
+         '     AND  B.REL_ART IN (''INCLUDE'', ''SQL INC'')  ' !!       
+         '     AND  PARENT.REL_LEVEL < 100  ' !!                        
+         ')  ' !!                                                       
+         'SELECT DISTINCT  ' !!                                         
+         '       ZMF_APPL  ' !!                                         
+         '     , MEMBER  ' !!                                           
+         '     , OPR_TYP  ' !!                                          
+         '     , REL_MEMBER  ' !!                                       
+         '     , REL_ART  ' !!                                          
+         '     , REL_LEVEL  ' !!                                        
+         '     , ''''  ' !!                                             
+         '     , ''''  ' !!                                             
+         '     , 0  ' !!                                                
+         '     , OPR  ' !!                                              
+         'FROM EXPL  ' !!                                               
+         'ORDER BY OPR ASC ' !!                                         
+         '       , REL_LEVEL ASC ' !!                                   
+         '       , REL_MEMBER ASC';                                     
+                                                                        
+                                                                        
+ END OPBYG_CURSOR_INDEHOLDER;                                           
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ UDFØR_SQL: PROC(CSV_TYPE, OUTPUT_FORM)     RETURNS(BIN FIXED(31));     
+                                                                        
+ DCL  CSV_TYPE               BIN FIXED (31);                            
+ DCL  OUTPUT_FORM            CHAR(10);                                  
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL  FUNDET                 BIT(1);                                    
+                                                                        
+     BETINGELSE = '';                                                   
+     RC = OPEN_CURSOR();                                                
+     RC = FETCH_CURSOR(FUNDET);                                         
+     DO WHILE(FUNDET);                                                  
+        IF OUTPUT_FORM = 'WHERE' THEN                                   
+        DO;                                                             
+           IF BETINGELSE > '' THEN                                      
+           DO;                                                          
+              BETINGELSE = BETINGELSE !! ", ";                          
+           END;                                                         
+           BETINGELSE = BETINGELSE !! "'" !!                            
+                        TRIM(DCLMEMBER.MEMBER,' ', ' ') !! "'";         
+        END;                                                            
+        ELSE DO;                                                        
+           RC = SKRIV_CSV(CSV_TYPE);                                    
+        END;                                                            
+        RC = FETCH_CURSOR(FUNDET);                                      
+     END;                                                               
+     RC = CLOSE_CURSOR();                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END UDFØR_SQL;                                                         
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ OPEN_CURSOR: PROC()     RETURNS(BIN FIXED(31));                        
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+                                                                        
+     RC = 0;                                                            
+                                                                        
+     EXEC SQL PREPARE CURSOR_STMT FROM :SQL_CURSOR;                     
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP LIST(SQL_CURSOR);                                   
+           PUT SKIP LIST('-------------------------------');            
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(1000);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+     EXEC SQL                                                           
+        DECLARE ANALYSE_STATEMENTS CURSOR WITH HOLD                     
+        FOR CURSOR_STMT;                                                
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(1000);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+     EXEC SQL                                                           
+        OPEN ANALYSE_STATEMENTS;                                        
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     WHEN (445)                                                         
+        DO;                                                             
+           PUT SKIP LIST('Statement truncated');                        
+        END;                                                            
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(1000);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END OPEN_CURSOR;                                                       
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ FETCH_CURSOR: PROC(FUNDET)     RETURNS(BIN FIXED(31));                 
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL  FUNDET                 BIT(1);                                    
+                                                                        
+     RC = 0;                                                            
+                                                                        
+     EXEC SQL                                                           
+        FETCH ANALYSE_STATEMENTS                                        
+        INTO :DCLMEMBER.ZMF_APPL                                        
+           , :DCLMEMBER.MEMBER                                          
+           , :DCLMEMBER.MEMBER_TYP                                      
+           , :DCLMEMBER.REL_MEMBER                                      
+           , :DCLMEMBER.REL_ART                                         
+           , :DCLMEMBER.REL_LEVEL                                       
+           , :DCLMEMBER.CALL_MEMBER                                     
+           , :DCLMEMBER.CALL_ART                                        
+           , :DCLMEMBER.CALL_LEVEL                                      
+           , :DCLMEMBER.OPR;                                            
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0)                                                           
+        FUNDET = TRUE;                                                  
+     WHEN (100)                                                         
+        FUNDET = FALSE;                                                 
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(1000);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END FETCH_CURSOR;                                                      
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ CLOSE_CURSOR: PROC()     RETURNS(BIN FIXED(31));                       
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+                                                                        
+     RC = 0;                                                            
+                                                                        
+     EXEC SQL                                                           
+        CLOSE ANALYSE_STATEMENTS;                                       
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+     WHEN (0);                                                          
+     OTHERWISE                                                          
+        DO;                                                             
+           PUT SKIP DATA(SQLCA);                                        
+           RETURN(1000);                                                
+        END;                                                            
+     END;                                                               
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END CLOSE_CURSOR;                                                      
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ SKRIV_CSV: PROC(CSV_TYPE)     RETURNS(BIN FIXED(31));                  
+                                                                        
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+ DCL  CSV_TYPE               BIN FIXED (31);                            
+      /* 1 = Alle felter                                              */
+ DCL  CSV_TXT                CHAR(132) VAR;                             
+ DCL  HEADER_DANNET(0:10)    BIT(1)   INIT(FALSE)  STATIC;              
+                                                                        
+     RC = 0;                                                            
+                                                                        
+     IF ^HEADER_DANNET(CSV_TYPE) THEN                                   
+     DO;                                                                
+        HEADER_DANNET(CSV_TYPE) = TRUE;                                 
+        SELECT(CSV_TYPE);                                               
+        WHEN (0)                                                        
+           DO;                                                          
+              CSV_TXT = '"APPL";' !!                                    
+                        '"MEMBER";' !!                                  
+                        '"MEMBER TYPE";' !!                             
+                        '"RELATION TIL";' !!                            
+                        '"RELATIONS ART";' !!                           
+                        '"KALDE MEMBER";' !!                            
+                        '"KALDE ART";' !!                               
+                        '"KALDE NIVEAU";' !!                            
+                        '"NIVEAU";' !!                                  
+                        '"OPRINDELIGT MEMBER";';                        
+           END;                                                         
+        WHEN (1)                                                        
+           DO;                                                          
+              CSV_TXT = '"APPL";' !!                                    
+                        '"MEMBER";' !!                                  
+                        '"MEMBER TYPE";' !!                             
+                        '"RELATION TIL";' !!                            
+                        '"RELATIONS ART";' !!                           
+                        '"NIVEAU";' !!                                  
+                        '"OPRINDELIGT MEMBER";';                        
+           END;                                                         
+        WHEN (2)                                                        
+           DO;                                                          
+              CSV_TXT = '"APPL";' !!                                    
+                        '"MEMBER";' !!                                  
+                        '"MEMBER TYPE";' !!                             
+                        '"KALDE ART";' !!                               
+                        '"KALDE MEMBER";' !!                            
+                        '"KALDE NIVEAU";' !!                            
+                        '"OPRINDELIGT MEMBER";';                        
+           END;                                                         
+        WHEN (3)                                                        
+           DO;                                                          
+              CSV_TXT = '"APPL";' !!                                    
+                        '"MAIN";' !!                                    
+                        '"MEMBER TYPE";' !!                             
+                        '"MEMBER";' !!                                  
+                        '"RELATION TIL";' !!                            
+                        '"RELATIONS ART";' !!                           
+                        '"NIVEAU";';                                    
+           END;                                                         
+        OTHERWISE;                                                      
+        END;                                                            
+        PUT SKIP LIST(CSV_TXT);                                         
+     END;                                                               
+                                                                        
+     SELECT(CSV_TYPE);                                                  
+     WHEN (0)                                                           
+        DO;                                                             
+           CSV_TXT = '"' !! DCLMEMBER.ZMF_APPL !! '";' !!               
+                     '"' !! DCLMEMBER.MEMBER !! '";' !!                 
+                     '"' !! DCLMEMBER.MEMBER_TYP !! '";' !!             
+                     '"' !! DCLMEMBER.REL_MEMBER !! '";' !!             
+                     '"' !! DCLMEMBER.REL_ART !! '";' !!                
+                     '"' !! DCLMEMBER.CALL_MEMBER !! '";' !!            
+                     '"' !! DCLMEMBER.CALL_ART !! '";' !!               
+                     '"' !! DCLMEMBER.CALL_LEVEL !! '";' !!             
+                     '"' !! DCLMEMBER.REL_LEVEL !! '";' !!              
+                     '"' !! DCLMEMBER.OPR !! '";';                      
+        END;                                                            
+     WHEN (1)                                                           
+        DO;                                                             
+           CSV_TXT = '"' !! DCLMEMBER.ZMF_APPL !! '";' !!               
+                     '"' !! DCLMEMBER.MEMBER !! '";' !!                 
+                     '"' !! DCLMEMBER.MEMBER_TYP !! '";' !!             
+                     '"' !! DCLMEMBER.REL_MEMBER !! '";' !!             
+                     '"' !! DCLMEMBER.REL_ART !! '";' !!                
+                     '"' !! DCLMEMBER.REL_LEVEL !! '";' !!              
+                     '"' !! DCLMEMBER.OPR !! '";';                      
+        END;                                                            
+     WHEN (2)                                                           
+        DO;                                                             
+           CSV_TXT = '"' !! DCLMEMBER.ZMF_APPL !! '";' !!               
+                     '"' !! DCLMEMBER.MEMBER !! '";' !!                 
+                     '"' !! DCLMEMBER.MEMBER_TYP !! '";' !!             
+                     '"' !! DCLMEMBER.CALL_ART !! '";' !!               
+                     '"' !! DCLMEMBER.CALL_MEMBER !! '";' !!            
+                     '"' !! DCLMEMBER.CALL_LEVEL !! '";' !!             
+                     '"' !! DCLMEMBER.OPR !! '";';                      
+        END;                                                            
+     WHEN (3)                                                           
+        DO;                                                             
+           CSV_TXT = '"' !! DCLMEMBER.ZMF_APPL !! '";' !!               
+                     '"' !! DCLMEMBER.OPR !! '";' !!                    
+                     '"' !! DCLMEMBER.MEMBER_TYP !! '";' !!             
+                     '"' !! DCLMEMBER.MEMBER !! '";' !!                 
+                     '"' !! DCLMEMBER.REL_MEMBER !! '";' !!             
+                     '"' !! DCLMEMBER.REL_ART !! '";' !!                
+                     '"' !! DCLMEMBER.REL_LEVEL !! '";';                
+        END;                                                            
+     WHEN (4)                                                           
+           CSV_TXT = '"' !! DCLMEMBER.ZMF_APPL !! '";' !!               
+                     '"' !! DCLMEMBER.MEMBER !! '";' !!                 
+                     '"' !! DCLMEMBER.REL_ART !! '";' !!                
+                     '"' !! DCLMEMBER.REL_MEMBER !! '";' !!             
+                     '"' !! DCLMEMBER.OPR !! '";';                      
+     OTHERWISE;                                                         
+     END;                                                               
+                                                                        
+     PUT SKIP LIST(CSV_TXT);                                            
+                                                                        
+     RETURN (RC);                                                       
+                                                                        
+ END SKRIV_CSV;                                                         
+                                                                        
+ /*********************************************************************/
+                                                                        
+     CALL PLIRETC(RC);                                                  
+                                                                        
+ END XE10200T;                                                          

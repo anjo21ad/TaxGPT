@@ -1,0 +1,648 @@
+ PROCESS OPT(TIME);                                                     
+ BE85700: /* DAN DATA TIL EVS BASISRABAT TIL FORSKUD                  */
+         PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                   
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');       
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL :                                                            *
+ * OPDATER OPLYSNINGER TIL FORSKUDS EVS BASISRABATTABEL(BS01800T)      *
+ * Overførsel af evt. rabat fra afdød til efterlevende                 *
+ *                                                                     *
+ * INPUT     : B.E85400D UDTRÆK - RELEVANTE PERSONER                   *
+ *                                                                     *
+ * OUTPUT    : BS01800T                                                *
+ *             BE85701Y  KØRSELSKONTROLLISTE                           *
+ *                                                                     *
+ * PROGRAMMØR: JXT 22-08-2023 BF17                                     *
+ * RETTET    :                                                         *
+ *                                                                     *
+ ***********************************************************************
+ *                                                                     *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BE8540I FILE RECORD INPUT;     /* INPUT FIL TIL BS01800T */    
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK (LOAD-GRUNDLAG)                            * 
+ *********************************************************************/ 
+ DCL     ANT_LÆST_18       BIN FIXED (31);                              
+                                                                        
+ DCL     ANT_UPD_18        BIN FIXED (31);                              
+ DCL     ANT_INS_18_1      BIN FIXED (31);                              
+ DCL     ANT_INS_18_2      BIN FIXED (31);                              
+                                                                        
+ DCL     1 BE854_18,                                                    
+           %INCLUDE BE85400N;                                           
+                                                                        
+ /* indicator var */                                                    
+ DCL     R24_FSTIBGRNED_IV           BIN FIXED (15);                    
+ DCL     R24_STIBGRNED_IV            BIN FIXED (15);                    
+ DCL     R24_EJERANDEL_IV            BIN FIXED (15);                    
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF DB2                                               * 
+ *********************************************************************/ 
+         EXEC SQL INCLUDE SQLCA;     /* SQL KOMMUNIKATIONSAREAL       */
+                                                                        
+         EXEC SQL INCLUDE BS01800T;  /* EVS BASISRABAT 2024           */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    LIN_DEB          CHAR      (133);                               
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE85700L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (' '),           
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (24)      INIT      (' ');           
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+                                                                        
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     EOF_BE854       BIT       (01)    INIT ('0'B);                 
+                                                                        
+ DCL     BS018_FINDES    BIT       (01)    INIT ('0'B);                 
+ DCL     BS018_NULL_NUL  BIT       (01)    INIT ('0'B);                 
+ DCL     DF_TILDATO      CHAR (26) INIT ('9999-12-31-23.59.59.999999'); 
+                                                                        
+ DCL     I               BIN FIXED (15);                                
+ DCL     HJ_CHAR2        CHAR      (2);                                 
+ DCL     HJ_PIC2         PIC       '(2)9'  BASED(ADDR(HJ_CHAR2));       
+ DCL     GEM_PNR         FIXED     (11)      INIT      (0);             
+ DCL     GEM_KOMNR       FIXED     (3);                                 
+ DCL     GEM_EJDNR       FIXED     (7);                                 
+ DCL     GEM_EENHEDLBNR  BIN FIXED(15);                                 
+ DCL     SKRIV_PERSON    BIT      (1);                                  
+ DCL     TEKST45         CHAR     (45);                                 
+                                                                        
+ /* FIA */                                                              
+ DCL     HJ_CHAR_4_PIC PIC '9999';                                      
+ DCL     HJ_CHAR_4     CHAR (4) DEF HJ_CHAR_4_PIC;                      
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ //DCL     1 BE55600M,                                                  
+ //          %INCLUDE BE55600M;                                         
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_TIL_EVS_AAR_NÆSTE           BIN FIXED (15);                 
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+                                                                        
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BE85700');      
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE85700'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+         CALL TERMINER_LISTE                                            
+                      ('***           SKAT EVS FORSKUD           ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***               BE85700                ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***      Dan EVS Basisrabat (BS01800T)   ***'); 
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+                                                                        
+         ON UNDEFINEDFILE(BE8540I) BEGIN;                               
+            ABENDTXT = 'Datasæt BE8540I kan ikke åbnes';                
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         ON ENDFILE (BE8540I)                                           
+         BEGIN;                                                         
+            EOF_BE854 = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (BE8540I) TITLE ('BE85400I');                        
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE85701Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         ANT_LÆST_18  = 0;                                              
+         ANT_UPD_18   = 0;                                              
+         ANT_INS_18_1 = 0;                                              
+         ANT_INS_18_2 = 0;                                              
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE85700L');             
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER CHECK AF OMKØRSEL                        */     
+         /********************************************************/     
+         PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);         
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+         CALL B100_MAIN;                                                
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       B100_MAIN                                              *       
+ *********************************************************************/ 
+ B100_MAIN: PROC;                                                       
+                                                                        
+         /* LÆS INPUT FIL */                                            
+                                                                        
+         READ FILE (BE8540I) INTO (BE854_18);                           
+                                                                        
+         DO WHILE ( ^EOF_BE854 );                                       
+                                                                        
+            ANT_LÆST_18  = ANT_LÆST_18  + 1;                            
+                                                                        
+            CALL FLYT_NØGLER;                                           
+                                                                        
+            CALL SELECT_BS018;                                          
+                                                                        
+            IF BS018_FINDES                                             
+            THEN DO;                                                    
+               /* undersøg om det er række med NULL values - TIC */     
+               CALL CHECK_NULL;                                         
+                                                                        
+               IF BS018_NULL_NUL                                        
+               THEN DO;                                                 
+                  CALL FLYT_FELTER;                                     
+                  CALL UPDATE_BS018;                                    
+                  END;                                                  
+               END;                                                     
+            ELSE DO;                                                    
+              CALL FLYT_FELTER;                                         
+              CALL INSERT_BS018('1');                                   
+              END;                                                      
+                                                                        
+            READ FILE (BE8540I) INTO (BE854_18);                        
+                                                                        
+         END;  /* do while */                                           
+                                                                        
+                                                                        
+ END B100_MAIN;                                                         
+ /********************************************************************* 
+ *       FLYT_NØGLER                                               *    
+ *********************************************************************/ 
+ FLYT_NØGLER: PROC;                                                     
+                                                                        
+        DCLBS01800T              = '';                                  
+                                                                        
+        DCLBS01800T.PERSONNUMMER = BE854_18.PERSONNUMMER;               
+        DCLBS01800T.EKOMNR       = BE854_18.EKOMNR;                     
+        DCLBS01800T.EEJDNR       = BE854_18.EEJDNR;                     
+        DCLBS01800T.EENHEDLBNR   = BE854_18.EENHEDLBNR;                 
+                                                                        
+        DCLBS01800T.DTILGLD      = BE854_18.DTILGLD;                    
+                                                                        
+ END FLYT_NØGLER;                                                       
+ /********************************************************************* 
+ *       SELECT_BS018                                               *   
+ *********************************************************************/ 
+ SELECT_BS018: PROC;                                                    
+                                                                        
+         BS018_FINDES = NEJ;                                            
+                                                                        
+         /* aktiv række */                                              
+         DCLBS01800T.DTILGLD = '9999-12-31-23.59.59.999999';            
+                                                                        
+         EXEC SQL SELECT                                                
+          T18.DFRAGLD                                                   
+         ,T18.R24_SIMPELBASISRABAT                                      
+         ,T18.R24_SIMPELBASISRABAT_NEG                                  
+         ,T18.R24_BASISRABAT_REGUL                                      
+         ,T18.COPR_R24_BASISRABAT_REGUL                                 
+         ,T18.R24_BASISRABAT                                            
+         ,T18.R24_FAST_STIGNINGSBEGR_NEDSLAG                            
+         ,T18.R24_STIGNINGSBEGR_NEDSLAG                                 
+         ,T18.R24_EJERANDEL                                             
+                                                                        
+          INTO                                                          
+          :DCLBS01800T.DFRAGLD                                          
+         ,:DCLBS01800T.R24_SIMPELBASISRABAT                             
+         ,:DCLBS01800T.R24_SIMPELBASISRABAT_NEG                         
+         ,:DCLBS01800T.R24_BASISRABAT_REGUL                             
+         ,:DCLBS01800T.COPR_R24_BASISRABAT_REGUL                        
+         ,:DCLBS01800T.R24_BASISRABAT                                   
+         ,:DCLBS01800T.R24_FAST_STIGNINGSBEGR_NEDSLAG                   
+                                         :R24_FSTIBGRNED_IV             
+         ,:DCLBS01800T.R24_STIGNINGSBEGR_NEDSLAG                        
+                                         :R24_STIBGRNED_IV              
+         ,:DCLBS01800T.R24_EJERANDEL     :R24_EJERANDEL_IV              
+                                                                        
+                 FROM BS01800T T18                                      
+                                                                        
+                WHERE T18.PERSONNUMMER  = :DCLBS01800T.PERSONNUMMER     
+                  AND T18.EKOMNR        = :DCLBS01800T.EKOMNR           
+                  AND T18.EEJDNR        = :DCLBS01800T.EEJDNR           
+                  AND T18.EENHEDLBNR    = :DCLBS01800T.EENHEDLBNR       
+                  AND T18.DTILGLD       = :DCLBS01800T.DTILGLD          
+                                                                        
+               ORDER BY T18.DFRAGLD DESC                                
+               FETCH FIRST 1 ROW ONLY;                                  
+                                                                        
+         SELECT(SQLCODE);                                               
+            WHEN (0) DO;                                                
+               BS018_FINDES  = '1'B;                                    
+               END;                                                     
+            WHEN (100) DO;                                              
+               BS018_FINDES  = '0'B;                                    
+               END;                                                     
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 SELECT_BS018';                           
+               CALL SQL_FEJL;                                           
+               END;                                                     
+         END;                                                           
+                                                                        
+ END SELECT_BS018;                                                      
+ /********************************************************************* 
+ *       UPDATE_BS018                                               *   
+ *********************************************************************/ 
+ UPDATE_BS018: PROC;                                                    
+                                                                        
+         /* Opdater Gældende til for aktuel Rabat                     */
+         EXEC SQL UPDATE BS01800T T1                                    
+                     SET T1.DTILGLD      = :DCLBS01800T.DFRAGLD         
+                   WHERE T1.PERSONNUMMER = :DCLBS01800T.PERSONNUMMER    
+                     AND T1.EKOMNR       = :DCLBS01800T.EKOMNR          
+                     AND T1.EEJDNR       = :DCLBS01800T.EEJDNR          
+                     AND T1.EENHEDLBNR   = :DCLBS01800T.EENHEDLBNR      
+                     AND T1.DTILGLD      = :DF_TILDATO                  
+                     AND T1.DFRAGLD      =                              
+                        (SELECT MAX(T2.DFRAGLD)                         
+                           FROM BS01800T T2                             
+                          WHERE T2.PERSONNUMMER = T1.PERSONNUMMER       
+                            AND T2.EKOMNR       = T1.EKOMNR             
+                            AND T2.EEJDNR       = T1.EEJDNR             
+                            AND T2.EENHEDLBNR   = T1.EENHEDLBNR         
+                            AND T2.DTILGLD      = :DF_TILDATO);         
+                                                                        
+         SELECT(SQLCODE);                                               
+           WHEN (0) DO;                                                 
+              ANT_UPD_18 = ANT_UPD_18 + 1 ;                             
+              END;                                                      
+           OTHERWISE DO;                                                
+              ABENDTXT = '103 UPDATE_BS018';                            
+              CALL SQL_FEJL;                                            
+              END;                                                      
+         END;                                                           
+                                                                        
+         /* Indsæt ny række                                           */
+         CALL INSERT_BS018('2');                                        
+                                                                        
+ END UPDATE_BS018 ;                                                     
+ /********************************************************************* 
+ *       INSERT_BS018                                               *   
+ *********************************************************************/ 
+ INSERT_BS018: PROC(TYPE);                                              
+ DCL     TYPE       CHAR      (01);                                     
+                                                                        
+         EXEC SQL INSERT INTO BS01800T                                  
+            (  PERSONNUMMER                                             
+              ,EKOMNR                                                   
+              ,EEJDNR                                                   
+              ,EENHEDLBNR                                               
+              ,DFRAGLD                                                  
+              ,R24_SIMPELBASISRABAT                                     
+              ,R24_SIMPELBASISRABAT_NEG                                 
+              ,R24_BASISRABAT_REGUL                                     
+              ,COPR_R24_BASISRABAT_REGUL                                
+              ,R24_BASISRABAT                                           
+              ,R24_FAST_STIGNINGSBEGR_NEDSLAG                           
+              ,R24_STIGNINGSBEGR_NEDSLAG                                
+              ,R24_EJERANDEL                                            
+              ,DTILGLD                                                  
+              ,DKØRT)                                                   
+            VALUES                                                      
+            ( :DCLBS01800T.PERSONNUMMER                                 
+             ,:DCLBS01800T.EKOMNR                                       
+             ,:DCLBS01800T.EEJDNR                                       
+             ,:DCLBS01800T.EENHEDLBNR                                   
+             ,:DCLBS01800T.DFRAGLD                                      
+             ,:DCLBS01800T.R24_SIMPELBASISRABAT                         
+             ,:DCLBS01800T.R24_SIMPELBASISRABAT_NEG                     
+             ,:DCLBS01800T.R24_BASISRABAT_REGUL                         
+             ,:DCLBS01800T.COPR_R24_BASISRABAT_REGUL                    
+             ,:DCLBS01800T.R24_BASISRABAT                               
+             ,:DCLBS01800T.R24_FAST_STIGNINGSBEGR_NEDSLAG               
+                                    :R24_FSTIBGRNED_IV                  
+             ,:DCLBS01800T.R24_STIGNINGSBEGR_NEDSLAG                    
+                                    :R24_STIBGRNED_IV                   
+             ,:DCLBS01800T.R24_EJERANDEL:R24_EJERANDEL_IV               
+             ,:DCLBS01800T.DTILGLD                                      
+             ,:DCLBS01800T.DKØRT                                        
+            );                                                          
+                                                                        
+            SELECT(SQLCODE);                                            
+              WHEN (0) DO;                                              
+                 IF TYPE = '1'                                          
+                 THEN                                                   
+                    ANT_INS_18_1 = ANT_INS_18_1 + 1;                    
+                 ELSE                                                   
+                    ANT_INS_18_2 = ANT_INS_18_2 + 1;                    
+               END;                                                     
+              OTHERWISE DO;                                             
+               ABENDTXT = '102 INSERT_BS018';                           
+               CALL SQL_FEJL;                                           
+               END;                                                     
+            END;                                                        
+                                                                        
+ END INSERT_BS018;                                                      
+ /********************************************************************* 
+ *       CHECK_NULL                                               *     
+ *********************************************************************/ 
+ CHECK_NULL: PROC;                                                      
+                                                                        
+         /* der er fundet en efterlevende række      */                 
+         /* undersøg om den skal opdateres alligevel */                 
+         /* hvis der ikke er data på                 */                 
+                                                                        
+         BS018_NULL_NUL = '0'b;                                         
+                                                                        
+         IF R24_FSTIBGRNED_IV = -1                                      
+         THEN ;  /* NULL */                                             
+         ELSE                                                           
+           IF DCLBS01800T.R24_FAST_STIGNINGSBEGR_NEDSLAG <> 0           
+           THEN  RETURN;                                                
+                                                                        
+         IF R24_STIBGRNED_IV = -1                                       
+         THEN ;                                                         
+         ELSE                                                           
+           IF DCLBS01800T.R24_STIGNINGSBEGR_NEDSLAG <> 0                
+           THEN  RETURN;                                                
+                                                                        
+         IF R24_EJERANDEL_IV = -1                                       
+         THEN ;                                                         
+         ELSE                                                           
+           IF DCLBS01800T.R24_EJERANDEL <> 0                            
+           THEN  RETURN;                                                
+                                                                        
+         IF DCLBS01800T.R24_SIMPELBASISRABAT <> 0                       
+         THEN  RETURN;                                                  
+                                                                        
+         IF DCLBS01800T.R24_SIMPELBASISRABAT_NEG <> 0                   
+         THEN  RETURN;                                                  
+                                                                        
+         IF DCLBS01800T.R24_BASISRABAT_REGUL <> 0                       
+         THEN  RETURN;                                                  
+                                                                        
+         IF DCLBS01800T.COPR_R24_BASISRABAT_REGUL <> ''                 
+         THEN  RETURN;                                                  
+                                                                        
+         IF DCLBS01800T.R24_BASISRABAT <> 0                             
+         THEN  RETURN;                                                  
+                                                                        
+         /* der er ikke fundet værdier på række */                      
+         BS018_NULL_NUL = '1'b;                                         
+                                                                        
+ END CHECK_NULL;                                                        
+ /********************************************************************* 
+ *       FLYT_FELTER                                               *    
+ *********************************************************************/ 
+ FLYT_FELTER: PROC;                                                     
+                                                                        
+        DCLBS01800T.R24_SIMPELBASISRABAT =                              
+                                   BE854_18.R24_SIMPELBASISRABAT;       
+        DCLBS01800T.R24_SIMPELBASISRABAT_NEG =                          
+                                   BE854_18.R24_SIMPELBASISRABAT_NEG;   
+        DCLBS01800T.R24_BASISRABAT_REGUL =                              
+                                   BE854_18.R24_BASISRABAT_REGUL;       
+        DCLBS01800T.COPR_R24_BASISRABAT_REGUL =                         
+                                   BE854_18.COPR_R24_BASISRABAT_REGUL;  
+        DCLBS01800T.R24_BASISRABAT =                                    
+                                   BE854_18.R24_BASISRABAT;             
+                                                                        
+        DCLBS01800T.R24_FAST_STIGNINGSBEGR_NEDSLAG =                    
+                              BE854_18.R24_FAST_STIGNINGSBEGR_NEDSLAG;  
+        DCLBS01800T.R24_STIGNINGSBEGR_NEDSLAG =                         
+                                   BE854_18.R24_STIGNINGSBEGR_NEDSLAG;  
+        DCLBS01800T.R24_EJERANDEL = BE854_18.R24_EJERANDEL;             
+                                                                        
+        /* indicator variabler  ? --> -1    */                          
+        IF BE854_18.R24_FSTIBGRNED_NULL = '?'                           
+        THEN                                                            
+          R24_FSTIBGRNED_IV = -1;                                       
+        ELSE                                                            
+          R24_FSTIBGRNED_IV = 0;                                        
+                                                                        
+        IF BE854_18.R24_STIBGRNED_NULL = '?'                            
+        THEN                                                            
+          R24_STIBGRNED_IV  = -1;                                       
+        ELSE                                                            
+          R24_STIBGRNED_IV  = 0;                                        
+                                                                        
+        IF BE854_18.R24_EJERANDEL_NULL = '?'                            
+        THEN                                                            
+          R24_EJERANDEL_IV   = -1;                                      
+        ELSE                                                            
+          R24_EJERANDEL_IV   = 0;                                       
+                                                                        
+        DCLBS01800T.DFRAGLD      = BE854_18.DFRAGLD;                    
+        DCLBS01800T.DKØRT        = BE854_18.DKØRT;                      
+                                                                        
+                                                                        
+ END FLYT_FELTER;                                                       
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_LÆST_18;                                   
+         DETLIN1.TEKST = 'ANTAL LÆSTE                       BE85400D';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = ANT_UPD_18;                                    
+         DETLIN1.TEKST = 'ANTAL UPDATE (TIL UAKTUEL)        BS01800T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = ANT_INS_18_2;                                  
+         DETLIN1.TEKST = 'ANTAL INSERT (OPDATERET)          BS01800T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = ANT_INS_18_1;                                  
+         DETLIN1.TEKST = 'ANTAL INSERT (NYE)                BS01800T';  
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+                                                                        
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /*      TERMINER LISTE                                               */
+ /*********************************************************************/
+ TERMINER_LISTE:  PROCEDURE (TEKST);                                    
+ DCL     TEKST            CHAR      (45);                               
+                                               /* Medd. til termine-  */
+ DCL     1 MEDDELELSE     STATIC,              /* ringslisten         */
+           3 MODULNAVN    CHAR      (07)    INIT ('BE85700'),           
+           3 FILLER1      CHAR      (01)    INIT (' '),                 
+           3 MEDDNR       PIC       '999'   INIT (6),                   
+           3 DATA         CHAR      (45)    INIT (' ');                 
+ DCL     MEDDELELSEN      CHAR      (56)    DEF MEDDELELSE;             
+                                                                        
+         MEDDELELSE.MEDDNR = MEDDELELSE.MEDDNR + 1;                     
+         MEDDELELSE.DATA   = TEKST;                                     
+                                                                        
+         CALL ZS30101 (2,                                               
+                       MEDDELELSEN,                                     
+                       2);                                              
+                                                                        
+ END TERMINER_LISTE;                                                    
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BE8540I);                                          
+                                                                        
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+    PUT SKIP LIST ('*****************************************');        
+    PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);       
+    PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);            
+    PUT SKIP LIST ('PERSON  :                ' !!                       
+                            DCLBS01800T.PERSONNUMMER);                  
+    PUT SKIP LIST ('KOMMUNE :                ' !! DCLBS01800T.EKOMNR);  
+    PUT SKIP LIST ('EJENDOM :                ' !! DCLBS01800T.EEJDNR);  
+    PUT SKIP LIST ('*****************************************');        
+                                                                        
+    CALL ZS67000(SQLCA);                                                
+                                                                        
+    CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                      
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+                                                                        
+ END  BE85700;                                                          

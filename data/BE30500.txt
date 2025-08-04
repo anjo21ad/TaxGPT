@@ -1,0 +1,549 @@
+ BE30500: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     BF 16 Trin 3                                           *
+ * PROGRAMNAVN: BE30500.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER GS OPLYSNINGER OG GEMMER DISSE    *
+ *              I GS BAGGRUNDSTABEL                                    *
+ *                                                                     *
+ * PGMFORLØB:                                *                          
+ *              1. DECLARE DIV. GS OPLYSNINGER                         *
+ *              2. OPEN DIV. GS OPLYSNINGER.                           *
+ *              3LÆS/FETCH RÆKKE PÅ DIV. GS OPLYSNINGER              *  
+ *              5. SKRIV RÆKKE PÅ GS BAGGRUNDSTABEL                    *
+ *              9. SKRIV KONTROLLISTE.                                 *
+ *                                                                     *
+ * INDDATA:     BS04100T - Grundskyld resultat                         *
+ *              BS04300T - Grundskyld data                             *
+ *              BS04400T - Sammenligningsår aktuelt                    *
+ *                                                                     *
+ * UDDATA:      BE64000T - Grundskyld baggrundstabel                   *
+ *                                      *                               
+ *                                                                     *
+ *              BE30501Y - KONTROLLISTE.                               *
+ *                                                                     *
+ * OPRETTET AF: LAC  Juni 2023   BF 17 Trin 3                          *
+ *                                                                     *
+ ***********************************************************************
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2017');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         %include BS04100T;                // Grundskyld resultat       
+         %include BS04200T;                // Grundskyld resultat       
+         %include BS04300T;                // Grundskyld data           
+         %include BS04400T;                // Sammenligningsår aktuelt  
+         %include BE64000T;                // GS baggrundstabel         
+                                                                        
+         %INCLUDE SQLCA;                   /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL     PGM_NAVN       CHAR(08)  INIT('BE30500');                      
+ DCL     CURRENT_TIME       CHAR(26);                                   
+                                                                        
+ DCL     SQLKODE         PIC '9999';                                    
+                                                                        
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+ DCL     GEM_EKOMNR     BIN FIXED (15) INIT(0);                         
+ DCL     GEM_EEJDNR     BIN FIXED (31) INIT(0);                         
+ DCL     GEM_DCPRN      FIXED (11) INIT(0);                             
+                                                                        
+ DCL     ANT_COMM       BIN FIXED(31) INIT(0);                          
+                                                                        
+ DCL     HENT_SQLKODE  FIXED BIN(15)    INIT(0);                        
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+           2 ÅR         PIC   '99',                                     
+           2 MD         PIC   '99',                                     
+           2 DAG        PIC   '99';                                     
+                                                                        
+ DCL     1 BE55600M,                             /*#01*/                
+           %INCLUDE BE55600M;                    /* DATO OG ÅR MACRO */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     ANTLÆS_GS       BIN FIXED (31) INIT(0);                        
+ DCL     ANT_DUB         BIN FIXED (31) INIT(0);                        
+ DCL     ANTSKRIV_BE640  BIN FIXED (31) INIT(0);                        
+                                                                        
+ /*********************************************************************/
+ /* PARM KORT                                                         */
+ /*********************************************************************/
+  DCL     EOF_PARM         BIT (1) INIT ('0'B);                         
+  DCL     PARMKORT         FILE RECORD INPUT;                           
+  DCL     PARM_AR          CHAR  (80)  INIT (' ');                      
+  DCL     PARM_MEDTAGET    BIT (1)       INIT ('0'B);                   
+  DCL     PARM_FEJL        BIT (1)       INIT ('0'B);                   
+                                                                        
+  DCL     1 PARMLINIE  BASED (ADDR (PARM_AR) ),                         
+            2 PARMSTART    CHAR      (02),                              
+            2 PROGNAVN     CHAR      (07),                              
+            2 KOMNR1       CHAR      (03),                              
+            2 KOMNR2       CHAR      (03),                              
+            2 KOMNR3       CHAR      (03),                              
+            2 REST         CHAR      (62);                              
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE CURSOR                                               */
+ /*********************************************************************/
+                                                                        
+        EXEC SQL DECLARE HENT_GS_CUR CURSOR WITH HOLD FOR               
+                                                                        
+           SELECT BS041.PERSONNUMMER                                    
+                   ,BS041.EKOMNR                                        
+                   ,BS041.EEJDNR                                        
+                   ,BS041.CINDEFRYS_VALG                                
+                   ,BS041.COPR_CINDEFRYS_VALG                           
+                   ,BS041.DATO_CINDEFRYS_VALG                           
+                   ,BS041.CPLÅN_TILSAGN                                 
+                   ,BS041.COPR_CPLÅN_TILSAGN                            
+                   ,BS041.DATO_CPLÅN_TILSAGN                            
+                   ,BS044.DFRAGLD                                       
+                   ,BS044.DTILGLD                                       
+                   ,BS044.AKTSAMLIGNAAR                                 
+                   ,BS042.DFRAGLD                                       
+                   ,BS042.DTILGLD                                       
+                   ,BS043.DFRAGLD                                       
+           FROM BS04100T BS041   ,BS04400T BS044                        
+               ,BS04200T BS042  , BS04300T BS043                        
+          WHERE  BS041.DINDKAAR    = :BE55600M.SLUTÅR                   
+           AND  BS041.DTILGLD IN (SELECT MAX(BS0411.DTILGLD)            
+                                     FROM BS04100T BS0411               
+                                    WHERE BS0411.PERSONNUMMER =         
+                                                    BS041.PERSONNUMMER  
+                                      AND BS0411.DINDKAAR     =         
+                                                    BS041.DINDKAAR      
+                                      AND BS0411.EKOMNR  = BS041.EKOMNR 
+                                      AND BS0411.EEJDNR  = BS041.EEJDNR 
+                                  )                                     
+            and  BS044.DINDKAAR     = :BE55600M.SLUTÅR                  
+            and  BS044.PERSONNUMMER =  BS041.PERSONNUMMER               
+            AND  BS044.EKOMNR       = BS041.EKOMNR                      
+            AND  BS044.EEJDNR       = BS041.EEJDNR                      
+            AND  BS044.DTILGLD IN (SELECT MAX(BS0441.DTILGLD)           
+                                     FROM BS04400T BS0441               
+                                    WHERE BS0441.PERSONNUMMER =         
+                                                    BS044.PERSONNUMMER  
+                                      AND  BS0441.DINDKAAR     =        
+                                                    BS044.DINDKAAR      
+                                      AND BS0441.EKOMNR  = BS044.EKOMNR 
+                                      AND BS0441.EEJDNR  = BS044.EEJDNR 
+                                  )                                     
+                                                                        
+          AND  BS042.DINDKAAR = :BE55600M.SLUTÅR                        
+          and  BS042.PERSONNUMMER = BS041.PERSONNUMMER                  
+          AND  BS042.EKOMNR       = BS041.EKOMNR                        
+          AND  BS042.EEJDNR       = BS041.EEJDNR                        
+          AND  BS042.DTILGLD IN (SELECT MAX(BS0421.DTILGLD)             
+                                     FROM BS04200T BS0421               
+                                    WHERE BS0421.PERSONNUMMER =         
+                                                    BS042.PERSONNUMMER  
+                                      AND BS0421.DINDKAAR     =         
+                                                    BS042.DINDKAAR      
+                                      AND BS0421.EKOMNR  = BS042.EKOMNR 
+                                      AND BS0421.EEJDNR  = BS042.EEJDNR 
+                                    )                                   
+                                                                        
+                                                                        
+                                                                        
+            AND BS043.DINDKAAR    = :BE55600M.SLUTÅR                    
+            AND BS043.EKOMNR  = BS041.EKOMNR                            
+            AND BS043.EEJDNR  = BS041.EEJDNR                            
+            AND BS043.DTILGLD IN (SELECT MAX(BS0431.DTILGLD)            
+                                     FROM BS04300T BS0431               
+                                     WHERE BS0431.DINDKAAR     =        
+                                                    BS043.DINDKAAR      
+                                      AND BS0431.EKOMNR  = BS043.EKOMNR 
+                                      AND BS0431.EEJDNR  = BS043.EEJDNR 
+                                  )                                     
+         order by BS041.PERSONNUMMER                                    
+          ;                                                             
+                                                                        
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN DO;                                                       
+            FEJLTEKST = 'DECLARE HENT_GS_CUR';                          
+            CALL SQL_FEJL;                                              
+            END;                                                        
+                                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BE30500');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         DT = DATE;                                                     
+                                                                        
+                                                                        
+         CALL ZZ20390('*OPEN','BE30501Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+         CALL OPSTART_INIT;                        /*Parmkort*/         
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL OPEN_CURSER;                                              
+         CALL HENT_GS;                                                  
+       //  CALL HENT_REST_GS;                                           
+                                                                        
+         SELECT (HENT_SQLKODE);  /*GEMT SQLCODE FRA HENT_GS. */         
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+                                                                        
+               DO WHILE    (HENT_SQLKODE = 0);                          
+                  CALL BEHANDL_OG_SKRIV;                                
+                  /* HUSK COMMIT*/                                      
+                 IF ANT_COMM > 9999                                     
+                 THEN                                                   
+                   DO;                                                  
+                    EXEC SQL COMMIT;                                    
+                    PUT SKIP LIST ('Commit efter ' !! ANT_COMM !!       
+                    ' opdateringer på baggrundstabel ');                
+                   ANT_COMM = 0;                                        
+                   END;                                                 
+                  CALL HENT_GS;                                         
+                END;                                                    
+                                                                        
+             END;                                                       
+                                                                        
+           WHEN (100)                                                   
+               PUT SKIP LIST ('INGEN RÆKKER LÆST ');                    
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH GRUNDSKYLD ';                        
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         Call CLOSE_CURSER;                                             
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* BEHANDL OG SKRIV EVS OPLYSNINGER                           RUTINE */
+ /*********************************************************************/
+ BEHANDL_OG_SKRIV: PROC;                                                
+                                                                        
+    DCLBE64000T = '';                                                   
+                                                                        
+    DCLBE64000T.TIL_EVS_AAR          = BE55600M.TIL_EVS_AAR;            
+    DCLBE64000T.AFVIKLINGS_ID        = BE55600M.AFVIKLINGS_ID;          
+    DCLBE64000T.DATA_ID              = BE55600M.DATA_ID;                
+    DCLBE64000T.KØRSELS_ID           = 'GS1';                           
+    DCLBE64000T.DCPRN                = DCLBS04100T.PERSONNUMMER;        
+    DCLBE64000T.EKOMNR               = GEM_EKOMNR;                      
+    DCLBE64000T.EEJDNR               = GEM_EEJDNR;                      
+    DCLBE64000T.PROGRAMNAVN          = PGM_NAVN;                        
+    DCLBE64000T.DB2FUNKTION          = 'I';                             
+    DCLBE64000T.OPRET_TS             = CURRENT_TIME;                    
+    DCLBE64000T.GSRES_DFRAGLD        = DCLBS04200T.DFRAGLD;             
+    DCLBE64000T.GSRES_DTILGLD        = DCLBS04200T.DTILGLD;             
+    DCLBE64000T.CINDEFRYS_VALG       = DCLBS04100T.CINDEFRYS_VALG;      
+    DCLBE64000T.COPR_CINDEFRYS_VALG  = DCLBS04100T.COPR_CINDEFRYS_VALG; 
+    DCLBE64000T.DATO_CINDEFRYS_VALG  = DCLBS04100T.DATO_CINDEFRYS_VALG; 
+    DCLBE64000T.CPLÅN_TILSAGN        = DCLBS04100T.CPLÅN_TILSAGN;       
+    DCLBE64000T.COPR_CPLÅN_TILSAGN   = DCLBS04100T.COPR_CPLÅN_TILSAGN;  
+    DCLBE64000T.DATO_CPLÅN_TILSAGN   = DCLBS04100T.DATO_CPLÅN_TILSAGN;  
+                                                                        
+         CALL INSERT_BE64000T;                                          
+                                                                        
+ END BEHANDL_OG_SKRIV;                                                  
+ /*********************************************************************/
+ /* INSERT_BE64000T                                                   */
+ /*********************************************************************/
+ INSERT_BE64000T: PROC;                                                 
+                                                                        
+         EXEC SQL INSERT                                                
+         INTO BE64000T                                                  
+               (TIL_EVS_AAR                                             
+               ,AFVIKLINGS_ID                                           
+               ,DATA_ID                                                 
+               ,KØRSELS_ID                                              
+               ,DCPRN                                                   
+               ,EKOMNR                                                  
+               ,EEJDNR                                                  
+               ,PROGRAMNAVN                                             
+               ,DB2FUNKTION                                             
+               ,OPRET_TS                                                
+               ,GSRES_DFRAGLD                                           
+               ,GSRES_DTILGLD                                           
+               ,CINDEFRYS_VALG                                          
+               ,COPR_CINDEFRYS_VALG                                     
+               ,DATO_CINDEFRYS_VALG                                     
+               ,CPLÅN_TILSAGN                                           
+               ,COPR_CPLÅN_TILSAGN                                      
+               ,DATO_CPLÅN_TILSAGN)                                     
+         VALUES( :DCLBE64000T.TIL_EVS_AAR                               
+                ,:DCLBE64000T.AFVIKLINGS_ID                             
+                ,:DCLBE64000T.DATA_ID                                   
+                ,:DCLBE64000T.KØRSELS_ID                                
+                ,:DCLBE64000T.DCPRN                                     
+                ,:DCLBE64000T.EKOMNR                                    
+                ,:DCLBE64000T.EEJDNR                                    
+                ,:DCLBE64000T.PROGRAMNAVN                               
+                ,:DCLBE64000T.DB2FUNKTION                               
+                ,:DCLBE64000T.OPRET_TS                                  
+                ,:DCLBE64000T.GSRES_DFRAGLD                             
+                ,:DCLBE64000T.GSRES_DTILGLD                             
+                ,:DCLBE64000T.CINDEFRYS_VALG                            
+                ,:DCLBE64000T.COPR_CINDEFRYS_VALG                       
+                ,:DCLBE64000T.DATO_CINDEFRYS_VALG                       
+                ,:DCLBE64000T.CPLÅN_TILSAGN                             
+                ,:DCLBE64000T.COPR_CPLÅN_TILSAGN                        
+                ,:DCLBE64000T.DATO_CPLÅN_TILSAGN);                      
+                                                                        
+          SELECT (SQLCA.SQLCODE);                                       
+                                                                        
+            WHEN (0)                                                    
+              DO;                                                       
+                ANTSKRIV_BE640  = ANTSKRIV_BE640 + 1;                   
+                ANT_COMM        = ANT_COMM + 1;                         
+              END;                                                      
+                                                                        
+            WHEN (-803)                                                 
+              DO;                                                       
+                ANT_DUB  = ANT_DUB + 1;                                 
+              END;                                                      
+                                                                        
+            OTHERWISE                                                   
+             DO;                                                        
+               FEJLTEKST = 'INSERT BE64000T';                           
+               CALL SQL_FEJL;                                           
+             END;                                                       
+           END;                                                         
+                                                                        
+ END INSERT_BE64000T;                                                   
+ /*********************************************************************/
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS                                               */
+ /*********************************************************************/
+ OPEN_CURSER: PROC;                                                     
+                                                                        
+         EXEC SQL OPEN HENT_GS_CUR;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN BS041 CUR';                             
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+                                                                        
+ END OPEN_CURSER;                                                       
+ /*********************************************************************/
+ /*********************************************************************/
+ /* CLOSE CURSOR */                                                     
+ /*********************************************************************/
+ CLOSE_CURSER: PROC;                                                    
+                                                                        
+         EXEC SQL CLOSE HENT_GS_CUR;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE HENT GS CUR';                          
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_CURSER;                                                      
+ /*********************************************************************/
+ /*      HENT GRUNDSKYLD                                              */
+ /*********************************************************************/
+ HENT_GS: PROC;                                                         
+                                                                        
+        GEM_EKOMNR     = '';                                            
+        GEM_EEJDNR     = '';                                            
+        GEM_DCPRN      = '';                                            
+                                                                        
+        DCLBS04100T      = '';                                          
+                                                                        
+        EXEC SQL FETCH HENT_GS_CUR                                      
+         INTO :DCLBS04100T.PERSONNUMMER                                 
+                   ,:DCLBS04100T.EKOMNR                                 
+                   ,:DCLBS04100T.EEJDNR                                 
+                   ,:DCLBS04100T.CINDEFRYS_VALG                         
+                   ,:DCLBS04100T.COPR_CINDEFRYS_VALG                    
+                   ,:DCLBS04100T.DATO_CINDEFRYS_VALG                    
+                   ,:DCLBS04100T.CPLÅN_TILSAGN                          
+                   ,:DCLBS04100T.COPR_CPLÅN_TILSAGN                     
+                   ,:DCLBS04100T.DATO_CPLÅN_TILSAGN                     
+                   ,:DCLBS04400T.DFRAGLD                                
+                   ,:DCLBS04400T.DTILGLD                                
+                   ,:DCLBS04400T.AKTSAMLIGNAAR                          
+                   ,:DCLBS04200T.DFRAGLD                                
+                   ,:DCLBS04200T.DTILGLD                                
+                   ,:DCLBS04300T.DFRAGLD                                
+         ;                                                              
+                                                                        
+         HENT_SQLKODE = SQLCA.SQLCODE;  /* GEMMES TIL SENERE BRUG */    
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0) DO;                                                 
+              ANTLÆS_GS = ANTLÆS_GS + 1;                                
+              GEM_EKOMNR   = DCLBS04100T.EKOMNR;                        
+              GEM_EEJDNR   = DCLBS04100T.EEJDNR;                        
+              GEM_DCPRN    = DCLBS04100T.PERSONNUMMER;                  
+             END;                                                       
+                                                                        
+           WHEN (100);                                                  
+                                                                        
+           OTHERWISE DO;                                                
+              FEJLTEKST = 'HENT GS';                                    
+              CALL SQL_FEJL;                                            
+              END;                                                      
+         END; /* SELECT*/                                               
+                                                                        
+                                                                        
+ END HENT_GS;                                                           
+                                                                        
+ /*********************************************************************/
+ /*      OPSTART                                                      */
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+                                                                        
+                                                                        
+    EXEC SQL SET                                                        
+      :CURRENT_TIME = CURRENT TIMESTAMP;                                
+                                                                        
+     IF SQLCA.SQLCODE ^= 0 THEN                                         
+     DO;                                                                
+        FEJLTEKST = 'SET TIMESTAMP';                                    
+        CALL SQL_FEJL;                                                  
+     END;                                                               
+                                                                        
+                                                                        
+  END OPSTART_INIT;                                                     
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = PGM_NAVN !!'** 250 ' !! FEJLTEKST !! SQLKODE;      
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+                                                                        
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' DANNELSE AF GS BAGGRUNDSTABEL   '           
+         /*#01*/       !! BE55600M.TIL_EVS_AAR                          
+                       !! ' DATO: '                                     
+                       !! DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;    
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID:' !! PGM_NAVN;                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA GRUNDSKYLD . . . . . . .';        
+         LIN.ANT   = ANTLÆS_GS;                                         
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+                                                                        
+                                                                        
+         LIN.TEKST = 'ANTAL DUB. KEY            . . . . . . . .';       
+         LIN.ANT   = ANT_DUB;                                           
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVET PÅ BAGGRUNDSTABEL  . . . .';        
+         LIN.ANT   = ANTSKRIV_BE640;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+          /* Med her for at optællinger skal passe */                   
+         IF ANT_COMM > 0                                                
+         THEN                                                           
+           DO;                                                          
+            EXEC SQL COMMIT;                                            
+            PUT SKIP LIST ('Commit efter ' !! ANT_COMM !!               
+                 ' opdateringer på baggrundstabel');                    
+            ANT_COMM = 0;                                               
+          END;                                                          
+                                                                        
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END BE30500;                                                           

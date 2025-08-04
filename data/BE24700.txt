@@ -1,0 +1,1915 @@
+ BE24700:    /* OPDATER EVS SLUT MED ÅRSOPGØRELSES DATA FRA DXC  */     
+ PROC OPTIONS (MAIN) REORDER;                                           
+ /*********************************************************************/
+ /* FUNKTION:                                                         */
+ /* LÆSER EVS OPDATERING TIL ÅRSOPGØRELSEN 2019 FRA DXC PÅ BE91000T   */
+ /* OPDATERE KMD EVS SLUT TABELLER                                    */
+ /* INDFØRT SLUT 2019 VED OMLÆGGELSE FRA MQ TRANSAKTION TIL SFTP      */
+ /*                                                                   */
+ /* PROGRAMMET SKAL CIRKA GØRE DET SAMME SOM DISSE CICS PROGRAMMER    */
+ /* GØR I EVS SLUT (2018)                                             */
+ /*                                                                   */
+ /* De kaldes via BE99800  - >  BE99000                               */
+ /*                                                                   */
+ /* BE18000 - styring + regler                                        */
+ /* BE18010 - læs/skriv                                               */
+ /* BE18020 - format kontrol - udgår                                  */
+ /* BE18025 - validering                                              */
+ /* BE18040 - beregning                                               */
+ /* BE18060 - Dan MQ svar - udgår                                     */
+ /* BE18080 - Log fejl på BE00400T (eventuelt advis)                  */
+ /*                                                                   */
+ /* Overførselsprogrammet finder det mindste kørselsnr.               */
+ /* for indkomståret i kørselstabellen, hvor overførslen              */
+ /* ikke udført.                                                      */
+ /* Bliver der ikke fundet et kørselsnr. afbrydes                     */
+ /* overførselsprogrammet                                             */
+ /* Data overføres til EVS SLUT for det fundne kørselsnr.             */
+ /* Kørselsnr. opdateres i kørselstabellen til at                     */
+ /* overførselsprogrammet er gennemført                               */
+ /*  EXTERNE REF.    ZS30101   ABENDRUTINE                            */
+ /*                  ZS61900   LOGNING AF KST-DATO PÅ LOAD            */
+ /*                                                                   */
+ /*********************************************************************/
+ /*      RETTET AF   : LTJ                               Nov-2023     */
+ /*                    Tilrettet EVS ny lov modtag individ 132        */
+ /*                    Ny udgave af programmet kopieret fra BQ22700   */
+ /*                    til BE24700.                                   */
+ /*      RETTET AF   : PEN                               Apr-2024     */
+ /*                    BTAKS, BTAKSRABAT og BTAKSEFTERRABAT sættes    */
+ /*                    nu ud fra leverance 132 felter.                */
+ /*      RETTET AF   : LTJ                               Jul-2024     */
+ /*                    Defect 2605 Manglende opdatering af ejenddoms- */
+ /*                    felter                                         */
+ /*      RETTET AF   : LTJ September 2024                             */
+ /*                    US1863155 BF17 ÆA70 Ændringer til individ 132  */
+ /*                    RES_EVSEFTERRABAT skal nu sættes til det nye   */
+ /*                    felt EJVSKAEFTRABBLB i stedet for EJVSKABLB    */
+ /*                    som udgår. Desuden er 7 felter fjernet fra     */
+ /*                    BE90100T og 6 felter er kommet til.            */
+ /*                                                                   */
+ /*      RETTET AF   : ONE                               okt-2024     */
+ /*      VEDRØRENDE  : D2416  lempelsesopsætning for franske ejendomme*/
+ /*********************************************************************/
+  DCL SYSPRINT EXTERNAL FILE PRINT;                                     
+ /*********************************************************************/
+ /*      DECLARES AF BUILTIN-FUNKTIONER                               */
+ /*********************************************************************/
+   DCL (ADDR,                                                           
+        CSTG,                                                           
+        NULL,                                                           
+        STG,                                                            
+        INDEX,                                                          
+        SUBSTR,                                                         
+        LBOUND,                                                         
+        HBOUND,                                                         
+        VERIFY,                                                         
+        DIVIDE,                                                         
+        LENGTH,                                                         
+        MOD,                                                            
+        PLIRETC,                                                        
+        PLIDUMP,                                                        
+        LOW,                                                            
+        TIMESTAMP)           BUILTIN;                                   
+                                                                        
+ /*********************************************************************/
+ /*      DB2 TABELSTRUKTURER                                          */
+ /*********************************************************************/
+   EXEC SQL INCLUDE SQLCA;                                              
+   EXEC SQL INCLUDE BE90000T; /*Driftsstyringstabel         */          
+   EXEC SQL INCLUDE BE90100T; /*Indlæsningstabel            */          
+   EXEC SQL INCLUDE BE90300T; /*Sporingstabel               */          
+                                                                        
+   EXEC SQL INCLUDE BE20000T; /* EVS SLUT EJENDOMSTABEL     */          
+   EXEC SQL INCLUDE BE30000T; /* EVS SLUT EJERSKABSTABEL    */          
+   EXEC SQL INCLUDE BE40000T; /* EVS RESULTATTABEL          */          
+                                                                        
+   DCL 1 BE901_SW,                                                      
+       %INCLUDE BE90105N; /* Switches til BE90100T */                   
+                                                                        
+   DCL  1 KOM_AREAL ALIGNED,                                  /*ÅR-RET*/
+        %INCLUDE BE24010N;                               /*¤SLUT19*/    
+                                                                        
+   DCL  1 BE_IND ALIGNED,                                     /*ÅR-RET*/
+        %INCLUDE BE24011N;;  /* PERSON+EJD OPLYSNINGER *//*¤SLUT19*/    
+                                                                        
+   DCL  1 BE_UD ALIGNED,                                      /*ÅR-RET*/
+        %INCLUDE BE24011N;;  /* PERSON+EJD OPLYSNINGER *//*¤SLUT19*/    
+                                                                        
+   DCL  1 KONTROL ALIGNED,                                    /*ÅR-RET*/
+        %INCLUDE BE24011N;;  /* PERSON+EJD OPLYSNINGER *//*¤SLUT19*/    
+                                                                        
+   DCL 1 STYR_FELTER,                                                   
+     5 DCPRN          DEC FIXED (11), /* PERSONNUMMER                */ 
+     5 DINDKAAR       BIN FIXED (15), /* INDKOMSTÅR                  */ 
+     5 EKOMNR         BIN FIXED (15), /* KOMMUNENUMMER               */ 
+     5 EEJDNR         BIN FIXED (31), /* EJENDOMSNUMMER              */ 
+     5 EENHEDLBNR     BIN FIXED (15), /* ENHEDSLØBENUMMER 2FAM       */ 
+     5 ELBNR          BIN FIXED (15), /* LØBENUMMER                  */ 
+     5 EGENNR         BIN FIXED (15), /* GENERATIONSNUMMER           */ 
+     5 TYPE           BIN FIXED (15), /* TYPE OPSLAG/OPDATERING      */ 
+     5 STATUS         BIN FIXED (15), /* STATUS                      */ 
+     5 RETURKODE      BIN FIXED (15), /* RETURKODE                   */ 
+     5 RETURTEKST     CHAR      (40), /* RETURTEKST                  */ 
+     5 FEJLNR         PIC     '9999', /* FEJLNR                      */ 
+     5 FEJLTEKST      CHAR      (40); /* FEJLTEKST                   */ 
+                                                                        
+  DCL     1 RESULTATTAB,                 /* SAMLET RESULTATTABELSTRUK */
+           %INCLUDE BE24300N;;                                /*ÅR-RET*/
+                                                                        
+  DCL     INDK_MAX            BIN FIXED (15);                           
+  DCL     1 INDK_EVS_RES,               /* INDIKATOR RESULTAT OPLYSN. */
+           %INCLUDE BE24017N;;                                /*ÅR-RET*/
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES                                                     */
+ /*********************************************************************/
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     BE24110         ENTRY;                 /*ÅR-RET*/   /*¤SLUT19*/
+                                                                        
+ /*********************************************************************/
+ /*      ENTRY-DECLARE DATORUTINE & FORMAT DDMMÅRHU                   */
+ /*********************************************************************/
+ %INCLUDE ZS38000N;                                                     
+ %INCLUDE ZS38002N;                                                     
+ DCL     HELP_DATOC           CHAR      (8),                            
+         HELP_DATOP           PIC       '(8)9'  DEF HELP_DATOC,         
+         1 HELP_DTX           DEF       HELP_DATOC,                     
+          2 ÅRX               PIC       '9999',                         
+          2 MDX               PIC       '99',                           
+          2 DGX               PIC       '99';                           
+ DCL     DATO                      PIC       '(8)9',                    
+         1 DATO_DEF                DEF       DATO,                      
+          2 DG1                    PIC       '99',                      
+          2 MD1                    PIC       '99',                      
+          2 ÅR1                    PIC       '9999';                    
+ DCL     TID             CHAR      (9);                                 
+ DCL     1 TID1          BASED(ADDR(TID)),                              
+           2 TIM          CHAR      (2),                                
+           2 MIN          CHAR      (2),                                
+           2 SEK          CHAR      (2);                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARES AF STRUKTURER  INPUT                                */
+ /*********************************************************************/
+ /********************************************************************/ 
+ /* Input - PARM -                                                   */ 
+ /********************************************************************/ 
+ DCL PARM              FILE RECORD INPUT;                               
+ DCL 1 PARM_REC,                                                        
+       3 PARM_FUNKTION  CHAR(08),                                       
+       3 PARM_FILLER    CHAR(72);                                       
+                                                                        
+ /*********************************************************************/
+ /*********************************************************************/
+ /*      DIVERSE DECLARES                                             */
+ /*********************************************************************/
+                                                                        
+   DCL FEJL              BIT(1) INIT('1'B);                             
+   DCL OK                BIT(1) INIT('0'B);                             
+   DCL JA                BIT(1) INIT('1'B);                             
+   DCL NEJ               BIT(1) INIT('0'B);                             
+   DCL AFBRYD            BIT(1) INIT('0'B);                             
+   DCL GYLDIG_OPDATERING BIT(1) INIT('0'B);                             
+   DCL OPDATERING_FUNDET BIT(1) INIT('0'B);                             
+                                                                        
+   DCL PROGRAM_1     CHAR (08) INIT ('BE24400L');             /*ÅR-RET*/
+   DCL PROGRAM_2     CHAR (08) INIT ('BE24700L');             /*ÅR-RET*/
+                                                                        
+   DCL HJ_PNR       PIC '(10)9'      INIT(0);                           
+   DCL WK_INDKAAR   BIN FIXED (15)   INIT(2024);   /*ÅR-RET*//*¤SLUT19*/
+   DCL WK_KOERNR    BIN FIXED (15)   INIT(0);                           
+                                                                        
+   DCL TIDSSTAMP    CHAR(26);                                           
+                                                                        
+   DCL ANTAL_FETCH_OPDAT BIN FIXED(31) INIT(0);                         
+   DCL ANTAL_LÆS_EVS     BIN FIXED(31) INIT(0);                         
+   DCL ANTAL_SKRIV_EVS   BIN FIXED(31) INIT(0);                         
+                                                                        
+   DCL MAX_TIMESTAMP   CHAR(26) INIT ('9999-12-31-23.59.59.999999');    
+                                                                        
+   DCL ANT_COMM          BIN FIXED(31) INIT(0);                         
+   DCL MYNDNR_PIC        PIC '(4)9'  INIT(0);                           
+                                                                        
+ /*********************************************************************/
+ /****** PRINTLINIER TIL INTERN FEJL- OG KONTROLLISTE               */  
+ /*********************************************************************/
+   % INCLUDE ZZ20301M;     /* STANDARD KONTROLKARAKTERER */             
+                                                                        
+   DCL 1  LINIE,                                                        
+          5  CCHAR      CHAR      (1),                                  
+          5  TEXT       CHAR      (132);                                
+                                                                        
+ /*********************************************************************/
+ /*      HOUSEKEEPING                                                 */
+ /*********************************************************************/
+         ON ERROR                                                       
+         BEGIN;                                                         
+             ON ERROR SYSTEM;                                           
+             PUT SKIP LIST ('PROGRAMFEJL');                             
+             CALL PLIDUMP  ('SBKO','MODUL BE24700');          /*ÅR-RET*/
+         END;                                                           
+                                                                        
+         CALL ZS61900;/* SKRIV SSI-DATO */                              
+                                                                        
+         ZS380PARM.RETURKODE  = 0;                                      
+         ZS380PARM.FUNKTION   = 'DAGSDATO';                             
+         ZS380PARM.VALIDERING = 'N';                                    
+         CALL ZS38000(ZS380PARM.FUNKTION,                               
+                      ZS380PARM.VALIDERING,                             
+                      ZS380PARM.PARM,                                   
+                      ZS380PARM.RETURKODE);                             
+                                                                        
+         HELP_DATOC   = ZS380PARM3.DATO1;                               
+         DATO_DEF.DG1 = HELP_DTX.DGX;                                   
+         DATO_DEF.MD1 = HELP_DTX.MDX;                                   
+         DATO_DEF.ÅR1 = HELP_DTX.ÅRX;                                   
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE24789Y'); /* KONTROLLISTE *//*ÅR-RET*/
+                                                                        
+         PARM_REC = '';                                                 
+         PARM_FUNKTION = '*';                                           
+                                                                        
+         ON UNDEFINEDFILE(PARM) BEGIN;                                  
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+         OPEN FILE(PARM) TITLE('PARM');                                 
+                                                                        
+         ON ENDFILE(PARM) BEGIN;                                        
+           GO TO HOUSEKEEPING_SLUT;                                     
+         END;                                                           
+                                                                        
+        READ FILE(PARM) INTO(PARM_REC);                                 
+                                                                        
+        HOUSEKEEPING_SLUT:                                              
+                                                                        
+        TIDSSTAMP = TIMESTAMP;                                          
+                                                                        
+ /*********************************************************************/
+ /*      HOVEDSTYRING                                                 */
+ /*********************************************************************/
+         CALL FIND_KØRSELSNR;                                           
+         IF WK_KOERNR > 0                                               
+         THEN                                                           
+           DO;                                                          
+             CALL OPEN_OPDAT_CUR;                                       
+             CALL FETCH_OPDAT_CUR;                                      
+             DO WHILE (OPDATERING_FUNDET);                              
+               CALL VALIDERING;             /* pt ingen indhold */      
+               IF GYLDIG_OPDATERING                                     
+               THEN                                                     
+                 DO;                                                    
+                   CALL UDFYLD_STYR_FELTER;                             
+                   CALL HENT_FRA_EVS_SLUT_TABELLER;                     
+                   CALL FLYT_OPDATE_TIL_KMD_FELTER;                     
+                   CALL BEHANDLING;                                     
+                 END;                                                   
+               CALL FETCH_OPDAT_CUR;                                    
+             END; /* DO WHILE*/                                         
+             CALL CLOSE_OPDAT_CUR;                                      
+             CALL OPDATER_OVERFØR_STATUS;                               
+             CALL SKRIV_TOTALER;                                        
+           END;                                                         
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* -   Overførselsprogrammet finder det mindste kørselsnr.           */
+ /*    (for indkomståret) i kørselstabellen,                          */
+ /*     hvor overførslen ikke udført.                                 */
+ /*                                                                   */
+ /*********************************************************************/
+ FIND_KØRSELSNR: PROC;                                                  
+                                                                        
+     DCLBE90000T = '';                                                  
+                                                                        
+     EXEC SQL SELECT KOERNR,INDLÆS_STATUS                               
+         INTO :DCLBE90000T.KOERNR,                                      
+              :DCLBE90000T.INDLÆS_STATUS                                
+         FROM BE90000T                                                  
+         WHERE INDKAAR         = :WK_INDKAAR                            
+           AND INDIVIDNR       = 132                                    
+           AND INDLÆS_NAVN     = :PROGRAM_1                             
+           AND OVERFØR_NAVN    = :PROGRAM_2                             
+           AND OVERFØR_STATUS  = 0                                      
+           AND (INDLÆS_STATUS   = 1                                     
+               OR INDLÆS_STATUS   = 2)                                  
+         ORDER BY KOERNR                                                
+     FETCH FIRST ROW ONLY;                                              
+                                                                        
+     SELECT (SQLCODE);                                                  
+       WHEN (0)                                                         
+         DO;                                                            
+           PUT SKIP LIST('NYE OPDATERING FUNDET');                      
+           PUT SKIP LIST('KØRSELSNUMMER :',DCLBE90000T.KOERNR);         
+           PUT SKIP LIST('INDLÆS_STATUS = 1 almindelig, = 2 Genskriv'); 
+           PUT SKIP LIST('INDLÆS_STATUS :',DCLBE90000T.INDLÆS_STATUS);  
+           WK_KOERNR = DCLBE90000T.KOERNR;                              
+         END;                                                           
+       WHEN (100)                                                       
+         DO;                                                            
+           PUT SKIP LIST('INGEN NYE OPDATERING FUNDET');                
+           WK_KOERNR = 0;                                               
+         END;                                                           
+       OTHER                                                            
+         DO;                                                            
+           ABENDTXT='260 SELECT I FIND_KØRSELSNR BE90000T SQLCODE: '    
+                     !! SQLCODE;                                        
+           CALL sql_fejl;                                               
+         END;                                                           
+     END;                                                               
+                                                                        
+ END FIND_KØRSELSNR;                                                    
+ /*********************************************************************/
+ /* BE_IND.EJENDOM. VÆRDIER TIL KMD STRUKTUR                          */
+ /* BE_IND.PERSON.                                                    */
+ /* Hvis der ikke flyttes værdi til felterne så bevares værdi fra     */
+ /* Sluttabellerne                                                    */
+ /*********************************************************************/
+ FLYT_OPDATE_TIL_KMD_FELTER: PROC;                                      
+                                                                        
+     BE_IND.EJENDOM.DINDKAAR           = DCLBE90100T.INDKAAR;           
+     BE_IND.EJENDOM.EKOMNR             = STYR_FELTER.EKOMNR;            
+     BE_IND.EJENDOM.EEJDNR             = STYR_FELTER.EEJDNR;            
+     BE_IND.EJENDOM.EENHEDLBNR         = DCLBE90100T.EJV2FAMILNR;       
+     BE_IND.EJENDOM.DFRAGLD            = ''; /* OPSÆTTES I DATAMODUL ?*/
+                                                                        
+     BE_IND.EJENDOM.CBENYT             = DCLBE90100T.BNYTEKOD;          
+   /*BE_IND.EJENDOM.CBERGRL            = DCLBE90100T./* ??  */          
+   /*BE_IND.EJENDOM.CEJBOLTYP1         = DCLBE90100T. /*??  */          
+   /*BE_IND.EJENDOM.CEJBOLTYP2         = DCLBE90100T. /*??  */          
+     BE_IND.EJENDOM.CEJDTYPE           = DCLBE90100T.EJVSKATTYPEKOD;    
+   /*BE_IND.EJENDOM.CEJV               = /* ?? */                       
+     BE_IND.EJENDOM.EJDBELIG           = DCLBE90100T.EJDBLIGEADR;       
+   /*BE_IND.EJENDOM.FEJLNR             = / *?? */                       
+     BE_IND.EJENDOM.FELT760            = DCLBE90100T.EJVFREDEKOD;       
+     BE_IND.EJENDOM.FLEJL              = DCLBE90100T.LJLIHANT; /**/     
+                                                                        
+   /*BE_IND.EJENDOM.BEJDVÆR            = /* ?? */                       
+   /*BE_IND.EJENDOM.CEJERL             = /* ?? */                       
+   /*BE_IND.EJENDOM.CFORSKEL           = /* ?? */                       
+     BE_IND.EJENDOM.BBER2FAM_AKT       = DCLBE90100T.EJV2FAMILAARBLB;   
+     BE_IND.INDK_EJD.BBER2FAM_AKT_I    = EJV2FAMILAARBLB_SW;            
+     BE_IND.EJENDOM.BBERGRL_AKT        = DCLBE90100T.EJVSKABGAARBLB;    
+     BE_IND.INDK_EJD.BBERGRL_AKT_I     = EJVSKABGAARBLB_SW;             
+     BE_IND.EJENDOM.BEJBOL1_AKT        = DCLBE90100T.AARAND12FAMILBLB;  
+     BE_IND.INDK_EJD.BEJBOL1_AKT_I     = AARAND12FAMILBLB_SW;           
+     BE_IND.EJENDOM.BEJBOL2_AKT        = DCLBE90100T.AARAND22FAMILBLB;  
+     BE_IND.INDK_EJD.BEJBOL2_AKT_I     = AARAND22FAMILBLB_SW;           
+   /*BE_IND.EJENDOM.BEJDVÆR_AKT        =                                
+     BE_IND.EJENDOM.CBENYT_AKT         =                                
+     BE_IND.EJENDOM.CBERGRL_AKT        =                                
+     BE_IND.EJENDOM.CEJBOLTYP1_AKT     =                                
+     BE_IND.EJENDOM.CEJBOLTYP2_AKT     =  */                            
+     BE_IND.EJENDOM.CEJDBELIG          = DCLBE90100T.EJDBLIGEADRDTAKOD; 
+   /*BE_IND.EJENDOM.CEJDTYPE_AKT       =                                
+     BE_IND.EJENDOM.CEJERL_GL          =                                
+     BE_IND.EJENDOM.CVURDOPR           =                                
+     BE_IND.EJENDOM.FLEJL_AKT          =                                
+     BE_IND.EJENDOM.CEJERL_AKT         = */                             
+                                                                        
+     BE_IND.EJENDOM.COMBYG             = DCLBE90100T.EJDOMBYGKOD;       
+     BE_IND.EJENDOM.CLANDEKODE         = DCLBE90100T.LANDKOD;           
+     BE_IND.EJENDOM.CDLANDEKODE        = DCLBE90100T.LANDDTAKOD;        
+     /* CHECK formater */                                               
+     IF BE_IND.EJENDOM.EENHEDLBNR = 0                                   
+     THEN                                                               
+       DO;                                                              
+         BE_IND.EJENDOM.VEJK_EJD      = DCLBE90100T.VEJKOD;             
+         BE_IND.EJENDOM.HUSNR_EJD     = DCLBE90100T.HUSNR  !!           
+                                        DCLBE90100T.HUSBOSTAADR;        
+         BE_IND.EJENDOM.ETAGE_EJD     = DCLBE90100T.ETAGENR;            
+         BE_IND.EJENDOM.SDØR_EJD      = DCLBE90100T.SIDEDOERNR;         
+       END;                                                             
+     ELSE                                                               
+       DO;                                                              
+         BE_IND.EJENDOM.VEJK_ENHED    = DCLBE90100T.VEJKOD;             
+         BE_IND.EJENDOM.HUSNR_ENHED   = DCLBE90100T.HUSNR  !!           
+                                        DCLBE90100T.HUSBOSTAADR;        
+         BE_IND.EJENDOM.ETAGE_ENHED   = DCLBE90100T.ETAGENR;            
+         BE_IND.EJENDOM.SDØR_ENHED    = DCLBE90100T.SIDEDOERNR;         
+         BE_IND.EJENDOM.ENHEDBELIG    = DCLBE90100T.EJDBLIGEADR;        
+       END;                                                             
+                                                                        
+       BE_IND.EJENDOM.DVURDÅR            = DCLBE90100T.VURDEAAR;        
+       BE_IND.EJENDOM.VURMARK_AKT        = DCLBE90100T.VURMARKOD;       
+     //BE_IND.EJENDOM.VURMARK                                           
+       BE_IND.EJENDOM.JUR_KATEGO_AKT    = DCLBE90100T.JURKATID;         
+     //BE_IND.EJENDOM.JUR_KATEGO                                        
+       BE_IND.EJENDOM.JUR_UKATEGO_AKT   = DCLBE90100T.JURUNDKATID;      
+     //BE_IND.EJENDOM.JUR_UKATEGO                                       
+       BE_IND.EJENDOM.VURDATO_AKT        =                              
+                        DB2_DATO_TIL_FIX09(DCLBE90100T.VURTERMDTO);     
+     //BE_IND.EJENDOM.VURDATO                                           
+       BE_IND.EJENDOM.FORSIGT_EVS_AKT   = TJEK(DCLBE90100T.FSIGTVURKOD);
+     //BE_IND.EJENDOM.FORSIGT_EVS                                       
+       BE_IND.EJENDOM.BESKAT_EVS_AKT    = TJEK(DCLBE90100T.EJVBSKATKOD);
+     //BE_IND.EJENDOM.BESKAT_EVS                                        
+     /***/                                                              
+                                                                        
+ /*3 PERSON,                                                            
+     %INCLUDE BE24200N;, */                                             
+                                                                        
+     BE_IND.PERSON.DCPRN            = DCLBE90100T.PNR;                  
+     BE_IND.PERSON.DINDKAAR         = DCLBE90100T.INDKAAR;              
+     BE_IND.PERSON.EKOMNR           = STYR_FELTER.EKOMNR;               
+     BE_IND.PERSON.EEJDNR           = STYR_FELTER.EEJDNR;               
+     BE_IND.PERSON.EENHEDLBNR       = DCLBE90100T.EJV2FAMILNR;          
+     BE_IND.PERSON.ELBNR            = DCLBE90100T.EJVLBNR;              
+ /*  Regl for opsættelse af EGENNR sættes senere */                     
+ /*  BE_IND.PERSON.EGENNR           =   */                              
+     BE_IND.PERSON.CDATAFRA         = DCLBE90100T.SYSTEMKILDEKOD;       
+     BE_IND.PERSON.DFRAGLD          = ''; /* OPSÆTTES I DATAMODUL */    
+     BE_IND.PERSON.DTILGLD          = MAX_TIMESTAMP;                    
+     BE_IND.PERSON.CSCREGISTMP      = DCLBE90100T.CSCREGISTMP;          
+     /* #02 */                                                          
+     BE_IND.PERSON.PERSKOD          = '';                               
+                                                                        
+     MYNDNR_PIC                     = DCLBE90100T.MYNDNR1;              
+     BE_IND.PERSON.MYNDNR           = MYNDNR_PIC;                       
+                                                                        
+   /* Disse to omplacerings felter skal ikke opdateres */               
+   /* i dette program deres værdi bevares fra tabel    */               
+   /*BE_IND.PERSON.COMPLA           = '';              */               
+   /*BE_IND.PERSON.DOMPLACPR        = '';              */               
+     BE_IND.PERSON.CAJOUR           = '4';                              
+     BE_IND.PERSON.CSUPPL           = '4';                              
+     BE_IND.PERSON.FEJLNR           = DCLBE90100T.FEJLNR1;              
+   /*BE_IND.PERSON.DBRGN_MODT       = opsættes tilsidst*/               
+     BE_IND.PERSON.BEJBOL1          = DCLBE90100T.AARAND12FAMILBLB;     
+     BE_IND.INDK_PERS.BEJBOL1_I     = AARAND12FAMILBLB_SW;              
+     BE_IND.PERSON.BEJBOL2          = DCLBE90100T.AARAND22FAMILBLB;     
+     BE_IND.INDK_PERS.BEJBOL2_I     = AARAND22FAMILBLB_SW;              
+  /* BE_IND.PERSON.BEJBOLANV        = beregn */                         
+  /* BE_IND.PERSON.BERHVAN          = felt ?? */                        
+     BE_IND.PERSON.BEVSMAN          = DCLBE90100T.EJVSKAMANUEBLB;       
+     BE_IND.INDK_PERS.BEVSMAN_I     = EJVSKAMANUEBLB_SW;                
+  /* BE_IND.PERSON.BFORSKAT         = beregn ?? */                      
+  /* BE_IND.PERSON.BFSKAT           = fra hvor ?? */                    
+     BE_IND.PERSON.BGRPROM1         = DCLBE90100T.UNDERPROREBGBLB;      
+     BE_IND.INDK_PERS.BGRPROM1_I    = UNDERPROREBGBLB_SW;               
+     BE_IND.PERSON.BGRPROM2         = DCLBE90100T.OVPROREBGBLB;         
+     BE_IND.INDK_PERS.BGRPROM2_I    = OVPROREBGBLB_SW;                  
+     BE_IND.PERSON.BMANNEDSL        = DCLBE90100T.EJVUDLEJNSLBLB;       
+     BE_IND.INDK_PERS.BMANNEDSL_I   = EJVUDLEJNSLBLB_SW;                
+     BE_IND.PERSON.BNEDSL1          = DCLBE90100T.EJVSKAGENNSLBLB;      
+     BE_IND.INDK_PERS.BNEDSL1_I     = EJVSKAGENNSLBLB_SW;               
+     BE_IND.PERSON.BNEDSL2          = DCLBE90100T.EJVSKASTANSLBLB;      
+     BE_IND.INDK_PERS.BNEDSL2_I     = EJVSKASTANSLBLB_SW;               
+     /* #1 */                                                           
+     BE_IND.PERSON.BNETTO           = DCLBE90100T.EJVSKAFOERDUPENBLB;   
+     BE_IND.INDK_PERS.BNETTO_I      = EJVSKAFOERDUPENBLB_SW;            
+     BE_IND.PERSON.BOBEHAKOD        = DCLBE90100T.BOBHAKOD;             
+     BE_IND.PERSON.BPENSNED         = DCLBE90100T.EJVSKAPENSNSLBLB;     
+     BE_IND.INDK_PERS.BPENSNED_I    = EJVSKAPENSNSLBLB_SW;              
+  /* BE_IND.PERSON.BPENSNÆ          = beregn ??  + regl til felt*/      
+  /* BE_IND.PERSON.BPRIVAN          = ?? */                             
+     BE_IND.PERSON.BPROM1           = DCLBE90100T.EJVBGUNDERPROREBLB;   
+     BE_IND.INDK_PERS.BPROM1_I      = EJVBGUNDERPROREBLB_SW;            
+     BE_IND.PERSON.BPROM2           = DCLBE90100T.EJVBGOVPROREBLB;      
+     BE_IND.INDK_PERS.BPROM2_I      = EJVBGOVPROREBLB_SW;               
+     /* #01 */                                                          
+     BE_IND.PERSON.BSUM1            = DCLBE90100T.EJVSKAEFTNSLBLB;      
+     BE_IND.INDK_PERS.BSUM1_I       = EJVSKAEFTNSLBLB_SW;               
+     /* #01 */                                                          
+     IF EJVSKAEFTNSLBLB_SW = 0 ! EJVSKAPENSNSLBLB_SW = 0                
+     THEN                                                               
+       DO;                                                              
+         BE_IND.PERSON.BSUM2        = DCLBE90100T.EJVSKAEFTNSLBLB +     
+                                      DCLBE90100T.EJVSKAPENSNSLBLB;     
+         BE_IND.INDK_PERS.BSUM2_I   = 0;                                
+       END;                                                             
+                                                                        
+     BE_IND.PERSON.BUDLSKC          = DCLBE90100T.EJVUDLSKATBLB;        
+     BE_IND.INDK_PERS.BUDLSKC_I     = EJVUDLSKATBLB_SW;                 
+  /* BE_IND.PERSON.CANVEBOL         = beregn afledt felt */             
+    /*CHECK SWITCH ? */                                                 
+                                                                        
+  /* #02 */                                                             
+     BE_IND.PERSON.CBERGROP         = DCLBE90100T.EJVSKABGKOD;          
+     BE_IND.PERSON.CEJBEVS          = DCLBE90100T.EJVBERKOD;            
+     BE_IND.PERSON.CEKSEMP          = DCLBE90100T.EJVUDLXNSLKOD;        
+                                                                        
+     BE_IND.PERSON.CENKE            = DCLBE90100T.EJVARVPENSKOD;        
+   /* BE_IND.PERSON.CENKEBOH         = felt fra ??? */                  
+     BE_IND.PERSON.CERHV            = DCLBE90100T.EJVERHANDDAGDTAKOD;   
+     BE_IND.PERSON.CFORSKAT         = DCLBE90100T.EJVSKAFSKKOD;         
+     BE_IND.PERSON.CFRÅR            = DCLBE90100T.FSKUDRESKAMDKOD;      
+   /* Er det rigtigt felt */                                            
+     BE_IND.PERSON.CINDFLYT         = DCLBE90100T.EJVEJINDFLYTKOD;      
+   /*BE_IND.PERSON.CIVILSTAND       = Fra opret ? */                    
+   /*BE_IND.PERSON.CKØBSALG         = Fra opret ? */                    
+     BE_IND.PERSON.CNEDSL1          = DCLBE90100T.KOEBFSKKOD;           
+   /*BE_IND.PERSON.CNEDSL2          = fra beregn ? */                   
+   /* Tages ikke fra opdat i CICS men findes i 811 struktur */          
+   /*BE_IND.PERSON.CNULSTIL         = DCLBE90100T.??? */                
+     BE_IND.PERSON.CPTYPSLUT        = DCLBE90100T.PERSAENDRNYKOD;       
+     BE_IND.PERSON.CSKPLOMF         = DCLBE90100T.OMFAGSKPLKOD;         
+     /*BE_IND.PERSON.CSKPLOMFGL     = ?? Felt */                        
+     BE_IND.PERSON.CSLET            = DCLBE90100T.EJVSLETEKOD;          
+     // Feltet CSTIBLB er udgået på BE30000, så DXC feltet              
+     // STINIBGRAEFKLARKOD matches ikke med noget felt                  
+     // BE_IND.PERSON.CSTIBLB          = DCLBE90100T.STINIBGRAEFKLARKOD;
+     BE_IND.PERSON.CUDLDEL          = DCLBE90100T.UDLEJDAGDTAKOD;       
+     BE_IND.PERSON.CUDLHEL          = DCLBE90100T.UDLEJBOLDAGDTAKOD;    
+     BE_IND.PERSON.CUDLMAN          = DCLBE90100T.EJVUDLEJNSLDTAKOD;    
+                                                                        
+     // DXC feltet EJVFAEFDELIKOD er udgået                             
+     // BE_IND.PERSON.CÆGTOPR          = DCLBE90100T.EJVFAEFDELIKOD;    
+     BE_IND.PERSON.DAFSTAA          = DCLBE90100T.AFSTADTO;             
+     BE_IND.PERSON.DAFSTAAFOR       = DCLBE90100T.AFSTAFSKDTO;          
+  /* BE_IND.PERSON.DATO0107         = fra oprettelse /opsættes */       
+     BE_IND.PERSON.DFRAFLYT         = DCLBE90100T.UDFLYTDTO;            
+  /* BE_IND.PERSON.DHENVN           = fra oprettelse ? */               
+     BE_IND.PERSON.DINDFLYT         = DCLBE90100T.INDFLYTDTO;           
+     BE_IND.PERSON.DOVTG            = DCLBE90100T.OVTAGDTO;             
+     BE_IND.PERSON.DOVTGFOR         = DCLBe90100T.OVTAGFSKDTO;          
+     BE_IND.PERSON.FDAGERHV         = DCLBE90100T.EJVERHANDDAGANT;      
+     BE_IND.PERSON.FDAGUDLE         = DCLBE90100T.UDLEJDAGANT;          
+     // FELT759 er udgået i BE30000T                                    
+     // BE_IND.PERSON.FELT759          = DCLBE90100T.EJVPENSNSLKOD; */  
+                                                                        
+     // FELT760 er udgået i BE30000T                                    
+     // BE_IND.PERSON.FELT760          = DCLBE90100T.EJVFREDEKOD; */    
+     BE_IND.PERSON.FERHVFLER        = DCLBE90100T.ERHAARDAGANT;         
+     BE_IND.PERSON.FUBEBOELIG       = DCLBE90100T.UBEBODAGANT;          
+     BE_IND.PERSON.FUDL100          = DCLBE90100T.UDLEJBOLDAGANT;       
+  /* BE_IND.PERSON.GLPNR            = fra tabel ? */                    
+     BE_IND.PERSON.GPCTEJER         = DCLBE90100T.EJVEJERANDELPCT;      
+     BE_IND.INDK_PERS.GPCTEJER_I    = EJVEJERANDELPCT_SW;               
+     BE_IND.PERSON.GPCTEJERFOR      = DCLBE90100T.EJVEJEANDFSKPCT;      
+     BE_IND.PERSON.GPCTERHV         = DCLBE90100T.ERHVEDELVIPCT;        
+     BE_IND.PERSON.GPCTUDLE         = DCLBE90100T.EJVSKATUDLEJPCT;      
+                                                                        
+  /* BE_IND.PERSON.CTILKØB          = fra tabel ? */                    
+  /* BE_IND.PERSON.DRGNÅRFRA        = fra tabel ? */                    
+  /* BE_IND.PERSON.DRGNÅRTIL        = fra tabel ? */                    
+     BE_IND.PERSON.BBER2FAM_AKT     = DCLBE90100T.EJV2FAMILAARBLB;      
+     BE_IND.INDK_PERS.BBER2FAM_AKT_I = EJV2FAMILAARBLB_SW;              
+     BE_IND.PERSON.BBERGRL_AKT      = DCLBE90100T.EJVSKABGAARBLB;       
+     BE_IND.INDK_PERS.BBERGRL_AKT_I = EJVSKABGAARBLB_SW;                
+     BE_IND.PERSON.BEJBOL1_AKT      = DCLBE90100T.AARAND12FAMILBLB;     
+     BE_IND.INDK_PERS.BEJBOL1_AKT_I = AARAND12FAMILBLB_SW;              
+     BE_IND.PERSON.BEJBOL2_AKT      = DCLBE90100T.AARAND22FAMILBLB;     
+     BE_IND.INDK_PERS.BEJBOL2_AKT_I = AARAND22FAMILBLB_SW;              
+                                                                        
+  /* Gemt til senere                                                    
+  /* BE_IND.PERSON.BEJBOLANV_AKT    =                                   
+  /* BE_IND.PERSON.BPENSNÆGL        = fra beregning + regl */           
+     /* #01 samme som sum1 plus faststigningsbegrænsning */             
+                                                                        
+                                                                        
+                                                                        
+     BE_IND.PERSON.BSUM3 = DCLBE90100T.EJVSKAEFTNSLBLB;                 
+     BE_IND.INDK_PERS.BSUM3_I = EJVSKAEFTNSLBLB_SW;                     
+                                                                        
+  /*   BE_IND.PERSON.BGLSUM1          = DCLBE90100T.EJVREGULGLBLB;  */  
+  /*   BE_IND.INDK_PERS.BGLSUM1_I     = EJVREGULGLBLB_SW;   */          
+     BE_IND.PERSON.CAFSTAA          = DCLBE90100T.AFSTADTAKOD;          
+  /* BE_IND.PERSON.CANVEBOL_AKT     =  */                               
+     BE_IND.PERSON.CBOBHAKOD        = ''; /*altid blank i 811*/         
+     BE_IND.PERSON.CDBER2FAM_AKT    = DCLBE90100T.EJV2FAMILAARDTAKOD;   
+     BE_IND.PERSON.CDBERGRL_AKT     = DCLBE90100T.EJVSKABGAARDTAKOD;    
+     BE_IND.PERSON.CDEJBEVS         = DCLBE90100T.EJVBERDTAKOD;         
+     BE_IND.PERSON.CDEJDTYPE        = DCLBE90100T.EJVSKATTYPEDTAKOD;    
+     BE_IND.PERSON.CDEKSEMP         = DCLBE90100T.EJVUDLXNSLDTAKOD;     
+     BE_IND.PERSON.CDENKE           = DCLBE90100T.EJVARVPENSDTAKOD;     
+     /* #2 */                                                           
+     BE_IND.PERSON.CDINDFLYT        = DCLBE90100T.EJVEJINDFLYTDTAKOD;   
+     // DXC feltet PERSAENDRGLDTAKOD er udgået                          
+     // BE_IND.PERSON.CDPTYPGL      = DCLBE90100T.PERSAENDRGLDTAKOD;    
+     BE_IND.PERSON.CDPTYPSLUT       = DCLBE90100T.PERSAENDRNYDTAKOD;    
+                                                                        
+     // BE_IND.PERSON.CDÆGTOPR         = DCLBE90100T.EJVFAEFDELIDTAKOD; 
+     BE_IND.PERSON.CEJDTYPE_AKT     = DCLBE90100T.EJVSKATTYPEKOD;       
+     BE_IND.PERSON.CERHVFLER        = DCLBE90100T.ERHAARDAGDTAKOD;      
+     // DXC feltet EJVFOSKADTAKOD er udgået                             
+     // BE_IND.PERSON.CEVSGL         = DCLBE90100T.EJVFOSKADTAKOD;      
+                                                                        
+     /* #2 */                                                           
+                                                                        
+     // DXC feltet EJVSKAMANNYDTAKOD er udgået                          
+     // BE_IND.PERSON.CEVSMAN       = DCLBE90100T.EJVSKAMANNYDTAKOD;    
+     BE_IND.PERSON.CFELT759         = DCLBE90100T.EJVPENSNSLDTAKOD;     
+     BE_IND.PERSON.CFELT760         = DCLBE90100T.EJVFREDEDTAKOD;       
+     BE_IND.PERSON.CFRAFLYTDTO      = DCLBE90100T.UDFLYTDTAKOD;         
+     /* BE_IND.PERSON.CFRÅR_FOR     = Fra tabel ? */                    
+     BE_IND.PERSON.CINDFLYTDTO      = DCLBE90100T.INDFLYTDTAKOD;        
+     // Feltet CMANPENSSTI er udgået fra BE30000T                       
+     // BE_IND.PERSON.CMANPENSSTI   = DCLBE90100T.MANPENSNSLDTAKOD;     
+     BE_IND.PERSON.COVTG            = DCLBE90100T.OVTAGDTAKOD;          
+     BE_IND.PERSON.CPCTEJER         = DCLBE90100T.EJVEJERANDELDTAKOD;   
+     BE_IND.PERSON.CPCTERHV         = DCLBE90100T.ERHVEDELVIDTAKOD;     
+     BE_IND.PERSON.CPCTUDLE         = DCLBE90100T.EJVSKATUDLEJDTAKOD;   
+     // DXC feltet EJVFOPENSNSLDTAKOD er udgået                         
+     //BE_IND.PERSON.CPENSNEDGL     = DCLBE90100T.EJVFOPENSNSLDTAKOD;*/ 
+                                                                        
+     /* #02 */                                                          
+     BE_IND.PERSON.CUBEBOELIG       = DCLBE90100T.UBEBODAGDTAKOD;       
+     BE_IND.PERSON.CUDLSKC          = DCLBE90100T.EJVUDLSKATDTAKOD;     
+     // Feltet MANPENSSTI er udgået fra BE30000T                        
+     // BE_IND.PERSON.MANPENSSTI      = DCLBE90100T.MANPENSNSLBLB;      
+     // BE_IND.INDK_PERS.MANPENSSTI_I = MANPENSNSLBLB_SW;               
+                                                                        
+     /*BE_IND.PERSON.CBGLSUM1         = fra beregning + regl */         
+                                                                        
+                                                                        
+     /* fra tabel                                                       
+     BE_IND.PERSON.DERHVPER_FRA1    =                                   
+     BE_IND.PERSON.DERHVPER_TIL1    =                                   
+     BE_IND.PERSON.DERHVPER_FRA2    =                                   
+     BE_IND.PERSON.DERHVPER_TIL2    =                                   
+     BE_IND.PERSON.DERHVPER_FRA3    =                                   
+     BE_IND.PERSON.DERHVPER_TIL3    =                                   
+     BE_IND.PERSON.DERHVPER_FRA4    =                                   
+     BE_IND.PERSON.DERHVPER_TIL4    =                                   
+     BE_IND.PERSON.DERHVPER_FRA5    =                                   
+     BE_IND.PERSON.DERHVPER_TIL5    =                                   
+     BE_IND.PERSON.FERHVPER_ANT     = */                                
+   /* Hvad skal fyldes i feltet CNEDTAG158 ?? */                        
+   /*BE_IND.PERSON.CNEDTAG158       = felt ?? */                        
+     BE_IND.PERSON.BEJDVPUSKTP      = DCLBE90100T.EJVUSKPENINDBLB;      
+     BE_IND.INDK_PERS.BEJDVPUSKTP_I = EJVUSKPENINDBLB_SW;               
+     BE_IND.PERSON.BEJDVÆPUSKP      = DCLBE90100T.EJVAEGPENINDBLB;      
+     BE_IND.INDK_PERS.BEJDVÆPUSKP_I = EJVAEGPENINDBLB_SW;               
+     BE_IND.PERSON.CFELT762         = DCLBE90100T.EJVUSKPENINDDTAKOD;   
+     BE_IND.PERSON.CFELT769         = DCLBE90100T.EJVAEGPENINDDTAKOD;   
+                                                                        
+     BE_IND.PERSON.DVURDÅR            = DCLBE90100T.VURDEAAR;           
+                                                                        
+   //BE_IND.PERSON.CRTEKORNS                                            
+   //BE_IND.PERSON.COPR_CRTEKORNS                                       
+     BE_IND.PERSON.VURMARK_AKT        = DCLBE90100T.VURMARKOD;          
+   //BE_IND.PERSON.VURMARK                                              
+     BE_IND.PERSON.JUR_KATEGO_AKT     = DCLBE90100T.JURKATID;           
+   //BE_IND.PERSON.JUR_KATEGO                                           
+     BE_IND.PERSON.JUR_UKATEGO_AKT    = DCLBE90100T.JURUNDKATID;        
+   //BE_IND.PERSON.JUR_UKATEGO                                          
+                                                                        
+     BE_IND.PERSON.VURDATO_AKT        =                                 
+                         DB2_DATO_TIL_FIX09(DCLBE90100T.VURTERMDTO);    
+   //BE_IND.PERSON.VURDATO                                              
+                                                                        
+     BE_IND.PERSON.FORSIGT_EVS_AKT    = TJEK(DCLBE90100T.FSIGTVURKOD);  
+   //BE_IND.PERSON.FORSIGT_EVS                                          
+                                                                        
+     BE_IND.PERSON.BESKAT_EVS_AKT     = TJEK(DCLBE90100T.EJVBSKATKOD);  
+   //BE_IND.PERSON.BESKAT_EVS                                           
+                                                                        
+   // Nye felter ifm. EVS ny lov 2024                                   
+     BE_IND.PERSON.EJET20240101       = DCLBE90100T.EVSRABBRTKOD;       
+     BE_IND.PERSON.BEVSMANFSI         = DCLBE90100T.EVSSKAFSKUDBLB;     
+     BE_IND.INDK_PERS.BEVSMANFSI_I    = EVSSKAFSKUDBLB_SW;              
+     BE_IND.PERSON.COPR_BEVSMANFSI    = DCLBE90100T.EVSSKAFSKUDDTAKOD;  
+                                                                        
+     IF BE_IND.INDK_PERS.BNETTO_I  >= 0 THEN                            
+        BE_IND.PERSON.BTAKS = DCLBE90100T.EJVSKAFOERDUPENBLB;           
+     ELSE                                                               
+        BE_IND.PERSON.BTAKS = 0;                                        
+                                                                        
+     IF DCLBE90100T.EVSRABBRTKOD = '1' THEN                             
+        BE_IND.BTAKSRABAT = DCLBE90100T.EVSRABBLB;                      
+     ELSE                                                               
+        BE_IND.PERSON.BTAKSRABAT = 0;                                   
+                                                                        
+     IF BE_IND.PERSON.BTAKSRABAT > BE_IND.PERSON.BTAKS                  
+     THEN                                                               
+        BE_IND.PERSON.BTAKSRABAT = BE_IND.PERSON.BTAKS;                 
+                                                                        
+     BE_IND.PERSON.BTAKSEFTERRABAT = BE_IND.PERSON.BTAKS -              
+                                     BE_IND.PERSON.BTAKSRABAT;          
+                                                                        
+ END FLYT_OPDATE_TIL_KMD_FELTER;                                        
+ /*********************************************************************/
+ /* FLYT VÆRDIER TIL KMD STRUKTUR                                     */
+ /*********************************************************************/
+ VALIDERING: PROC;                                                      
+                                                                        
+   GYLDIG_OPDATERING = '1'B;                                            
+                                                                        
+ END VALIDERING;                                                        
+ /*********************************************************************/
+ HENT_FRA_EVS_SLUT_TABELLER: PROC;                                      
+                                                                        
+   BE_IND = '';                                                         
+   CALL DATA_MODUL('LÆS');                                              
+                                                                        
+ END HENT_FRA_EVS_SLUT_TABELLER;                                        
+ /*********************************************************************/
+ /* OPSÆT STYRER FELTER EGENNR SÆTTES SENERE                          */
+ /*********************************************************************/
+ UDFYLD_STYR_FELTER: PROC;                                              
+                                                                        
+   DCL    HJ_PIC10           PIC       '(10)9',                         
+          1 HELP_DTX         DEF       HJ_PIC10,                        
+            2 HJ_PIC03        PIC       '999',                          
+            2 HJ_PIC07        PIC       '9999999';                      
+                                                                        
+   STYR_FELTER = '';                                                    
+                                                                        
+   STYR_FELTER.DINDKAAR   = DCLBE90100T.INDKAAR;                        
+   STYR_FELTER.DCPRN      = DCLBE90100T.PNR;                            
+   HJ_PIC10               = DCLBE90100T.ENR;                            
+   STYR_FELTER.EKOMNR     = HJ_PIC03;                                   
+   STYR_FELTER.EEJDNR     = HJ_PIC07;                                   
+   STYR_FELTER.EENHEDLBNR = DCLBE90100T.EJV2FAMILNR;                    
+   STYR_FELTER.ELBNR      = DCLBE90100T.EJVLBNR;                        
+   STYR_FELTER.TYPE       = 0; /* OPSÆTNING TIL LÆS */                  
+                                                                        
+ END UDFYLD_STYR_FELTER;                                                
+ /*********************************************************************/
+ /*      BEHANDLING                                                   */
+ /*********************************************************************/
+ BEHANDLING: PROC;                                                      
+                                                                        
+   /* flyt før læs ?*/                                                  
+   IF STYR_FELTER.EKOMNR = 999                                          
+    & STYR_FELTER.ELBNR  > 1                                            
+    & BE_IND.CEJBEVS = '5'                                              
+   THEN                                                                 
+      BE_IND.CEJBEVS = '4';                                             
+                                                                        
+                                                                        
+   /* Opsætning af CEJBEVS lig 5 For dem ikke findes på */              
+   /* tabeller #02                                      */              
+                                                                        
+   IF STYR_FELTER.STATUS > 0                                            
+   THEN                                                                 
+     DO;                                                                
+       IF BE_IND.CDATAFRA ^= '6' &                                      
+          BE_IND.CSLET    ^= '1' &                                      
+          BE_IND.CEJBEVS   = '4'                                        
+        THEN                                                            
+          DO;                                                           
+            IF STYR_FELTER.ELBNR = 1                                    
+            THEN                                                        
+               BE_IND.CEJBEVS = '5';                                    
+          END;                                                          
+     END;                                                               
+                                                                        
+   /* STATUS LIG 3 OPSÆTTES PÅ DE UDENLANDSKE EJENDOMME SOM  */         
+   /* OPDATERES ELLERS VIL DERES FELTER IKKE BLIVE OPSAT I  */          
+   /* BE18040 */                                                        
+                                                                        
+   IF STYR_FELTER.EKOMNR = 999 &                                        
+      STYR_FELTER.STATUS < 2  &                                         
+      BE_IND.CEJBEVS = '5'    &                                         
+      BE_IND.CDATAFRA ^= '6'                                            
+   THEN                                                                 
+     STYR_FELTER.STATUS = 3;                                            
+   ELSE                                                                 
+     IF STYR_FELTER.EKOMNR = 999                                        
+      & STYR_FELTER.STATUS = 0                                          
+      & BE_IND.CDATAFRA ^= '6'                                          
+      & (BE_IND.CEJDBELIG = '3' !                                       
+         BE_IND.CEJDBELIG = '8' !                                       
+         BE_IND.CDLANDEKODE= '3' !                                      
+         BE_IND.CDLANDEKODE= '8' !                                      
+         BE_IND.CDEJDTYPE = '3' !                                       
+         BE_IND.CDEJDTYPE = '8')                                        
+     THEN                                                               
+       STYR_FELTER.STATUS = 3;                                          
+                                                                        
+   /* NULSTILLING AF UDENLANDSKE EJER/EJENDOMME ?*/                     
+   IF STYR_FELTER.EKOMNR = 999                                          
+      & STYR_FELTER.STATUS = 3                                          
+      & BE_IND.CEJBEVS = '5'                                            
+      & BE_IND.CDATAFRA ^= '6'                                          
+   THEN                                                                 
+     DO;                                                                
+        CALL DATA_MODUL('SLET_EJER');                                   
+        CALL SLET_RESULTAT;                                             
+        STYR_FELTER.EGENNR = 0;                                         
+        BE_IND.EGENNR = 0; /*Check*/                                    
+     END;                                                               
+                                                                        
+     /*PUT SKIP LIST('2 STYR_FELTER.STATUS =',STYR_FELTER.STATUS);*/    
+     /*PUT SKIP LIST('BE_IND.EGENNR      =',BE_IND.EGENNR);*/           
+                                                                        
+     BE_UD = BE_IND, BY NAME;                                           
+                                                                        
+     /* Sættes i DATAMODUL*/                                            
+     /*STYR_FELTER.TYPE = STYR_FELTER.STATUS; /* Fra Læs */             
+                                                                        
+     CALL DATA_MODUL('SKRIV');                                          
+     ANT_COMM = ANT_COMM + 1;                                           
+                                                                        
+     /* fra BE18000 */                                                  
+     /* Opsæt generations nummer til resultat felter og DBRGN_MODT */   
+     STYR_FELTER.EGENNR = BE_IND.EGENNR + 1;                            
+                                                                        
+     /*Behandling af nye felter som skal på resultat tabel */           
+     /*Opdater felter på BE40000T */                                    
+     /*Styrefelterne fra Ejertabel anvendes uændret*/                   
+                                                                        
+     CALL SKRIV_RESULTAT_TABEL;                                         
+                                                                        
+     /* Def 2605 LTJ */                                                 
+     /* Opdatering af udvalgte ejendomsfelter på BE20000T */            
+     /* Disse opdateres altid med modtaget data fra SLUT  */            
+     IF STYR_FELTER.STATUS = 0 !                                        
+        STYR_FELTER.STATUS = 1                                          
+     THEN                                                               
+        CALL OPDATER_EJDFELTER;                                         
+                                                                        
+   /*IF STYR_FELTER.FEJLNR > 0                                          
+     THEN                                                               
+        DO;                                                             
+          CALL LOGNING_FEJL;                                            
+          CALL DAN_OUTPUT('FEJL_GEM'); /*NY LOG*/                       
+     /*   GOTO RETURN_CICS;                                             
+        END;                                                            
+                                                                        
+     /* Opdatering af felt DBEREGN på BE30000T */                       
+     CALL OPDATER_DBRGN_MODT;                                           
+                                                                        
+     CALL SKRIV_SPOR_TABEL;                                             
+                                                                        
+                                                                        
+     /* HUSK COMMIT*/                                                   
+     IF ANT_COMM > 4999                                                 
+     THEN                                                               
+       DO;                                                              
+         EXEC SQL COMMIT;                                               
+         PUT SKIP LIST ('Commit efter ' !! ANTAL_SKRIV_EVS !!           
+                ' opdateringer på sluttabeller');                       
+          ANT_COMM = 0;                                                 
+       END;                                                             
+                                                                        
+ END BEHANDLING;                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+         ABENDMODUL   = 'BE24700';                            /*ÅR-RET*/
+         /*ABENDTXT = FEJLTEKST;*/                                      
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /*      SKRIV TOTALER                                                */
+ /*********************************************************************/
+ SKRIV_TOTALER: PROC;                                                   
+                                                                        
+         LINIE = '';                                                    
+         CCHAR = ZZWS1;                                                 
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+         LINIE = 'ANTAL_FETCH_OPDAT ' !! ANTAL_FETCH_OPDAT;             
+         CALL ZZ20300(LINIE,'89');                                      
+         LINIE = 'ANTAL_LÆS_EVS     ' !! ANTAL_LÆS_EVS;                 
+         CALL ZZ20300(LINIE,'89');                                      
+         LINIE = 'ANTAL_SKRIV_EVS   ' !! ANTAL_SKRIV_EVS;               
+         CALL ZZ20300(LINIE,'89');                                      
+                                                                        
+ END SKRIV_TOTALER;                                                     
+ /*********************************************************************/
+ DECLARE_OPDAT_CUR: PROC;                                               
+                                                                        
+    EXEC SQL DECLARE OPDAT_CUR CURSOR WITH HOLD FOR                     
+      SELECT                                                            
+        DUMMY_ID,                                                       
+        INDKAAR,                                                        
+        KOERNR,                                                         
+        KOERDTO,                                                        
+        PNR,                                                            
+        ENR,                                                            
+        EJV2FAMILNR,                                                    
+        EJVLBNR,                                                        
+        REGISTMP,                                                       
+        CSCREGISTMP,                                                    
+        CSRLREGISTMP,                                                   
+        FSKUDRESKAMDKOD,                                                
+        BOBHAKOD,                                                       
+        EJVPENSINDKBLB,                                                 
+        AFVISTGODKENDKOD,                                               
+        ALMOPGOEKOD,                                                    
+        ALMINDKOPGOENR,                                                 
+        GENERATYPEKOD,                                                  
+        EJDBLIGEKMNR,                                                   
+        VEJKOD,                                                         
+        HUSNR,                                                          
+        HUSBOSTAADR,                                                    
+        ETAGENR,                                                        
+        SIDEDOERNR,                                                     
+        AFSTADTAKOD,                                                    
+        AKTVUROPRKOD,                                                   
+        VURDEOPRIDKOD,                                                  
+        BNYTEKOD,                                                       
+        EJDBLIGEADRDTAKOD,                                              
+        EJDOMBYGKOD,                                                    
+        EJV2FAMILAARDTAKOD,                                             
+        EJV2FAMILANVDTAKOD,                                             
+        EJV2FAMILANVKOD,                                                
+        EJV2FAMILNRDTAKOD,                                              
+        EJVAEGPENINDDTAKOD,                                             
+        EJVARVPENSKOD,                                                  
+        EJVARVPENSDTAKOD,                                               
+        EJVBERDTAKOD,                                                   
+        EJVBERGRLKOD,                                                   
+        EJVBERKOD,                                                      
+        EJVBERKVITEKOD,                                                 
+        EJVEJERANDELDTAKOD,                                             
+        EJVEJINDFLYTDTAKOD,                                             
+        EJVEJINDFLYTKOD,                                                
+        EJVERHANDDAGDTAKOD,                                             
+        EJVFREDEDTAKOD,                                                 
+        EJVFREDEKOD,                                                    
+        EJVLBNRDTAKOD,                                                  
+        EJVPENSNSLDTAKOD,                                               
+        EJVPENSNSLKOD,                                                  
+        EJVSKABGAARDTAKOD,                                              
+        EJVSKABGKOD,                                                    
+        EJVSKAFSKKOD,                                                   
+        EJVSKAGENNSLKOD,                                                
+        EJVSKAMANUEDTAKOD,                                              
+        EJVSKASTANSLKOD,                                                
+        EJVSKATTYPEDTAKOD,                                              
+        EJVSKATTYPEKOD,                                                 
+        EJVSKATUDLEJDTAKOD,                                             
+        EJVSLETEDTAKOD,                                                 
+        EJVSLETEKOD,                                                    
+        EJVUDLEJNSLDTAKOD,                                              
+        EJVUDLSKATDTAKOD,                                               
+        EJVUDLXNSLDTAKOD,                                               
+        EJVUDLXNSLKOD,                                                  
+        EJVUSKPENINDDTAKOD,                                             
+        ENRDTAKOD,                                                      
+        ERHAARDAGDTAKOD,                                                
+        ERHVEDELVIDTAKOD,                                               
+        INDFLYTDTAKOD,                                                  
+        KILDEPROCEKOD,                                                  
+        KOEBFSKKOD,                                                     
+        KOEBDTAKOD,                                                     
+        KOEBKOD,                                                        
+        LANDDTAKOD,                                                     
+        LANDKOD,                                                        
+        OVTAGDTAKOD,                                                    
+        MANPENSNSLDTAKOD,                                               
+        PERSAENDRNYDTAKOD,                                              
+        PERSAENDRNYKOD,                                                 
+        OMFAGSKPLKOD,                                                   
+        RGSKALEJEBERDTAKOD,                                             
+        RGSKALEJEBERKOD,                                                
+        STINIBGRAEKOD,                                                  
+        SYSTEMKILDEKOD,                                                 
+        UBEBODAGDTAKOD,                                                 
+        UDFLYTDTAKOD,                                                   
+        UDLEJBOLDAGDTAKOD,                                              
+        UDLEJDAGDTAKOD,                                                 
+        UDLEJDVAEDIDTAKOD,                                              
+        UDLLJEINDTDTAKOD,                                               
+        UDLLJESKATDTAKOD,                                               
+        UDLPNGINSIESDTAKOD,                                             
+        UDLREAGAEDTAKOD,                                                
+        AARAND12FAMILBLB,                                               
+        AARAND22FAMILBLB,                                               
+        EJV2FAMILAARBLB,                                                
+        EJVAEGPENINDBLB,                                                
+        EJVSALLANBRAARBLB,                                              
+        EJVSKABGAARBLB,                                                 
+        EJVSKAFSKBLB,                                                   
+        EJVSKAMANUEBLB,                                                 
+        EJVUDLEJNSLBLB,                                                 
+        EJVUDLSKATBLB,                                                  
+        EJVUSKPENINDBLB,                                                
+        GLEJDSKATBLB,                                                   
+        MANPENSNSLBLB,                                                  
+        UDLEJDVAEDIBLB,                                                 
+        UDLLJEINDTBLB,                                                  
+        UDLLJESKATBLB,                                                  
+        UDLPNGINSIESBLB,                                                
+        UDLREAKRGAELDBLB,                                               
+        EJDBLIGEADR,                                                    
+        EJVERHANDDAGANT,                                                
+        ERHAARDAGANT,                                                   
+        LJLIHANT,                                                       
+        UBEBODAGANT,                                                    
+        UDLEJBOLDAGANT,                                                 
+        UDLEJDAGANT,                                                    
+        AFSTADTO,                                                       
+        AFSTAFSKDTO,                                                    
+        INDFLYTDTO,                                                     
+        OVTAGDTO,                                                       
+        OVTAGFSKDTO,                                                    
+        UDFLYTDTO,                                                      
+        EJVEJEANDFSKPCT,                                                
+        EJVEJERANDELPCT,                                                
+        EJVSKATUDLEJPCT,                                                
+        ERHVEDELVIPCT,                                                  
+        EJVBGOVPROREBLB,                                                
+        EJVBGUNDERPROREBLB,                                             
+        EJVRDUPENSNSLBLB,                                               
+        EJVSKAAARERHNSLBLB,                                             
+        EJVSKABOLNSLBLB,                                                
+        EJVSKAEFTNSLBLB,                                                
+        EJVSKAEJBEBONSLBLB,                                             
+        EJVSKAERHANDNSLBLB,                                             
+        EJVSKAFOEBOLNSLBLB,                                             
+        EJVSKAFOEEJEANDBLB,                                             
+        EJVSKAFOEERHNSLBLB,                                             
+        EJVSKAFOERDUPENBLB,                                             
+        EJVSKAFOEPERNSLBLB,                                             
+        EJVSKAFOEUDLNSLBLB,                                             
+        EJVSKAFOEUDLSKABLB,                                             
+        EJVSKAGENNSLBLB,                                                
+        EJVSKAPENSNSLBLB,                                               
+        EJVSKAPERNSLAGBLB,                                              
+        EJVSKASTANSLBLB,                                                
+        EJVSKATUDLNSLAGBLB,                                             
+        EJVSKAUBEBONSLBLB,                                              
+        EJVSKAUDLNSLBLB,                                                
+        OVPROREBGBLB,                                                   
+        UNDERPROREBGBLB,                                                
+        EGEEJERDAGANT,                                                  
+        EJBEBODAGANT,                                                   
+        EJEJEREJDDAGANT,                                                
+        EJERDAGANT,                                                     
+        FEJLNR1,                                                        
+        FEJLADVISTYPEKOD1,                                              
+        MYNDNR1,                                                        
+        KILDEPROCEKOD1,                                                 
+        FEJLNR2,                                                        
+        FEJLADVISTYPEKOD2,                                              
+        MYNDNR2,                                                        
+        KILDEPROCEKOD2,                                                 
+        FEJLNR3,                                                        
+        FEJLADVISTYPEKOD3,                                              
+        MYNDNR3,                                                        
+        KILDEPROCEKOD3,                                                 
+        FEJLNR4,                                                        
+        FEJLADVISTYPEKOD4,                                              
+        MYNDNR4,                                                        
+        KILDEPROCEKOD4,                                                 
+        FEJLNR5,                                                        
+        FEJLADVISTYPEKOD5,                                              
+        MYNDNR5,                                                        
+        KILDEPROCEKOD5,                                                 
+        FEJLNR6,                                                        
+        FEJLADVISTYPEKOD6,                                              
+        MYNDNR6,                                                        
+        KILDEPROCEKOD6,                                                 
+        FEJLNR7,                                                        
+        FEJLADVISTYPEKOD7,                                              
+        MYNDNR7,                                                        
+        KILDEPROCEKOD7,                                                 
+        FEJLNR8,                                                        
+        FEJLADVISTYPEKOD8,                                              
+        MYNDNR8,                                                        
+        KILDEPROCEKOD8,                                                 
+        FEJLNR9,                                                        
+        FEJLADVISTYPEKOD9,                                              
+        MYNDNR9,                                                        
+        KILDEPROCEKOD9,                                                 
+        FEJLNR10,                                                       
+        FEJLADVISTYPEKOD10,                                             
+        MYNDNR10,                                                       
+        KILDEPROCEKOD10,                                                
+        INSERT_TS,                                                      
+        INSERT_AF,                                                      
+        EVSRABBRTKOD,                                                   
+        EVSSKAFSKUDBLB,                                                 
+        EVSSKAFSKUDDTAKOD,                                              
+        EVSRABBLB,                                                      
+        EJVSKAFOERABBLB,                                                
+        FSIGTVURKOD,                                                    
+        EJVBSKATKOD,                                                    
+        VURMARKOD,                                                      
+        VURTERMDTO,                                                     
+        JURKATID,                                                       
+        JURUNDKATID,                                                    
+        NAEUDLEJBOLKOD,                                                 
+        NAEUDLEJBOLDTAKOD,                                              
+        VURDEAAR,                                                       
+        EVSRABDTAKOD,                                                   
+        RABBRTEJEANDPCT,                                                
+        EJVSKAFOEMANSKABLB,                                             
+        RABPCTAARSAKOD,                                                 
+        VURMARDTAKOD,                                                   
+        EJVSKAMASKIBLB,                                                 
+        KMDREGISTMP,                                                    
+        EVSMANUERABDTAKOD,                                              
+        EVSMANUERABBLB,                                                 
+        VURMARKATKOD,                                                   
+        VURMARKATDTAKOD,                                                
+        EJVSKAEFTRABBLB                                                 
+       FROM BE90100T T1                                                 
+      WHERE T1.INDKAAR = :WK_INDKAAR                                    
+        AND T1.KOERNR  = :WK_KOERNR;                                    
+                                                                        
+ END DECLARE_OPDAT_CUR;                                                 
+ /*********************************************************************/
+ FETCH_OPDAT_CUR: PROC;                                                 
+                                                                        
+      OPDATERING_FUNDET = NEJ;                                          
+      DCLBE90100T       = ''; /* NUl stilling pga Null felter*/         
+                                                                        
+      EXEC SQL FETCH OPDAT_CUR                                          
+      INTO                                                              
+        :DCLBE90100T.DUMMY_ID,                                          
+        :DCLBE90100T.INDKAAR,                                           
+        :DCLBE90100T.KOERNR,                                            
+        :DCLBE90100T.KOERDTO,                                           
+        :DCLBE90100T.PNR,                                               
+        :DCLBE90100T.ENR,                                               
+        :DCLBE90100T.EJV2FAMILNR,                                       
+        :DCLBE90100T.EJVLBNR,                                           
+        :DCLBE90100T.REGISTMP,                                          
+        :DCLBE90100T.CSCREGISTMP,                                       
+        :DCLBE90100T.CSRLREGISTMP,                                      
+        :DCLBE90100T.FSKUDRESKAMDKOD:BE901_SW.FSKUDRESKAMDKOD_SW,       
+        :DCLBE90100T.BOBHAKOD:BE901_SW.BOBHAKOD_SW,                     
+        :DCLBE90100T.EJVPENSINDKBLB:BE901_SW.EJVPENSINDKBLB_SW,         
+        :DCLBE90100T.AFVISTGODKENDKOD:BE901_SW.AFVISTGODKENDKOD_SW,     
+        :DCLBE90100T.ALMOPGOEKOD:BE901_SW.ALMOPGOEKOD_SW,               
+        :DCLBE90100T.ALMINDKOPGOENR:BE901_SW.ALMINDKOPGOENR_SW,         
+        :DCLBE90100T.GENERATYPEKOD:BE901_SW.GENERATYPEKOD_SW,           
+        :DCLBE90100T.EJDBLIGEKMNR:BE901_SW.EJDBLIGEKMNR_SW,             
+        :DCLBE90100T.VEJKOD:BE901_SW.VEJKOD_SW,                         
+        :DCLBE90100T.HUSNR:BE901_SW.HUSNR_SW,                           
+        :DCLBE90100T.HUSBOSTAADR:BE901_SW.HUSBOSTAADR_SW,               
+        :DCLBE90100T.ETAGENR:BE901_SW.ETAGENR_SW,                       
+        :DCLBE90100T.SIDEDOERNR:BE901_SW.SIDEDOERNR_SW,                 
+        :DCLBE90100T.AFSTADTAKOD:BE901_SW.AFSTADTAKOD_SW,               
+        :DCLBE90100T.AKTVUROPRKOD:BE901_SW.AKTVUROPRKOD_SW,             
+        :DCLBE90100T.VURDEOPRIDKOD:BE901_SW.VURDEOPRIDKOD_SW,           
+        :DCLBE90100T.BNYTEKOD:BE901_SW.BNYTEKOD_SW,                     
+        :DCLBE90100T.EJDBLIGEADRDTAKOD:BE901_SW.EJDBLIGEADRDTAKOD_SW,   
+        :DCLBE90100T.EJDOMBYGKOD:BE901_SW.EJDOMBYGKOD_SW,               
+        :DCLBE90100T.EJV2FAMILAARDTAKOD:BE901_SW.EJV2FAMILAARDTAKOD_SW, 
+        :DCLBE90100T.EJV2FAMILANVDTAKOD:BE901_SW.EJV2FAMILANVDTAKOD_SW, 
+        :DCLBE90100T.EJV2FAMILANVKOD:BE901_SW.EJV2FAMILANVKOD_SW,       
+        :DCLBE90100T.EJV2FAMILNRDTAKOD:BE901_SW.EJV2FAMILNRDTAKOD_SW,   
+        :DCLBE90100T.EJVAEGPENINDDTAKOD:BE901_SW.EJVAEGPENINDDTAKOD_SW, 
+        :DCLBE90100T.EJVARVPENSKOD:BE901_SW.EJVARVPENSKOD_SW,           
+        :DCLBE90100T.EJVARVPENSDTAKOD:BE901_SW.EJVARVPENSDTAKOD_SW,     
+        :DCLBE90100T.EJVBERDTAKOD:BE901_SW.EJVBERDTAKOD_SW,             
+        :DCLBE90100T.EJVBERGRLKOD:BE901_SW.EJVBERGRLKOD_SW,             
+        :DCLBE90100T.EJVBERKOD:BE901_SW.EJVBERKOD_SW,                   
+        :DCLBE90100T.EJVBERKVITEKOD:BE901_SW.EJVBERKVITEKOD_SW,         
+        :DCLBE90100T.EJVEJERANDELDTAKOD:BE901_SW.EJVEJERANDELDTAKOD_SW, 
+        :DCLBE90100T.EJVEJINDFLYTDTAKOD:BE901_SW.EJVEJINDFLYTDTAKOD_SW, 
+        :DCLBE90100T.EJVEJINDFLYTKOD:BE901_SW.EJVEJINDFLYTKOD_SW,       
+        :DCLBE90100T.EJVERHANDDAGDTAKOD:BE901_SW.EJVERHANDDAGDTAKOD_SW, 
+        :DCLBE90100T.EJVFREDEDTAKOD:BE901_SW.EJVFREDEDTAKOD_SW,         
+        :DCLBE90100T.EJVFREDEKOD:BE901_SW.EJVFREDEKOD_SW,               
+        :DCLBE90100T.EJVLBNRDTAKOD:BE901_SW.EJVLBNRDTAKOD_SW,           
+        :DCLBE90100T.EJVPENSNSLDTAKOD:BE901_SW.EJVPENSNSLDTAKOD_SW,     
+        :DCLBE90100T.EJVPENSNSLKOD:BE901_SW.EJVPENSNSLKOD_SW,           
+        :DCLBE90100T.EJVSKABGAARDTAKOD:BE901_SW.EJVSKABGAARDTAKOD_SW,   
+        :DCLBE90100T.EJVSKABGKOD:BE901_SW.EJVSKABGKOD_SW,               
+        :DCLBE90100T.EJVSKAFSKKOD:BE901_SW.EJVSKAFSKKOD_SW,             
+        :DCLBE90100T.EJVSKAGENNSLKOD:BE901_SW.EJVSKAGENNSLKOD_SW,       
+        :DCLBE90100T.EJVSKAMANUEDTAKOD:BE901_SW.EJVSKAMANUEDTAKOD_SW,   
+        :DCLBE90100T.EJVSKASTANSLKOD:BE901_SW.EJVSKASTANSLKOD_SW,       
+        :DCLBE90100T.EJVSKATTYPEDTAKOD:BE901_SW.EJVSKATTYPEDTAKOD_SW,   
+        :DCLBE90100T.EJVSKATTYPEKOD:BE901_SW.EJVSKATTYPEKOD_SW,         
+        :DCLBE90100T.EJVSKATUDLEJDTAKOD:BE901_SW.EJVSKATUDLEJDTAKOD_SW, 
+        :DCLBE90100T.EJVSLETEDTAKOD:BE901_SW.EJVSLETEDTAKOD_SW,         
+        :DCLBE90100T.EJVSLETEKOD:BE901_SW.EJVSLETEKOD_SW,               
+        :DCLBE90100T.EJVUDLEJNSLDTAKOD:BE901_SW.EJVUDLEJNSLDTAKOD_SW,   
+        :DCLBE90100T.EJVUDLSKATDTAKOD:BE901_SW.EJVUDLSKATDTAKOD_SW,     
+        :DCLBE90100T.EJVUDLXNSLDTAKOD:BE901_SW.EJVUDLXNSLDTAKOD_SW,     
+        :DCLBE90100T.EJVUDLXNSLKOD:BE901_SW.EJVUDLXNSLKOD_SW,           
+        :DCLBE90100T.EJVUSKPENINDDTAKOD:BE901_SW.EJVUSKPENINDDTAKOD_SW, 
+        :DCLBE90100T.ENRDTAKOD:BE901_SW.ENRDTAKOD_SW,                   
+        :DCLBE90100T.ERHAARDAGDTAKOD:BE901_SW.ERHAARDAGDTAKOD_SW,       
+        :DCLBE90100T.ERHVEDELVIDTAKOD:BE901_SW.ERHVEDELVIDTAKOD_SW,     
+        :DCLBE90100T.INDFLYTDTAKOD:BE901_SW.INDFLYTDTAKOD_SW,           
+        :DCLBE90100T.KILDEPROCEKOD:BE901_SW.KILDEPROCEKOD_SW,           
+        :DCLBE90100T.KOEBFSKKOD:BE901_SW.KOEBFSKKOD_SW,                 
+        :DCLBE90100T.KOEBDTAKOD:BE901_SW.KOEBDTAKOD_SW,                 
+        :DCLBE90100T.KOEBKOD:BE901_SW.KOEBKOD_SW,                       
+        :DCLBE90100T.LANDDTAKOD:BE901_SW.LANDDTAKOD_SW,                 
+        :DCLBE90100T.LANDKOD:BE901_SW.LANDKOD_SW,                       
+        :DCLBE90100T.OVTAGDTAKOD:BE901_SW.OVTAGDTAKOD_SW,               
+        :DCLBE90100T.MANPENSNSLDTAKOD:BE901_SW.MANPENSNSLDTAKOD_SW,     
+        :DCLBE90100T.PERSAENDRNYDTAKOD:BE901_SW.PERSAENDRNYDTAKOD_SW,   
+        :DCLBE90100T.PERSAENDRNYKOD:BE901_SW.PERSAENDRNYKOD_SW,         
+        :DCLBE90100T.OMFAGSKPLKOD:BE901_SW.OMFAGSKPLKOD_SW,             
+        :DCLBE90100T.RGSKALEJEBERDTAKOD:BE901_SW.RGSKALEJEBERDTAKOD_SW, 
+        :DCLBE90100T.RGSKALEJEBERKOD:BE901_SW.RGSKALEJEBERKOD_SW,       
+        :DCLBE90100T.STINIBGRAEKOD:BE901_SW.STINIBGRAEKOD_SW,           
+        :DCLBE90100T.SYSTEMKILDEKOD:BE901_SW.SYSTEMKILDEKOD_SW,         
+        :DCLBE90100T.UBEBODAGDTAKOD:BE901_SW.UBEBODAGDTAKOD_SW,         
+        :DCLBE90100T.UDFLYTDTAKOD:BE901_SW.UDFLYTDTAKOD_SW,             
+        :DCLBE90100T.UDLEJBOLDAGDTAKOD:BE901_SW.UDLEJBOLDAGDTAKOD_SW,   
+        :DCLBE90100T.UDLEJDAGDTAKOD:BE901_SW.UDLEJDAGDTAKOD_SW,         
+        :DCLBE90100T.UDLEJDVAEDIDTAKOD:BE901_SW.UDLEJDVAEDIDTAKOD_SW,   
+        :DCLBE90100T.UDLLJEINDTDTAKOD:BE901_SW.UDLLJEINDTDTAKOD_SW,     
+        :DCLBE90100T.UDLLJESKATDTAKOD:BE901_SW.UDLLJESKATDTAKOD_SW,     
+        :DCLBE90100T.UDLPNGINSIESDTAKOD:BE901_SW.UDLPNGINSIESDTAKOD_SW, 
+        :DCLBE90100T.UDLREAGAEDTAKOD:BE901_SW.UDLREAGAEDTAKOD_SW,       
+        :DCLBE90100T.AARAND12FAMILBLB:BE901_SW.AARAND12FAMILBLB_SW,     
+        :DCLBE90100T.AARAND22FAMILBLB:BE901_SW.AARAND22FAMILBLB_SW,     
+        :DCLBE90100T.EJV2FAMILAARBLB:BE901_SW.EJV2FAMILAARBLB_SW,       
+        :DCLBE90100T.EJVAEGPENINDBLB:BE901_SW.EJVAEGPENINDBLB_SW,       
+        :DCLBE90100T.EJVSALLANBRAARBLB:BE901_SW.EJVSALLANBRAARBLB_SW,   
+        :DCLBE90100T.EJVSKABGAARBLB:BE901_SW.EJVSKABGAARBLB_SW,         
+        :DCLBE90100T.EJVSKAFSKBLB:BE901_SW.EJVSKAFSKBLB_SW,             
+        :DCLBE90100T.EJVSKAMANUEBLB:BE901_SW.EJVSKAMANUEBLB_SW,         
+        :DCLBE90100T.EJVUDLEJNSLBLB:BE901_SW.EJVUDLEJNSLBLB_SW,         
+        :DCLBE90100T.EJVUDLSKATBLB:BE901_SW.EJVUDLSKATBLB_SW,           
+        :DCLBE90100T.EJVUSKPENINDBLB:BE901_SW.EJVUSKPENINDBLB_SW,       
+        :DCLBE90100T.GLEJDSKATBLB:BE901_SW.GLEJDSKATBLB_SW,             
+        :DCLBE90100T.MANPENSNSLBLB:BE901_SW.MANPENSNSLBLB_SW,           
+        :DCLBE90100T.UDLEJDVAEDIBLB:BE901_SW.UDLEJDVAEDIBLB_SW,         
+        :DCLBE90100T.UDLLJEINDTBLB:BE901_SW.UDLLJEINDTBLB_SW,           
+        :DCLBE90100T.UDLLJESKATBLB:BE901_SW.UDLLJESKATBLB_SW,           
+        :DCLBE90100T.UDLPNGINSIESBLB:BE901_SW.UDLPNGINSIESBLB_SW,       
+        :DCLBE90100T.UDLREAKRGAELDBLB:BE901_SW.UDLREAKRGAELDBLB_SW,     
+        :DCLBE90100T.EJDBLIGEADR:BE901_SW.EJDBLIGEADR_SW,               
+        :DCLBE90100T.EJVERHANDDAGANT:BE901_SW.EJVERHANDDAGANT_SW,       
+        :DCLBE90100T.ERHAARDAGANT:BE901_SW.ERHAARDAGANT_SW,             
+        :DCLBE90100T.LJLIHANT:BE901_SW.LJLIHANT_SW,                     
+        :DCLBE90100T.UBEBODAGANT:BE901_SW.UBEBODAGANT_SW,               
+        :DCLBE90100T.UDLEJBOLDAGANT:BE901_SW.UDLEJBOLDAGANT_SW,         
+        :DCLBE90100T.UDLEJDAGANT:BE901_SW.UDLEJDAGANT_SW,               
+        :DCLBE90100T.AFSTADTO:BE901_SW.AFSTADTO_SW,                     
+        :DCLBE90100T.AFSTAFSKDTO:BE901_SW.AFSTAFSKDTO_SW,               
+        :DCLBE90100T.INDFLYTDTO:BE901_SW.INDFLYTDTO_SW,                 
+        :DCLBE90100T.OVTAGDTO:BE901_SW.OVTAGDTO_SW,                     
+        :DCLBE90100T.OVTAGFSKDTO:BE901_SW.OVTAGFSKDTO_SW,               
+        :DCLBE90100T.UDFLYTDTO:BE901_SW.UDFLYTDTO_SW,                   
+        :DCLBE90100T.EJVEJEANDFSKPCT:BE901_SW.EJVEJEANDFSKPCT_SW,       
+        :DCLBE90100T.EJVEJERANDELPCT:BE901_SW.EJVEJERANDELPCT_SW,       
+        :DCLBE90100T.EJVSKATUDLEJPCT:BE901_SW.EJVSKATUDLEJPCT_SW,       
+        :DCLBE90100T.ERHVEDELVIPCT:BE901_SW.ERHVEDELVIPCT_SW,           
+        :DCLBE90100T.EJVBGOVPROREBLB:BE901_SW.EJVBGOVPROREBLB_SW,       
+        :DCLBE90100T.EJVBGUNDERPROREBLB:BE901_SW.EJVBGUNDERPROREBLB_SW, 
+        :DCLBE90100T.EJVRDUPENSNSLBLB:BE901_SW.EJVRDUPENSNSLBLB_SW,     
+        :DCLBE90100T.EJVSKAAARERHNSLBLB:BE901_SW.EJVSKAAARERHNSLBLB_SW, 
+        :DCLBE90100T.EJVSKABOLNSLBLB:BE901_SW.EJVSKABOLNSLBLB_SW,       
+        :DCLBE90100T.EJVSKAEFTNSLBLB:BE901_SW.EJVSKAEFTNSLBLB_SW,       
+        :DCLBE90100T.EJVSKAEJBEBONSLBLB:BE901_SW.EJVSKAEJBEBONSLBLB_SW, 
+        :DCLBE90100T.EJVSKAERHANDNSLBLB:BE901_SW.EJVSKAERHANDNSLBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEBOLNSLBLB:BE901_SW.EJVSKAFOEBOLNSLBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEEJEANDBLB:BE901_SW.EJVSKAFOEEJEANDBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEERHNSLBLB:BE901_SW.EJVSKAFOEERHNSLBLB_SW, 
+        :DCLBE90100T.EJVSKAFOERDUPENBLB:BE901_SW.EJVSKAFOERDUPENBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEPERNSLBLB:BE901_SW.EJVSKAFOEPERNSLBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEUDLNSLBLB:BE901_SW.EJVSKAFOEUDLNSLBLB_SW, 
+        :DCLBE90100T.EJVSKAFOEUDLSKABLB:BE901_SW.EJVSKAFOEUDLSKABLB_SW, 
+        :DCLBE90100T.EJVSKAGENNSLBLB:BE901_SW.EJVSKAGENNSLBLB_SW,       
+        :DCLBE90100T.EJVSKAPENSNSLBLB:BE901_SW.EJVSKAPENSNSLBLB_SW,     
+        :DCLBE90100T.EJVSKAPERNSLAGBLB:BE901_SW.EJVSKAPERNSLAGBLB_SW,   
+        :DCLBE90100T.EJVSKASTANSLBLB:BE901_SW.EJVSKASTANSLBLB_SW,       
+        :DCLBE90100T.EJVSKATUDLNSLAGBLB:BE901_SW.EJVSKATUDLNSLAGBLB_SW, 
+        :DCLBE90100T.EJVSKAUBEBONSLBLB:BE901_SW.EJVSKAUBEBONSLBLB_SW,   
+        :DCLBE90100T.EJVSKAUDLNSLBLB:BE901_SW.EJVSKAUDLNSLBLB_SW,       
+        :DCLBE90100T.OVPROREBGBLB:BE901_SW.OVPROREBGBLB_SW,             
+        :DCLBE90100T.UNDERPROREBGBLB:BE901_SW.UNDERPROREBGBLB_SW,       
+        :DCLBE90100T.EGEEJERDAGANT:BE901_SW.EGEEJERDAGANT_SW,           
+        :DCLBE90100T.EJBEBODAGANT:BE901_SW.EJBEBODAGANT_SW,             
+        :DCLBE90100T.EJEJEREJDDAGANT:BE901_SW.EJEJEREJDDAGANT_SW,       
+        :DCLBE90100T.EJERDAGANT:BE901_SW.EJERDAGANT_SW,                 
+        :DCLBE90100T.FEJLNR1:BE901_SW.FEJLNR1_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD1:BE901_SW.FEJLADVISTYPEKOD1_SW,   
+        :DCLBE90100T.MYNDNR1:BE901_SW.MYNDNR1_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD1:BE901_SW.KILDEPROCEKOD1_SW,         
+        :DCLBE90100T.FEJLNR2:BE901_SW.FEJLNR2_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD2:BE901_SW.FEJLADVISTYPEKOD2_SW,   
+        :DCLBE90100T.MYNDNR2:BE901_SW.MYNDNR2_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD2:BE901_SW.KILDEPROCEKOD2_SW,         
+        :DCLBE90100T.FEJLNR3:BE901_SW.FEJLNR3_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD3:BE901_SW.FEJLADVISTYPEKOD3_SW,   
+        :DCLBE90100T.MYNDNR3:BE901_SW.MYNDNR3_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD3:BE901_SW.KILDEPROCEKOD3_SW,         
+        :DCLBE90100T.FEJLNR4:BE901_SW.FEJLNR4_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD4:BE901_SW.FEJLADVISTYPEKOD4_SW,   
+        :DCLBE90100T.MYNDNR4:BE901_SW.MYNDNR4_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD4:BE901_SW.KILDEPROCEKOD4_SW,         
+        :DCLBE90100T.FEJLNR5:BE901_SW.FEJLNR5_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD5:BE901_SW.FEJLADVISTYPEKOD5_SW,   
+        :DCLBE90100T.MYNDNR5:BE901_SW.MYNDNR5_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD5:BE901_SW.KILDEPROCEKOD5_SW,         
+        :DCLBE90100T.FEJLNR6:BE901_SW.FEJLNR6_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD6:BE901_SW.FEJLADVISTYPEKOD6_SW,   
+        :DCLBE90100T.MYNDNR6:BE901_SW.MYNDNR6_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD6:BE901_SW.KILDEPROCEKOD6_SW,         
+        :DCLBE90100T.FEJLNR7:BE901_SW.FEJLNR7_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD7:BE901_SW.FEJLADVISTYPEKOD7_SW,   
+        :DCLBE90100T.MYNDNR7:BE901_SW.MYNDNR7_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD7:BE901_SW.KILDEPROCEKOD7_SW,         
+        :DCLBE90100T.FEJLNR8:BE901_SW.FEJLNR8_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD8:BE901_SW.FEJLADVISTYPEKOD8_SW,   
+        :DCLBE90100T.MYNDNR8:BE901_SW.MYNDNR8_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD8:BE901_SW.KILDEPROCEKOD8_SW,         
+        :DCLBE90100T.FEJLNR9:BE901_SW.FEJLNR9_SW,                       
+        :DCLBE90100T.FEJLADVISTYPEKOD9:BE901_SW.FEJLADVISTYPEKOD9_SW,   
+        :DCLBE90100T.MYNDNR9:BE901_SW.MYNDNR9_SW,                       
+        :DCLBE90100T.KILDEPROCEKOD9:BE901_SW.KILDEPROCEKOD9_SW,         
+        :DCLBE90100T.FEJLNR10:BE901_SW.FEJLNR10_SW,                     
+        :DCLBE90100T.FEJLADVISTYPEKOD10:BE901_SW.FEJLADVISTYPEKOD10_SW, 
+        :DCLBE90100T.MYNDNR10:BE901_SW.MYNDNR10_SW,                     
+        :DCLBE90100T.KILDEPROCEKOD10:BE901_SW.KILDEPROCEKOD10_SW,       
+        :DCLBE90100T.INSERT_TS,                                         
+        :DCLBE90100T.INSERT_AF,                                         
+        :DCLBE90100T.EVSRABBRTKOD,                                      
+        :DCLBE90100T.EVSSKAFSKUDBLB:BE901_SW.EVSSKAFSKUDBLB_SW,         
+        :DCLBE90100T.EVSSKAFSKUDDTAKOD:BE901_SW.EVSSKAFSKUDDTAKOD_SW,   
+        :DCLBE90100T.EVSRABBLB:BE901_SW.EVSRABBLB_SW,                   
+        :DCLBE90100T.EJVSKAFOERABBLB:BE901_SW.EJVSKAFOERABBLB_SW,       
+        :DCLBE90100T.FSIGTVURKOD:BE901_SW.FSIGTVURKOD_SW,               
+        :DCLBE90100T.EJVBSKATKOD:BE901_SW.EJVBSKATKOD_SW,               
+        :DCLBE90100T.VURMARKOD:BE901_SW.VURMARKOD_SW,                   
+        :DCLBE90100T.VURTERMDTO:BE901_SW.VURTERMDTO_SW,                 
+        :DCLBE90100T.JURKATID:BE901_SW.JURKATID_SW,                     
+        :DCLBE90100T.JURUNDKATID:BE901_SW.JURUNDKATID_SW,               
+        :DCLBE90100T.NAEUDLEJBOLKOD:BE901_SW.NAEUDLEJBOLKOD_SW,         
+        :DCLBE90100T.NAEUDLEJBOLDTAKOD:BE901_SW.NAEUDLEJBOLDTAKOD_SW,   
+        :DCLBE90100T.VURDEAAR:BE901_SW.VURDEAAR_SW,                     
+        :DCLBE90100T.EVSRABDTAKOD:BE901_SW.EVSRABDTAKOD_SW,             
+        :DCLBE90100T.RABBRTEJEANDPCT:BE901_SW.RABBRTEJEANDPCT_SW,       
+        :DCLBE90100T.EJVSKAFOEMANSKABLB:BE901_SW.EJVSKAFOEMANSKABLB_SW, 
+        :DCLBE90100T.RABPCTAARSAKOD:BE901_SW.RABPCTAARSAKOD_SW,         
+        :DCLBE90100T.VURMARDTAKOD:BE901_SW.VURMARDTAKOD_SW,             
+        :DCLBE90100T.EJVSKAMASKIBLB:BE901_SW.EJVSKAMASKIBLB_SW,         
+        :DCLBE90100T.KMDREGISTMP:BE901_SW.KMDREGISTMP_SW,               
+        :DCLBE90100T.EVSMANUERABDTAKOD:BE901_SW.EVSMANUERABDTAKOD_SW,   
+        :DCLBE90100T.EVSMANUERABBLB:BE901_SW.EVSMANUERABBLB_SW,         
+        :DCLBE90100T.VURMARKATKOD:BE901_SW.VURMARKATKOD_SW,             
+        :DCLBE90100T.VURMARKATDTAKOD:BE901_SW.VURMARKATDTAKOD_SW,       
+        :DCLBE90100T.EJVSKAEFTRABBLB:BE901_SW.EJVSKAEFTRABBLB_SW        
+        ;                                                               
+                                                                        
+        SELECT (SQLCA.SQLCODE);                                         
+          WHEN (0)                                                      
+            DO;                                                         
+              ANTAL_FETCH_OPDAT = ANTAL_FETCH_OPDAT + 1;                
+              OPDATERING_FUNDET = JA;                                   
+ /*PUT SKIP LIST('DCLBE90100T.DUMMY_ID =',DCLBE90100T.DUMMY_ID);*/      
+ /*PUT SKIP LIST('DCLBE90100T.INDKAAR  =',DCLBE90100T.INDKAAR);*/       
+ /*PUT SKIP LIST('DCLBE90100T.KOERNR   =',DCLBE90100T.KOERNR);*/        
+ /*PUT SKIP LIST('DCLBE90100T.KOERDTO  =',DCLBE90100T.KOERDTO);*/       
+ /*PUT SKIP LIST('DCLBE90100T.PNR      =',DCLBE90100T.PNR);*/           
+            END;                                                        
+          WHEN (100)                                                    
+            DO;                                                         
+              OPDATERING_FUNDET = NEJ;                                  
+            END;                                                        
+          OTHERWISE                                                     
+            DO;                                                         
+              ABENDTXT = '101 FETCH OPDAT_CUR';                         
+            CALL SQL_FEJL;                                              
+          END;                                                          
+        END; /* SELECT*/                                                
+                                                                        
+ END FETCH_OPDAT_CUR;                                                   
+ /*********************************************************************/
+ OPEN_OPDAT_CUR: PROC;                                                  
+                                                                        
+     EXEC SQL OPEN OPDAT_CUR;                                           
+                                                                        
+     IF SQLCA.SQLCODE ^= 0                                              
+     THEN                                                               
+        DO;                                                             
+          ABENDTXT = '101 OPEN RESULTCURS';                             
+          CALL SQL_FEJL;                                                
+        END;                                                            
+                                                                        
+ END OPEN_OPDAT_CUR;                                                    
+ /*********************************************************************/
+ CLOSE_OPDAT_CUR: PROC;                                                 
+                                                                        
+     EXEC SQL CLOSE OPDAT_CUR;                                          
+                                                                        
+ END CLOSE_OPDAT_CUR;                                                   
+ /*********************************************************************/
+ /*      AFSLUT                                                       */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    /* Med her for at optællinger skal passe */                         
+    IF ANT_COMM > 0                                                     
+    THEN                                                                
+      DO;                                                               
+        EXEC SQL COMMIT;                                                
+        PUT SKIP LIST ('Commit efter ' !! ANTAL_SKRIV_EVS !!            
+               ' opdateringer på sluttabeller');                        
+         ANT_COMM = 0;                                                  
+      END;                                                              
+                                                                        
+    CLOSE FILE (PARM);                                                  
+    CALL ZZ20300(' ','99');      /* LUK ALLE PRINTDATASÆT */            
+                                                                        
+ END AFSLUT;                                                            
+ /**********************************************************************
+ * DATA_MODUL                                                   RUTINE *
+ **********************************************************************/
+ DATA_MODUL: PROC (BEHANDL);                                            
+                                                                        
+  DCL BEHANDL    CHAR (10);                                             
+                                                                        
+  KOM_AREAL.KOMM           = '';                                        
+  KOM_AREAL.SØG            = '';                                        
+  KOM_AREAL.SØG.DCPRN      = STYR_FELTER.DCPRN;                         
+  KOM_AREAL.SØG.DINDKAAR   = STYR_FELTER.DINDKAAR;                      
+  KOM_AREAL.SØG.EKOMNR     = STYR_FELTER.EKOMNR;                        
+  KOM_AREAL.SØG.EEJDNR     = STYR_FELTER.EEJDNR;                        
+  KOM_AREAL.SØG.EENHEDLBNR = STYR_FELTER.EENHEDLBNR;                    
+  KOM_AREAL.SØG.ELBNR      = STYR_FELTER.ELBNR;                         
+  KOM_AREAL.KOMM.TYPE      = STYR_FELTER.TYPE;                          
+                                                                        
+  SELECT (BEHANDL);                                                     
+     WHEN ('LÆS')                                                       
+       DO;                                                              
+         KOM_AREAL.FUNKTION = 1;                                        
+         CALL BE24110 (KOM_AREAL,BE_IND);         /*ÅR-RET*/ /*¤SLUT19*/
+       END;                                                             
+     WHEN ('SKRIV')                                                     
+       DO;                                                              
+          KOM_AREAL.FUNKTION = 2;                                       
+          KOM_AREAL.TYPE     = STYR_FELTER.STATUS;                      
+          CALL BE24110 (KOM_AREAL,BE_UD);         /*ÅR-RET*/ /*¤SLUT19*/
+       END;                                                             
+     WHEN ('SLET_EJER')                                                 
+        DO;                                                             
+          KOM_AREAL.FUNKTION = 5;                                       
+          PUT SKIP LIST('SLET_EJER IKKE INDFØRT');                      
+        END;                                                            
+     OTHER           /*¤SLUT19*/                              /*ÅR-RET*/
+       PUT SKIP LIST ('BE24700 DATAMODUL FORKERT BEHANDL '!!            
+                       BEHANDL);                                        
+  END; /*SELECT (BEHANDL)*/                                             
+                                                                        
+  STYR_FELTER.RETURKODE  = KOM_AREAL.RETURKODE;                         
+  STYR_FELTER.RETURTEKST = KOM_AREAL.RETURTEKST;                        
+  STYR_FELTER.FEJLTEKST  = KOM_AREAL.RETURTEKST;                        
+                                                                        
+  IF KOM_AREAL.FUNKTION = 1 &           /* 0=EJD OG EJER FUNDET*/       
+     KOM_AREAL.RETURKODE >=0            /* 1=EJD FUNDET EJER EJ FUNDET*/
+  THEN                                  /* 2=EJD OG EJER EJ FUNDET*/    
+    DO;                                                                 
+      STYR_FELTER.STATUS = KOM_AREAL.RETURKODE; /* FRA LÆS */           
+      KOM_AREAL.RETURKODE = 0;                                          
+    END;                                                                
+                                                                        
+  IF KOM_AREAL.RETURKODE = 0                                            
+  THEN                                                                  
+     DO;                                                                
+       IF KOM_AREAL.FUNKTION = 1                                        
+       THEN                                                             
+          ANTAL_LÆS_EVS = ANTAL_LÆS_EVS + 1;                            
+       ELSE                                                             
+          ANTAL_SKRIV_EVS = ANTAL_SKRIV_EVS + 1;                        
+     END;                                                               
+  ELSE                                                                  
+  IF KOM_AREAL.RETURKODE < 0                                            
+  THEN                                                                  
+     DO;                                                                
+        IF KOM_AREAL.SQLKODE ^= 0                                       
+        THEN                                                            
+          DO;                                                           
+            PUT SKIP LIST ('Fejl håndteres af gammel rutine');          
+            PUT SKIP LIST (' returkode: ' !! KOM_AREAL.RETURKODE);      
+            PUT SKIP LIST (' returtekst: ' !! KOM_AREAL.RETURTEKST);    
+            PUT SKIP LIST (' sqlkode: ' !! KOM_AREAL.SQLKODE);          
+            CALL SQL_FEJL;  /* bemærk gammel fejlrutine */              
+          END;                                                          
+     END;                                                               
+                                                                        
+ END DATA_MODUL;                                                        
+ /*********************************************************************/
+ /* -   Overførselsprogrammet finder det mindste kørselsnr.           */
+ /*    (for indkomståret) i kørselstabellen,                          */
+ /*     hvor overførslen ikke udført.                                 */
+ /*                                                                   */
+ /*********************************************************************/
+ OPDATER_OVERFØR_STATUS: PROC;                                          
+                                                                        
+     EXEC SQL UPDATE BE90000T                                           
+        SET OVERFØR_OPDATER_TS = CURRENT TIMESTAMP                      
+           ,OVERFØR_STATUS     = 1                                      
+        WHERE INDKAAR    = :WK_INDKAAR                                  
+        AND   INDIVIDNR  = 132                                          
+        AND   KOERNR     = :WK_KOERNR;                                  
+                                                                        
+     SELECT (SQLCA.SQLCODE);                                            
+       WHEN (0)                                                         
+           DO;                                                          
+           END;                                                         
+       OTHERWISE                                                        
+           DO;                                                          
+              ABENDTXT = '307 OPDATER_OVERFØR_STATUS BE90000T '         
+                          !! SQLCODE;                                   
+              CALL SQL_FEJL;                                            
+           END;                                                         
+     END; /* SELECT*/                                                   
+                                                                        
+ END OPDATER_OVERFØR_STATUS;                                            
+ /*********************************************************************/
+ /* Nye felter til slut 2024 opdateres på BE20000T selv om            */
+ /* ejendommeen er kendt fra oprettelsen                              */
+ /* FUNKTION = 2 og TYPE = 0 og 1 EJENDOM FINDES I BE20000T           */
+ /*********************************************************************/
+ OPDATER_EJDFELTER: PROC;                                               
+                                                                        
+ DCL  HJHUSNR  CHAR(04);                                                
+ DCL  HJVEJKOD PIC '9999';                                              
+                                                                        
+      HJHUSNR  = '';                                                    
+      HJVEJKOD = '';                                                    
+                                                                        
+      IF STYR_FELTER.EENHEDLBNR > 0                                     
+      THEN                                                              
+        DO;                                                             
+          IF DCLBE90100T.EJDBLIGEADR > ' '                              
+          THEN                                                          
+             BE_IND.ENHEDBELIG = DCLBE90100T.EJDBLIGEADR;               
+                                                                        
+          IF DCLBE90100T.VEJKOD > ' '                                   
+          THEN                                                          
+            DO;                                                         
+              HJVEJKOD = DCLBE90100T.VEJKOD;                            
+              BE_IND.VEJK_ENHED = HJVEJKOD;                             
+            END;                                                        
+                                                                        
+          IF DCLBE90100T.HUSNR > ' ' !                                  
+             DCLBE90100T.HUSBOSTAADR > ' '                              
+          THEN                                                          
+            DO;                                                         
+              HJHUSNR = DCLBE90100T.HUSNR !! DCLBE90100T.HUSBOSTAADR;   
+              BE_IND.HUSNR_ENHED = HJHUSNR;                             
+            END;                                                        
+                                                                        
+          IF DCLBE90100T.ETAGENR >  ' '                                 
+          THEN                                                          
+             BE_IND.ETAGE_ENHED = DCLBE90100T.ETAGENR;                  
+                                                                        
+          IF DCLBE90100T.SIDEDOERNR > ' '                               
+          THEN                                                          
+             BE_IND.SDØR_ENHED = DCLBE90100T.SIDEDOERNR;                
+                                                                        
+          //D2416                                                       
+          IF STYR_FELTER.EKOMNR = 999                                   
+              & BE_IND.CLANDEKODE  = 'FR'                               
+          THEN                                                          
+           DO;                                                          
+              IF BE_IND.PERSON.CEKSEMP = '1'   //CEKSEMP                
+              THEN                                                      
+                 BE_IND.CLANDEKODE = 'F1';                              
+              IF BE_IND.PERSON.CEKSEMP = '2'   //CEKSEMP                
+              THEN                                                      
+                 BE_IND.CLANDEKODE = 'F2';                              
+           END;                                                         
+           //D2416                                                      
+                                                                        
+          CALL UPDATE_ADR_ENHED;                                        
+        END;                                                            
+      ELSE                                                              
+        DO;                                                             
+          IF DCLBE90100T.EJDBLIGEADR > ' '                              
+          THEN                                                          
+             BE_IND.EJDBELIG = DCLBE90100T.EJDBLIGEADR;                 
+                                                                        
+          IF DCLBE90100T.VEJKOD > ' '                                   
+          THEN                                                          
+            DO;                                                         
+              HJVEJKOD = DCLBE90100T.VEJKOD;                            
+              BE_IND.VEJK_EJD = HJVEJKOD;                               
+            END;                                                        
+                                                                        
+          IF DCLBE90100T.HUSNR       > ' ' !                            
+             DCLBE90100T.HUSBOSTAADR > ' '                              
+          THEN                                                          
+            DO;                                                         
+              HJHUSNR = DCLBE90100T.HUSNR !! DCLBE90100T.HUSBOSTAADR;   
+              BE_IND.HUSNR_EJD = HJHUSNR;                               
+            END;                                                        
+                                                                        
+          IF DCLBE90100T.ETAGENR >  ' '                                 
+          THEN                                                          
+             BE_IND.ETAGE_EJD = DCLBE90100T.ETAGENR;                    
+                                                                        
+          IF DCLBE90100T.SIDEDOERNR > ' '                               
+          THEN                                                          
+             BE_IND.SDØR_EJD = DCLBE90100T.SIDEDOERNR;                  
+                                                                        
+          //D2416                                                       
+          IF STYR_FELTER.EKOMNR = 999                                   
+              & BE_IND.CLANDEKODE  = 'FR'                               
+          THEN                                                          
+           DO;                                                          
+              IF BE_IND.PERSON.CEKSEMP = '1'   //CEKSEMP                
+              THEN                                                      
+                 BE_IND.CLANDEKODE = 'F1';                              
+              IF BE_IND.PERSON.CEKSEMP = '2'   //CEKSEMP                
+              THEN                                                      
+                 BE_IND.CLANDEKODE = 'F2';                              
+           END;                                                         
+           //D2416                                                      
+                                                                        
+          CALL UPDATE_ADR_EJD;                                          
+        END;                                                            
+                                                                        
+ END OPDATER_EJDFELTER;                                                 
+ /*********************************************************************/
+ /* Opdater Adresse Enhedsfelterne på BE20000T                        */
+ /*********************************************************************/
+ UPDATE_ADR_ENHED: PROC;                                                
+                                                                        
+     EXEC SQL                                                           
+       UPDATE BE20000T                                                  
+          SET ENHEDBELIG  = :BE_IND.ENHEDBELIG,                         
+              VEJK_ENHED  = :BE_IND.VEJK_ENHED,                         
+              HUSNR_ENHED = :BE_IND.HUSNR_ENHED,                        
+              ETAGE_ENHED = :BE_IND.ETAGE_ENHED,                        
+              SDØR_ENHED  = :BE_IND.SDØR_ENHED,                         
+              CLANDEKODE  = :BE_IND.CLANDEKODE                          
+        WHERE DINDKAAR    = :STYR_FELTER.DINDKAAR                       
+          AND EKOMNR      = :STYR_FELTER.EKOMNR                         
+          AND EEJDNR      = :STYR_FELTER.EEJDNR                         
+          AND EENHEDLBNR  = :STYR_FELTER.EENHEDLBNR;                    
+                                                                        
+     SELECT(SQLCA.SQLCODE);                                             
+        WHEN(0);                                                        
+      OTHERWISE                                                         
+          DO;                                                           
+            ABENDTXT = '101 UPDATE BE20000T ADR ENHED';                 
+            CALL SQL_FEJL;                                              
+          END;                                                          
+     END; /* SELECT*/                                                   
+                                                                        
+ END UPDATE_ADR_ENHED;                                                  
+ /*********************************************************************/
+ /* Opdater Adresse ejendomsfelter på BE20000T                        */
+ /*********************************************************************/
+ UPDATE_ADR_EJD: PROC;                                                  
+                                                                        
+     EXEC SQL                                                           
+       UPDATE BE20000T                                                  
+          SET VEJK_EJD   = :BE_IND.VEJK_EJD,                            
+              HUSNR_EJD  = :BE_IND.HUSNR_EJD,                           
+              ETAGE_EJD  = :BE_IND.ETAGE_EJD,                           
+              SDØR_EJD   = :BE_IND.SDØR_EJD,                            
+              EJDBELIG   = :BE_IND.EJDBELIG,                            
+              CLANDEKODE = :BE_IND.CLANDEKODE                           
+        WHERE DINDKAAR   = :STYR_FELTER.DINDKAAR                        
+          AND EKOMNR     = :STYR_FELTER.EKOMNR                          
+          AND EEJDNR     = :STYR_FELTER.EEJDNR                          
+          AND EENHEDLBNR = :STYR_FELTER.EENHEDLBNR;                     
+                                                                        
+     SELECT(SQLCA.SQLCODE);                                             
+        WHEN(0);                                                        
+      OTHERWISE                                                         
+          DO;                                                           
+            ABENDTXT = '102 UPDATE BE20000T ADR EJD';                   
+            CALL SQL_FEJL;                                              
+          END;                                                          
+     END; /* SELECT*/                                                   
+                                                                        
+ END UPDATE_ADR_EJD;                                                    
+ /*********************************************************************/
+ /* SKRIV EN RÆKKE PÅ EVS SLUT RESULTATTABEL BE40000T                 */
+ /*********************************************************************/
+ SKRIV_RESULTAT_TABEL: PROC;                                            
+                                                                        
+    RESULTATTAB = '';                                                   
+                                                                        
+    RESULTATTAB.DINDKAAR            = STYR_FELTER.DINDKAAR;             
+    RESULTATTAB.DCPRN               = STYR_FELTER.DCPRN;                
+    RESULTATTAB.EKOMNR              = STYR_FELTER.EKOMNR;               
+    RESULTATTAB.EEJDNR              = STYR_FELTER.EEJDNR;               
+    RESULTATTAB.EENHEDLBNR          = STYR_FELTER.EENHEDLBNR;           
+    RESULTATTAB.ELBNR               = STYR_FELTER.ELBNR;                
+    RESULTATTAB.EGENNR              = STYR_FELTER.EGENNR;               
+    RESULTATTAB.CKOERSEL             = 'B';                             
+    RESULTATTAB.UDSKRDTO             = '';                              
+    RESULTATTAB.DRESULTAT            = DCLBE90100T.CSCREGISTMP;         
+    RESULTATTAB.DFRAGLD              = DCLBE90100T.CSCREGISTMP;         
+    RESULTATTAB.BEJERAN              = DCLBE90100T.EJVSKAFOERABBLB;     
+    INDK_EVS_RES.BEJERAN_I           = BE901_SW.EJVSKAFOERABBLB_SW;     
+    RESULTATTAB.BPENSIND             = DCLBE90100T.EJVPENSINDKBLB;      
+    INDK_EVS_RES.BPENSIND_I          = BE901_SW.EJVPENSINDKBLB_SW;      
+    RESULTATTAB.BPENSRED             = DCLBE90100T.EJVRDUPENSNSLBLB;    
+    RESULTATTAB.CFRÅR                = DCLBE90100T.FSKUDRESKAMDKOD;     
+    RESULTATTAB.KOERSTMP             = DCLBE90100T.CSCREGISTMP;         
+    RESULTATTAB.RES_EVSEFTERRABAT    = DCLBE90100T.EJVSKAEFTRABBLB;     
+    INDK_EVS_RES.RES_EVSEFTERRABAT_I = BE901_SW.EJVSKAEFTRABBLB_SW;     
+    RESULTATTAB.RES_FAKTISKRABAT     = DCLBE90100T.EVSRABBLB;           
+    INDK_EVS_RES.RES_FAKTISKRABAT_I  = BE901_SW.EVSRABBLB_SW;           
+                                                                        
+         EXEC SQL                                                       
+              INSERT INTO BE40000T                                      
+                                                                        
+                     (DINDKAAR                                          
+                     ,DCPRN                                             
+                     ,EKOMNR                                            
+                     ,EEJDNR                                            
+                     ,EENHEDLBNR                                        
+                     ,ELBNR                                             
+                     ,EGENNR                                            
+                     ,DFRAGLD                                           
+                     ,COMPLA                                            
+                     ,DOMPLACPR                                         
+                     ,UDSKRDTO                                          
+                     ,DRESULTAT                                         
+                     ,CKOERSEL                                          
+                     ,BEJERAN                                           
+                     ,BPENSIND                                          
+                     ,BPENSRED                                          
+                     ,CFRÅR                                             
+                     ,KOERSTMP                                          
+                     ,RES_FAKTISKRABAT                                  
+                     ,RES_EVSEFTERRABAT)                                
+              VALUES (:RESULTATTAB.DINDKAAR                             
+                     ,:RESULTATTAB.DCPRN                                
+                     ,:RESULTATTAB.EKOMNR                               
+                     ,:RESULTATTAB.EEJDNR                               
+                     ,:RESULTATTAB.EENHEDLBNR                           
+                     ,:RESULTATTAB.ELBNR                                
+                     ,:RESULTATTAB.EGENNR                               
+                     ,:RESULTATTAB.DFRAGLD                              
+                     ,:RESULTATTAB.COMPLA                               
+                     ,:RESULTATTAB.DOMPLACPR                            
+                     ,:RESULTATTAB.UDSKRDTO                             
+                     ,:RESULTATTAB.DRESULTAT                            
+                     ,:RESULTATTAB.CKOERSEL                             
+                     ,:RESULTATTAB.BEJERAN                              
+                     ,:RESULTATTAB.BPENSIND                             
+                     ,:RESULTATTAB.BPENSRED                             
+                     ,:RESULTATTAB.CFRÅR                                
+                     ,:RESULTATTAB.KOERSTMP                             
+                     ,:RESULTATTAB.RES_FAKTISKRABAT                     
+                     ,:RESULTATTAB.RES_EVSEFTERRABAT)                   
+         ;                                                              
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0) ;                                                   
+           OTHERWISE                                                    
+             DO;                                                        
+               PUT SKIP DATA(RESULTATTAB);                              
+               PUT SKIP LIST('SKRIV_RES SQL FEJL');                     
+               ABENDTXT = '101 SKRIV_RESULTAT_TABEL';                   
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* END-SELECT */                                          
+                                                                        
+ END SKRIV_RESULTAT_TABEL;                                              
+ /*********************************************************************/
+ SLET_RESULTAT:PROC;                                                    
+                                                                        
+         EXEC SQL                                                       
+           DELETE FROM BE40000T                                         
+            WHERE   DINDKAAR   = :STYR_FELTER.DINDKAAR                  
+             AND    DCPRN      = :STYR_FELTER.DCPRN                     
+             AND    EEJDNR     = :STYR_FELTER.EEJDNR                    
+             AND    EENHEDLBNR = :STYR_FELTER.EENHEDLBNR                
+             AND    EKOMNR     = :STYR_FELTER.EKOMNR                    
+             AND    ELBNR      = :STYR_FELTER.ELBNR;                    
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               PUT SKIP LIST('SLET_RESULTAT');                          
+             END;                                                       
+           WHEN (100) /*Der behøver ikke være resultat*/                
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 SLET_RESULTAT';                          
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* END-SELECT */                                          
+                                                                        
+                                                                        
+ END SLET_RESULTAT;                                                     
+ /*********************************************************************/
+ /* Fundet i BE30000T opdatering af DBRGN_MODT                        */
+ /*********************************************************************/
+ OPDATER_DBRGN_MODT: PROC;                                              
+                                                                        
+         EXEC SQL                                                       
+            UPDATE BE30000T                                             
+            SET    DBRGN_MODT  = CURRENT TIMESTAMP                      
+                                                                        
+            WHERE DINDKAAR   = :STYR_FELTER.DINDKAAR                    
+              AND DCPRN      = :STYR_FELTER.DCPRN                       
+              AND EEJDNR     = :STYR_FELTER.EEJDNR                      
+              AND EENHEDLBNR = :STYR_FELTER.EENHEDLBNR                  
+              AND EKOMNR     = :STYR_FELTER.EKOMNR                      
+              AND ELBNR      = :STYR_FELTER.ELBNR                       
+              AND EGENNR     = :STYR_FELTER.EGENNR;                     
+                                                                        
+         IF (SQLCA.SQLCODE ^= 0)                                        
+         THEN                                                           
+           DO;                                                          
+             PUT SKIP LIST('DBRGN DINDKAAR =',STYR_FELTER.DINDKAAR);    
+             PUT SKIP LIST('DCPRN          =',STYR_FELTER.DCPRN);       
+             PUT SKIP LIST('EEJDNR         =',STYR_FELTER.EEJDNR);      
+             PUT SKIP LIST('EENHEDLBNR     =',STYR_FELTER.EENHEDLBNR);  
+             PUT SKIP LIST('EKOMNR         =',STYR_FELTER.EKOMNR);      
+             PUT SKIP LIST('ELBNR          =',STYR_FELTER.ELBNR);       
+             PUT SKIP LIST('EGENNR         =',STYR_FELTER.EGENNR);      
+             ABENDTXT = '101 OPDATER_DBRGN_MODT';                       
+             CALL SQL_FEJL;                                             
+           END;                                                         
+                                                                        
+ END OPDATER_DBRGN_MODT;                                                
+ /*********************************************************************/
+ /* SKRIV OPDATERINGEN PÅ BE90300T SPORINGSTABEL                      */
+ /*********************************************************************/
+ SKRIV_SPOR_TABEL: PROC;                                                
+                                                                        
+         DCLBE90300T = '';                                              
+                                                                        
+         DCLBE90300T.DUMMY_ID   = DCLBE90100T.DUMMY_ID;                 
+         DCLBE90300T.DINDKAAR   = STYR_FELTER.DINDKAAR;                 
+         DCLBE90300T.EEJDNR     = STYR_FELTER.EEJDNR;                   
+         DCLBE90300T.EKOMNR     = STYR_FELTER.EKOMNR;                   
+         DCLBE90300T.EENHEDLBNR = STYR_FELTER.EENHEDLBNR;               
+         DCLBE90300T.DCPRN      = STYR_FELTER.DCPRN;                    
+         DCLBE90300T.ELBNR      = STYR_FELTER.ELBNR;                    
+         DCLBE90300T.EGENNR     = STYR_FELTER.EGENNR;                   
+                                                                        
+                                                                        
+         EXEC SQL                                                       
+              INSERT INTO BE90300T                                      
+                  (DUMMY_ID,                                            
+                   DINDKAAR,                                            
+                   EKOMNR,                                              
+                   EEJDNR,                                              
+                   EENHEDLBNR,                                          
+                   DCPRN,                                               
+                   ELBNR,                                               
+                   EGENNR,                                              
+                   OPRET_TS)                                            
+                                                                        
+          VALUES (:DCLBE90300T.DUMMY_ID,                                
+                  :DCLBE90300T.DINDKAAR,                                
+                  :DCLBE90300T.EKOMNR,                                  
+                  :DCLBE90300T.EEJDNR,                                  
+                  :DCLBE90300T.EENHEDLBNR,                              
+                  :DCLBE90300T.DCPRN,                                   
+                  :DCLBE90300T.ELBNR,                                   
+                  :DCLBE90300T.EGENNR,                                  
+                  CURRENT TIMESTAMP);                                   
+                                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               PUT SKIP LIST('SKRIV_SPOR_TABEL');                       
+               ABENDTXT = '101 SKRIV_SPOR_TABEL';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* END-SELECT */                                          
+                                                                        
+ END SKRIV_SPOR_TABEL;                                                  
+                                                                        
+ /* Konverter */                                                        
+ DB2_DATO_TIL_FIX09: PROC (DB2_DATO_IND) RETURNS (DEC FIXED (09));      
+                                                                        
+ DCL     DB2_DATO_IND    CHAR      (10);   /* ÅÅÅÅ-MM-DD*/              
+ DCL     DATO_CHAR       CHAR      (08);   /* ÅÅÅÅMMDD  */              
+ DCL     DATO_PIC        PIC       '99999999' DEF DATO_CHAR;            
+ DCL     DATO_FIX        DEC FIXED (09);                                
+                                                                        
+         DATO_CHAR = SUBSTR (DB2_DATO_IND,1,4) !!                       
+                     SUBSTR (DB2_DATO_IND,6,2) !!                       
+                     SUBSTR (DB2_DATO_IND,9,2);                         
+                                                                        
+         IF DB2_DATO_IND = ''                                           
+         THEN                                                           
+            DATO_PIC = 0;                                               
+                                                                        
+         DATO_FIX = DATO_PIC;                                           
+                                                                        
+         RETURN (DATO_FIX);                                             
+                                                                        
+ END DB2_DATO_TIL_FIX09;                                                
+                                                                        
+ /*********************************************************************/
+ /* Test om input felt er 1 eller ' '(eller noget andet)              */
+ /* Hvis felt er = 1 så returneres 'J', eller returneres 'N'          */
+ /*********************************************************************/
+ TJEK: PROC(FELT) RETURNS(CHAR(1));                                     
+                                                                        
+   DCL FELT CHAR(1);                                                    
+                                                                        
+   IF FELT = '1' THEN                                                   
+     RETURN('J');                                                       
+   ELSE                                                                 
+     RETURN('N');                                                       
+                                                                        
+ END TJEK;                                                              
+ /*********************************************************************/
+ %INCLUDE BE24404M;            /* ABENDMODUL NAVN ?? *//*#01*//*ÅR-RET*/
+                                                                        
+ END BE24700;                                                   /*#01*/ 

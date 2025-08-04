@@ -1,0 +1,695 @@
+  PROCESS OPT(TIME);                                                    
+ BH85300: /* DAN DATA TIL EVS EJENDOMSTABEL TIL FORSKUD   */            
+         PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                   
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');       
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL :                                                            *
+ * LEVERING AF OPLYSNINGER TIL FORSKUDS EVS-EJENDOMSTABEL (DB2).       *
+ *                                                                     *
+ * INPUT  : BH95001D  BEREGNINGSBÅND TIL FORSKUD - SORTERET           * 
+ *                                                                     *
+ * OUTPUT : B.H95300D UDTRÆK - ALLE PERSONER                          * 
+ *          BH85301Y  KØRSELSKONTROLLISTE                             * 
+ *                                                                     *
+ * PROGRAMMØR: AAGE RASMUSSEN  AUG       1999                          *
+ * RETTET:     AAGE RASMUSSEN  AUG       2000                          *
+ * RETTET:     AAGE RASMUSSEN  AUG       2001                          *
+ ***********************************************************************
+ * RETTET:     OLUF MØRK       AUG       2002                          *
+ *             ÅRSTILRETTET MARKERET MED F2003                         *
+ * RETTET:     BO SCHMIDT      JUL       2003                          *
+ * RETTET:     BO SCHMIDT      JUL       2004                          *
+ * RETTET:     SUSANNE KROGH VILLUMSEN   JUL 2005       *FORSKUD06*    *
+ *             VURDOPL1 RETTET TIL VURDOPLGL                           *
+ * RETTET:     BO SCHMIDT                JUL 2006       *FORSKUD07*    *
+ * RETTET:     BO SCHMIDT                JUL 2007       *FORSKUD08*    *
+ * RETTET:     BO SCHMIDT                JUL 2008       *FORSKUD09*    *
+ * RETTET:     GERD HOLM-PEDERSEN        APR 2009       *FORSKUD10*    *
+ * RETTET:     GERD HOLM-PEDERSEN        JUN 2010       *FORSKUD11*    *
+ *             CEJEV UDGÅET, DA DET ER UDGÅET FRA ESR.                 *
+ * RETTET:     GERD HOLM-PEDERSEN        MAJ 2011       *FORSKUD12*    *
+ * RETTET:     LARS KAAE HARRITSHØJ      MAJ 2012       *FORSKUD13*    *
+ *             ÆNDRINGER FORETAGET I BH90100N                          *
+ * RETTET:     LARS KAAE HARRITSHØJ      MAJ 2013       *FORSKUD14*    *
+ * RETTET:     JØRGEN SAUGMANN           JUNI 2014      *FORSKUD15*    *
+ * RETTET:     JØRGEN SAUGMANN           JUNI 2015      *FORSKUD16*    *
+ * RETTET:     ESBEN BRODERSEN           JUNI 2016      *FORSKUD17*    *
+ *             KUN KOMPILERET                                          *
+ * BH85300L    OPRETTE SOM KOPI AF BH95300 TIL DB2 OMLÆGNING.          *
+ * RETTET:     ESBEN BRODERSEN           APR 2019      *FORSKUD20*     *
+ *             Ny struktur til ejendomstabel felter                    *
+ *             BH95300N -> BH85300N                                    *
+ * Forskud2021 Per Brunk                               Marts 2020      *
+ *             Esben Brodersen EBD nye felter          Juli  2020      *
+ *             Per Brunk                               Juli 2020       *
+ *             KS25 EVS-oprettelsen begrænset skattepligtige           *
+ * Forskud2022 Per Brunk                               01.02.2021      *
+ *             Nye felter i BQ77000T mellemperiode                     *
+ * SLUT 2021   Steen Pedersem SEP                      Mar 2021        *
+ *             BH65300M rettet til BH55300M                            *
+ *             Fil BH853I er fjernet                                   *
+ *             Brug af BH863_PARM er erstattet af BH55300M             *
+ *             Parameter 2 til OPDATER_KØRSELSTABEL fjernet            *
+ *                                                                     *
+ * Forskud2022 Finn Andersenb(FIA) og EBD              24.06.2021      *
+ *             Nye felter tilføjet. Søg på FIA                         *
+ *             Defect 714                                              *
+ *             Ændringer til Null felter i BH85300N                    *
+ * Forskud2022 Defect 782 og Defect 864  EBD           Juli 2021       *
+ * Forskud2023 Per Brunk  Årsrul                       08.06.2022      *
+ * Forskud2023 Defect 30                 EBD           Juli 2022       *
+ * FORSKUD2023 Udgåede ejendomme         PBR           08.09.2022      *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH853O FILE RECORD OUTPUT;     /* LOAD-GRUNDLAG TIL EVS     */ 
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+ DCL     1 BH853,                                                       
+           %INCLUDE BH85300N;;                              /* F2020 */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+         EXEC SQL INCLUDE SQLCA;     /* SQL KOMMUNIKATIONSAREAL       */
+                                                                        
+         EXEC SQL INCLUDE BQ75000T;  /* ESR (FORSKUD)                 */
+         EXEC SQL INCLUDE BQ76000T;  /* MANDTAL (FORSKUD)             */
+         EXEC SQL INCLUDE BQ77000T;  /* EVS_UDTRÆK (FORSKUD)          */
+         EXEC SQL INCLUDE BQ78000T;  /* EVS_RESULTAT (FORSKUD)        */
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                   /* TÆLLEVÆRKER TIL TOTALLISTEN */      
+           2 LÆST_EJD        FIXED DEC (11),                            
+           2 LÆST_CLANDEKODE FIXED DEC (11),                            
+           2 SKREVET         FIXED DEC (11),                            
+ /*        2 LÆST_BQ75000T   FIXED DEC (7),   /*DUPLET ->*/             
+ /*          2 LÆST_BQ76000T   FIXED DEC (7),                           
+ /*          2 LÆST_BQ77000T   FIXED DEC (7), */                        
+           2 LÆST_BQ78000T   FIXED DEC (7),                             
+           2 FETCH_RESULT    FIXED DEC (7),                             
+           2 SELECT_MT       FIXED DEC (7),                             
+           2 SELECT_ESR      FIXED DEC (7),                             
+           2 SELECT_SLUT     FIXED DEC (7),                             
+           2 ANT_COMM        FIXED DEC (7),                             
+           2 ANT_UPD         FIXED DEC (7);                             
+                                                                        
+ DCL     1 LÆST_FEJLNR(5000:6000), /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ DCL     1 SKR_FEJLNR(5000:6000),  /* TÆLLEVÆRKER TIL TOTALLISTEN */    
+           2 ANTAL       FIXED DEC (7);                                 
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH85300L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (' '),           
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN,                                                      
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+ DCL     INDEX           BIN FIXED (31);                                
+ DCL     HJ_FEJLNR       CHAR      (4);                                 
+ DCL     HJ_FEJLNR_PIC   PIC       '(4)9'  BASED(ADDR(HJ_FEJLNR));      
+                                                                        
+ DCL     HJ_PIC4         PIC       '(4)9';                              
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     GEM_EKOMNR      BIN FIXED(15)       INIT      (0);             
+ DCL     GEM_EEJDNR      BIN FIXED(31)       INIT      (0);             
+ DCL     GEM_EENHEDLBNR  BIN FIXED(15)       INIT      (0);             
+                                                                        
+ DCL     1 BH55300M,                                                    
+           %INCLUDE BH55300M;        /*#01*/                            
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_GLSLUTÅR                    BIN FIXED (15);                 
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BH85300');      
+                                                                        
+ /*********************************************************************/
+ /* TIL BH85111M                                                      */
+ /*********************************************************************/
+ DCL     RESULT_FUNDET         BIT       (1);                           
+ DCL     MT_FUNDET             BIT       (1);                           
+ DCL     SLUT_FUNDET           BIT       (1);                           
+ DCL     ESR_FUNDET            BIT       (1);                           
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH85300'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH85300L');             
+            END;                                                        
+                                                                        
+         SELECT (BH55300M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BH55300M.FORSKÅR;                    
+               END;                                                     
+            WHEN ('OPRET_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BH55300M.SLUTÅR;                     
+               END;                                                     
+            WHEN ('SUPPL_EVS_SLUT')                                     
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT = BH55300M.AFVIKLINGS_ID;         
+                  WS_TIL_EVS_AAR = BH55300M.SLUTÅR;                     
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  ABENDTXT = '101 PARAMETERFEJL';                       
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+         CALL OPDATER_KØRSELSTABEL('START');                            
+                                                                        
+         OPEN FILE (BH853O) TITLE ('BH85300O');                         
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH85301Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         TV = 0;                                                        
+         OVERLIN1.TEKST2 = 'DAN LOADGRUNDLAG TIL EVS-EJENDOMSTABEL ' !! 
+                           'FORSKUD ' !! BH55300M.INDKÅR2; /*#01*/      
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+            LÆST_FEJLNR(INDEX).ANTAL = 0;                               
+            SKR_FEJLNR(INDEX).ANTAL = 0;                                
+         END;                                                           
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         /*HOVED STYRING FRA BH95100L HER SQL KODE ? og orderby*/       
+         CALL CLOSE_RESULTCURS;                                         
+         CALL OPEN_RESULTCURS;                                          
+         CALL FETCH_RESULT;       /* BQ78 */                            
+                                                                        
+         DO WHILE (RESULT_FUNDET);                                      
+            TV.LÆST_BQ78000T =  TV.LÆST_BQ78000T + 1;                   
+            CALL SELECT_ESR;      /* BQ75 */                            
+            CALL SELECT_MT;       /* BQ76 */                            
+            CALL SELECT_SLUT;     /* BQ77 */                            
+            CALL BEHANDL;                                               
+            CALL FETCH_RESULT;    /* BQ78 */                            
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       EJENDOMME TIL EVS - KUN 1 INDIVID PR. EKOMNR/EEJDNR          * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+        /* IKKE EVS RELEVANT EJD.  SKULLE HAVDE VÆRET */                
+        /* OVERLÆST I BH31800L.  */                                     
+        IF DCLBQ78000T.TILEVS_A_V_CBENYT = '78'                         
+        THEN                                                            
+           RETURN;                                                      
+                                                                        
+        IF DCLBQ78000T.FEJLNR = 5060                                    
+        THEN                                                            
+          RETURN;                                                       
+                                                                        
+        /* Disse skal ikke oprettes fejlnummer 5500 findes */           
+        /* kun internt i EVS oprettelsen se BH85000 KS25   */           
+        IF DCLBQ78000T.FEJLNR = 5500 &                                  
+           DCLBQ78000T.EKOMNR = 999                                     
+        THEN                                                            
+           RETURN;                                                      
+                                                                        
+        /* Disse skal oprettes med fejlnummer 5001            */        
+        /* Internt fejlnr i EVS oprettelsen se BH85000  D864  */        
+        /* PBR 08.09.2022                                     */        
+        IF DCLBQ78000T.FEJLNR = 5502                                    
+        THEN                                                            
+           DCLBQ78000T.FEJLNR = 5001;                                   
+                                                                        
+        /* Disse skal ikke oprettes fejlnummer 5503 findes */           
+        /* kun internt i EVS oprettelsen se BH85000  D782  */           
+        IF DCLBQ78000T.FEJLNR = 5503                                    
+        THEN                                                            
+           RETURN;                                                      
+                                                                        
+                                                                        
+        IF DCLBQ78000T.FEJLNR > 0                                       
+        THEN                                                            
+           DO;                                                          
+              INDEX = DCLBQ78000T.FEJLNR;                               
+              LÆST_FEJLNR(INDEX).ANTAL = LÆST_FEJLNR(INDEX).ANTAL + 1;  
+           END;                                                         
+                                                                        
+        IF  GEM_EKOMNR     = DCLBQ78000T.EKOMNR &                       
+            GEM_EEJDNR     = DCLBQ78000T.EEJDNR &                       
+            GEM_EENHEDLBNR = DCLBQ78000T.EENHEDLBNR                     
+        THEN                                                            
+           RETURN;                                                      
+                                                                        
+        GEM_EKOMNR     = DCLBQ78000T.EKOMNR;                            
+        GEM_EEJDNR     = DCLBQ78000T.EEJDNR;                            
+        GEM_EENHEDLBNR = DCLBQ78000T.EENHEDLBNR;                        
+                                                                        
+        LÆST_EJD = LÆST_EJD + 1;                                        
+                                                                        
+        IF DCLBQ78000T.EKOMNR = 999                                     
+         & DCLBQ78000T.EJENDOM_CLANDEKODE > ' '                         
+        THEN                                                            
+           LÆST_CLANDEKODE = LÆST_CLANDEKODE + 1;                       
+                                                                        
+                                                                        
+        BH853 = '';                                                     
+        BH853.DINDKAAR    = BH55300M.FORSKÅR;           /*#01*/         
+        BH853.EKOMNR      = DCLBQ78000T.EKOMNR;                         
+        BH853.EEJDNR      = DCLBQ78000T.EEJDNR;                         
+        BH853.EENHEDLBNR  = DCLBQ78000T.EENHEDLBNR;                     
+                                                                        
+        BH853.CBERGRL   = DCLBQ78000T.EJENDOM_CBERGRL;                  
+        BH853.CEJDTYPE  = DCLBQ78000T.EJENDOM_CEJDTYPE;                 
+                                                                        
+        IF DCLBQ78000T.FEJLNR = 5017 !                                  
+           DCLBQ78000T.FEJLNR = 5018 !                                  
+           DCLBQ78000T.FEJLNR = 5020 !                                  
+           DCLBQ78000T.FEJLNR = 5021 !                                  
+           DCLBQ78000T.FEJLNR = 5022 !                                  
+           DCLBQ78000T.FEJLNR = 5028 !                                  
+           DCLBQ78000T.FEJLNR = 5029 !                                  
+           DCLBQ78000T.FEJLNR = 5030 !                                  
+           DCLBQ78000T.FEJLNR = 5045                                    
+        THEN                                                            
+           BH853.FEJLNR = 0;                                            
+        ELSE                                                            
+           BH853.FEJLNR = DCLBQ78000T.FEJLNR;                           
+                                                                        
+        BH853.CICSID = ' ';                                             
+        BH853.CBENYT  = DCLBQ78000T.EJENDOM_CBENYT;                     
+        BH853.CFRED   = DCLBQ78000T.TILEVS_CFRED;                       
+                                                                        
+        BH853.DFRAGLD = DATO2.ÅR !! '-' !! DATO2.MD !! '-' !!           
+                        DATO2.DG !! '-01.01.01.000001';                 
+                                                                        
+        IF DCLBQ78000T.EJENDOM_FLEJL > 999                              
+        THEN                                                            
+           BH853.FLEJL = 999;                                           
+        ELSE                                                            
+           BH853.FLEJL = DCLBQ78000T.EJENDOM_FLEJL;                     
+                                                                        
+        IF DCLBQ75000T.OPL_VURDGL_CUOP > '0'                            
+        THEN                                                            
+           BH853.CUOP_AKT = DCLBQ75000T.OPL_VURDGL_CUOP;                
+                                                                        
+        IF DCLBQ78000T.VURD_01OM_CBENYT ^= '  '                         
+         & DCLBQ78000T.VURD_01OMNY_CBENYT ^= '  '                       
+        THEN;                                                           
+        ELSE                                                            
+           DO;                                                          
+              /* OPSÆTTES KUN HVIS DER  I K K E  ER TO OMBEREGNINGER */ 
+              BH853.BBERGRL  = DCLBQ78000T.EJERSKAB_BBERGRL;            
+              /* Defect 30 Forskud 2023 EBD */                          
+              /* felt 611 må kun opsættes 2 familie ejendomme */        
+              IF BH853.CEJDTYPE = '4' !                                 
+                 BH853.CEJDTYPE = '5'                                   
+              THEN                                                      
+                BH853.BBER2FAM = DCLBQ78000T.EJERSKAB_BBER2FAM;         
+           END;                                                         
+                                                                        
+        BH853.BEJDVÆR_015PCT = DCLBQ78000T.VURD_015PCT_BEJDVÆR;         
+        IF DCLBQ78000T.VURD_015PCT_BEJDVÆR_SW = -1                      
+        THEN                                                            
+           BH853.BEJDVÆR_015PCT_NULL = '?';                             
+                                                                        
+        BH853.BEJDVÆR_02OM = DCLBQ78000T.VURD_02OM_BEJDVÆR;             
+        IF DCLBQ78000T.VURD_02OM_BEJDVÆR_SW = -1                        
+        THEN                                                            
+           BH853.BEJDVÆR_02OM_NULL = '?';                               
+                                                                        
+        BH853.BEJDVÆR_02OMNY = DCLBQ78000T.VURD_02OMNY_BEJDVÆR;         
+        IF DCLBQ78000T.VURD_02OMNY_BEJDVÆR_SW = -1                      
+        THEN                                                            
+           BH853.BEJDVÆR_02OMNY_NULL = '?';                             
+                                                                        
+        BH853.BEJDVÆR_02 = DCLBQ78000T.VURD_02_BEJDVÆR;                 
+        IF DCLBQ78000T.VURD_02_BEJDVÆR_SW = -1                          
+        THEN                                                            
+           BH853.BEJDVÆR_02_NULL = '?';                                 
+                                                                        
+        BH853.BEJDVÆR_01OM = DCLBQ78000T.VURD_01OM_BEJDVÆR;             
+        IF DCLBQ78000T.VURD_01OM_BEJDVÆR_SW = -1                        
+        THEN                                                            
+           BH853.BEJDVÆR_01OM_NULL = '?';                               
+                                                                        
+        BH853.BEJDVÆR_01OMNY = DCLBQ78000T.VURD_01OMNY_BEJDVÆR;         
+        IF DCLBQ78000T.VURD_01OMNY_BEJDVÆR_SW = -1                      
+        THEN                                                            
+           BH853.BEJDVÆR_01OMNY_NULL = '?';                             
+                                                                        
+        BH853.BEJDVÆR_AKT = DCLBQ78000T.VURD_A_BEJDVÆR_AKT;             
+        IF DCLBQ78000T.VURD_A_BEJDVÆR_A_SW = -1                         
+        THEN                                                            
+           BH853.BEJDVÆR_AKT_NULL = '?';                                
+                                                                        
+        BH853.BEJBOL1_AKT       = DCLBQ78000T.VURD_A_BEJBOL1_AKT;       
+        BH853.CEJBOLTYP1_AKT    = DCLBQ78000T.VURD_A_CEJBOLTYP1_AKT;    
+        BH853.BEJBOL2_AKT       = DCLBQ78000T.VURD_A_BEJBOL2_AKT;       
+        BH853.CEJBOLTYP2_AKT    = DCLBQ78000T.VURD_A_CEJBOLTYP2_AKT;    
+        BH853.BEJBOL1_02OM      = DCLBQ78000T.VURD_02OM_BEJBOL1;        
+        BH853.CEJBOLTYP1_02OM   = DCLBQ78000T.VURD_02OM_CEJBOLTYP1;     
+        BH853.BEJBOL2_02OM      = DCLBQ78000T.VURD_02OM_BEJBOL2;        
+        BH853.CEJBOLTYP2_02OM   = DCLBQ78000T.VURD_02OM_CEJBOLTYP2;     
+        BH853.BEJBOL1_02OMNY    = DCLBQ78000T.VURD_02OMNY_BEJBOL1;      
+        BH853.CEJBOLTYP1_02OMNY = DCLBQ78000T.VURD_02OMNY_CEJBOLTYP1;   
+        BH853.BEJBOL2_02OMNY    = DCLBQ78000T.VURD_02OMNY_BEJBOL2;      
+        BH853.CEJBOLTYP2_02OMNY = DCLBQ78000T.VURD_02OMNY_CEJBOLTYP2;   
+        BH853.BEJBOL1_02        = DCLBQ78000T.VURD_02_BEJBOL1;          
+        BH853.CEJBOLTYP1_02     = DCLBQ78000T.VURD_02_CEJBOLTYP1;       
+        BH853.BEJBOL2_02        = DCLBQ78000T.VURD_02_BEJBOL2;          
+        BH853.CEJBOLTYP2_02     = DCLBQ78000T.VURD_02_CEJBOLTYP2;       
+        BH853.BEJBOL1_01OM      = DCLBQ78000T.VURD_01OM_BEJBOL1;        
+        BH853.CEJBOLTYP1_01OM   = DCLBQ78000T.VURD_01OM_CEJBOLTYP1;     
+        BH853.BEJBOL2_01OM      = DCLBQ78000T.VURD_01OM_BEJBOL2;        
+        BH853.CEJBOLTYP2_01OM   = DCLBQ78000T.VURD_01OM_CEJBOLTYP2;     
+        BH853.BEJBOL1_01OMNY    = DCLBQ78000T.VURD_01OMNY_BEJBOL1;      
+        BH853.CEJBOLTYP1_01OMNY = DCLBQ78000T.VURD_01OMNY_CEJBOLTYP1;   
+        BH853.BEJBOL2_01OMNY    = DCLBQ78000T.VURD_01OMNY_BEJBOL2;      
+        BH853.CEJBOLTYP2_01OMNY = DCLBQ78000T.VURD_01OMNY_CEJBOLTYP2;   
+        BH853.BEJBOL1_015PCT    = DCLBQ78000T.VURD_015PCT_BEJBOL1;      
+        BH853.CEJBOLTYP1_015PCT = DCLBQ78000T.VURD_015PCT_CEJBOLTYP1;   
+        BH853.BEJBOL2_015PCT    = DCLBQ78000T.VURD_015PCT_BEJBOL2;      
+        BH853.CEJBOLTYP2_015PCT = DCLBQ78000T.VURD_015PCT_CEJBOLTYP2;   
+        BH853.EJDBELIG          = DCLBQ78000T.EJENDOM_EJDBELIG;         
+        BH853.EJD_VEJK          = DCLBQ78000T.EJENDOM_VEJK_EJD;         
+        BH853.EJD_HUSNR         = DCLBQ78000T.EJENDOM_HUSNR_EJD;        
+        BH853.EJD_ETAGE         = DCLBQ78000T.EJENDOM_ETAGE_EJD;        
+        BH853.EJD_SDØR          = DCLBQ78000T.EJENDOM_SDØR_EJD;         
+        BH853.ENHEDBELIG        = DCLBQ78000T.EJENDOM_ENHEDBELIG;       
+        BH853.ENHED_VEJK        = DCLBQ78000T.EJENDOM_VEJK_ENHED;       
+        BH853.ENHED_HUSNR       = DCLBQ78000T.EJENDOM_HUSNR_ENHED;      
+        BH853.ENHED_ETAGE       = DCLBQ78000T.EJENDOM_ETAGE_ENHED;      
+        BH853.ENHED_SDØR        = DCLBQ78000T.EJENDOM_SDØR_ENHED;       
+        BH853.LANDEKODE         = DCLBQ78000T.EJENDOM_CLANDEKODE;       
+                                                                        
+        /* Nye felter Forskud 2021 */                                   
+        BH853.VURMARK_AKT     = DCLBQ78000T.VURD_A_VURMARK_AKT;         
+        BH853.VURMARK_OM      = DCLBQ75000T.OPL_VURMARK;                
+        BH853.VURMARK_02      = DCLBQ75000T.OPL_VURD02_VURMARK;         
+        BH853.VURMARK_015PCT  = DCLBQ75000T.OPL_VURD01_VURMARK;         
+        BH853.VURMARK         = DCLBQ78000T.EJERSKAB_VURMARK;           
+                                                                        
+        /* Nye felter Forskud 2022 */                                   
+        BH853.JUR_KATEGO_AKT     = DCLBQ78000T.VURD_A_JUR_KATEGO;       
+        BH853.JUR_KATEGO_OM      = DCLBQ78000T.VURD_02OM_JUR_KATEGO;    
+        BH853.JUR_KATEGO_02      = DCLBQ78000T.VURD_02_JUR_KATEGO;      
+        BH853.JUR_KATEGO_015PCT  = DCLBQ78000T.VURD_015PCT_JUR_KATEGO;  
+        BH853.JUR_KATEGO         = DCLBQ78000T.EJERSKAB_JUR_KATEGO;     
+        BH853.JUR_UKATEGO_AKT    = DCLBQ78000T.VURD_A_JUR_UKATEGO;      
+        BH853.JUR_UKATEGO_OM     = DCLBQ78000T.VURD_02OM_JUR_UKATEGO;   
+        BH853.JUR_UKATEGO_02     = DCLBQ78000T.VURD_02_JUR_UKATEGO;     
+        BH853.JUR_UKATEGO_015PCT = DCLBQ78000T.VURD_015PCT_JUR_UKATEGO; 
+        BH853.JUR_UKATEGO        = DCLBQ78000T.EJERSKAB_JUR_UKATEGO;    
+        BH853.VURDATO_AKT        = DCLBQ78000T.VURD_A_VURDATO;          
+        BH853.VURDATO_OM         = DCLBQ78000T.VURD_02OM_VURDATO;       
+        BH853.VURDATO_02         = DCLBQ78000T.VURD_02_VURDATO;         
+        BH853.VURDATO_015PCT     = DCLBQ78000T.VURD_015PCT_VURDATO;     
+        BH853.VURDATO            = DCLBQ78000T.EJERSKAB_JUR_VURDATO;    
+        BH853.FORSIGT_EVS_AKT    = DCLBQ78000T.VURD_A_FORSIGT_EVS;      
+        BH853.FORSIGT_EVS_OM     = DCLBQ78000T.VURD_02OM_FORSIGT_EVS;   
+        BH853.FORSIGT_EVS_02     = DCLBQ78000T.VURD_02_FORSIGT_EVS;     
+        BH853.FORSIGT_EVS_015PCT = DCLBQ78000T.VURD_015PCT_FORSIGT_EVS; 
+        BH853.FORSIGT_EVS        = DCLBQ78000T.EJERSKAB_FORSIGT_EVS;    
+        BH853.BESKAT_EVS_AKT     = DCLBQ78000T.VURD_A_BESKAT_EVS;       
+        BH853.BESKAT_EVS_OM      = DCLBQ78000T.VURD_02OM_BESKAT_EVS;    
+        BH853.BESKAT_EVS_02      = DCLBQ78000T.VURD_02_BESKAT_EVS;      
+        BH853.BESKAT_EVS_015PCT  = DCLBQ78000T.VURD_015PCT_BESKAT_EVS;  
+        BH853.BESKAT_EVS         = DCLBQ78000T.EJERSKAB_BESKAT;         
+                                                                        
+        /* Tre glemte felter tilføjet 12-08-2021 EBD  */                
+        BH853.BFENR         = DCLBQ75000T.BFENR;                        
+        BH853.VUREJENDOMID  = DCLBQ75000T.VUREJENDOMID;                 
+        IF VERIFY(DCLBQ75000T.OPL_VURDGL_DVURDÅR,'0123456789') = 0      
+        THEN                                                            
+          DO;                                                           
+            HJ_PIC4             = DCLBQ75000T.OPL_VURDGL_DVURDÅR;       
+            BH853.DVURDÅR       = HJ_PIC4;                              
+          END;                                                          
+        ELSE                                                            
+          BH853.DVURDÅR       = 0;                                      
+                                                                        
+        /* FIA - yderligere 3 nye felter Start version 1 */             
+        /*BH853.BBERGRL_AKT    = DCLBQ78000T.VURD_A_BEJDVÆR_AKT;        
+        IF DCLBQ78000T.VURD_A_BEJDVÆR_A_SW = -1 THEN                    
+          BH853.B_NULL8 = '?';                                          
+                                                                        
+        IF DCLBQ78000T.VURD_02OMNY_BEJDVÆR_SW ^= -1 THEN                
+          BH853.BBERGRL_02ANV = DCLBQ78000T.VURD_02OMNY_BEJDVÆR;        
+        ELSE IF DCLBQ78000T.VURD_02OM_BEJDVÆR_SW ^= -1 THEN             
+          BH853.BBERGRL_02ANV = DCLBQ78000T.VURD_02OM_BEJDVÆR;          
+        ELSE                                                            
+          BH853.BBERGRL_02ANV = DCLBQ78000T.VURD_02_BEJDVÆR;            
+        IF DCLBQ78000T.VURD_02_BEJDVÆR_SW = -1 THEN                     
+          BH853.B_NULL9 = '?';                                          
+                                                                        
+        IF DCLBQ78000T.VURD_01OMNY_BEJDVÆR_SW ^= -1 THEN                
+          BH853.BBERGRL_015ANV = DCLBQ78000T.VURD_01OMNY_BEJDVÆR;       
+        ELSE IF DCLBQ78000T.VURD_01OM_BEJDVÆR_SW ^= -1 THEN             
+          BH853.BBERGRL_015ANV = DCLBQ78000T.VURD_01OM_BEJDVÆR;         
+        ELSE                                                            
+          BH853.BBERGRL_015ANV = DCLBQ78000T.VURD_015PCT_BEJDVÆR;       
+        IF DCLBQ78000T.VURD_015PCT_BEJDVÆR_SW = -1 THEN                 
+          BH853.B_NULL10 = '?'; */                                      
+                                                                        
+        /* FIA - yderligere 3 nye felter Slut */                        
+                                                                        
+        /* FIA og EBD - yderligere 3 nye felter Start version 2 */      
+        BH853.BBERGRL_AKT      = DCLBQ78000T.VURD_A_BBERGRL_AKT;        
+        IF DCLBQ78000T.VURD_A_BBERGRL_A_SW = -1                         
+        THEN                                                            
+          BH853.BBERGRL_AKT_NULL = '?';                                 
+                                                                        
+        BH853.BBERGRL_02ANV    = DCLBQ78000T.VURD_02ANV_BBERGRL;        
+        IF DCLBQ78000T.VURD_02ANV_BBERGRL_SW = -1                       
+        THEN                                                            
+          BH853.BBERGRL_02ANV_NULL = '?';                               
+                                                                        
+        BH853.BBERGRL_015ANV   = DCLBQ78000T.VURD_015ANV_BBERGRL;       
+        IF DCLBQ78000T.VURD_015ANV_BBERGRL_SW = -1                      
+        THEN                                                            
+          BH853.BBERGRL_015ANV_NULL = '?';                              
+                                                                        
+        /* FIA og EBD - yderligere 3 nye felter Start */                
+                                                                        
+                                                                        
+        /* Nye felter Forskud 2022 slut */                              
+                                                                        
+        IF BH853.FEJLNR > 0                                             
+        THEN                                                            
+           DO;                                                          
+              INDEX = BH853.FEJLNR;                                     
+              SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;    
+           END;                                                         
+                                                                        
+        TV.SKREVET = TV.SKREVET + 1;                                    
+                                                                        
+        WRITE FILE (BH853O) FROM (BH853);                               
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN.CCA = ZZWS2;                                            
+         DETLIN.ANTAL = TV.LÆST_BQ78000T;                               
+         DETLIN.TEKST = 'ANTAL LÆSTE PÅ TABEL BQ78000T';                
+         CALL ZZ20300 (DETLIN,'01');                                    
+                                                                        
+         DETLIN.CCA = ZZWS2;                                            
+         DETLIN.ANTAL = TV.LÆST_EJD;                                    
+         DETLIN.TEKST = 'ANTAL LÆSTE EJENDOMME PÅ TABEL BQ78000T';      
+         CALL ZZ20300 (DETLIN,'01');                                    
+                                                                        
+         DETLIN.CCA = ZZWS2;                                            
+         DETLIN.ANTAL = TV.LÆST_CLANDEKODE;                             
+         DETLIN.TEKST = '      HERAF UDL. EJENDOMME MED LANDEKODE';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+            IF LÆST_FEJLNR(INDEX).ANTAL > 0                             
+            THEN                                                        
+               DO;                                                      
+                  DETLIN.CCA = ZZWS1;                                   
+                  HJ_FEJLNR_PIC = INDEX;                                
+                  DETLIN.TEKST =                                        
+                  '      HERAF MED FEJLNR. ' !! HJ_FEJLNR;              
+                  DETLIN.ANTAL = LÆST_FEJLNR(INDEX).ANTAL;              
+                  CALL ZZ20300 (DETLIN,'01');                           
+               END;                                                     
+         END;                                                           
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+         DETLIN.CCA = ZZWS2;                                            
+         DETLIN.ANTAL = TV.SKREVET;                                     
+         DETLIN.TEKST = 'ANTAL SKREVNE INDIVIDER           B.H85300D';  
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DO INDEX = 5000 TO 6000;                                       
+            IF SKR_FEJLNR(INDEX).ANTAL > 0                              
+            THEN                                                        
+               DO;                                                      
+                  DETLIN.CCA = ZZWS1;                                   
+                  HJ_FEJLNR_PIC = INDEX;                                
+                  DETLIN.TEKST =                                        
+                  '      HERAF MED FEJLNR. ' !! HJ_FEJLNR;              
+                  DETLIN.ANTAL = SKR_FEJLNR(INDEX).ANTAL;               
+                  CALL ZZ20300 (DETLIN,'01');                           
+               END;                                                     
+         END;                                                           
+                                                                        
+ END TOTALLISTE;                                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+         CLOSE FILE (BH853O);                                           
+         CALL OPDATER_KØRSELSTABEL('SLUT');                             
+                                                                        
+                                                                        
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /* %INCLUDE BH54997M; */ /* ER FORGÆNGERE KØRT. STOP HVIS IKKE */      
+ %INCLUDE BH54998M; /* OPDATER KØRSELSTABEL */                          
+ %INCLUDE BH85111M; /* SQL TIL LÆS AF TABELLER */                       
+ END  BH85300;                                                          

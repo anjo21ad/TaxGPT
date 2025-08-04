@@ -1,0 +1,591 @@
+ BE99800: PROC (EXECPARM) OPTIONS (MAIN) REORDER;                       
+ /**********************************************************************
+ *                                                                     *
+ * PROGRAM:     BE99800                                                *
+ *                                                                     *
+ * FUNKTION:    Indspil data fra SKAT til konvertering af udenlandske  *
+ *              ejendomsnumre.                                         *
+ *                                                                     *
+ * BESKRIVELSE: Programmet indlæser data fra en CSV lignende fil og    *
+ *              indspiller den på BE83000T tabellen.                   *
+ *                                                                     *
+ * INPUT:       BE99800I - CSV fil                          File       *
+ *                                                                     *
+ * OUTPUT:      BE83000T - EVS Sammenligningsår-grundlag    DB2 tabel  *
+ *              BE99801Y - Statistik over de indlæste mængder          *
+ *                                                                     *
+ *              Fejl/Advis/Abend koder:                                *
+ *              U101 Parameterfejl BE55600M                            *
+ *              U111 Fejl i input fil - se log                         *
+ *              U2xx SQL fejl                                          *
+ *                                                                     *
+ * OPRETTET AF: Jan Erik Jensen (XJY) 10.10.2024 BF17                  *
+ *                                                                     *
+ * RETTET   AF: xx.xx.20xx Xxx xxx xxxxxx (INI)                        *
+ *              Xxxxxx xxxxxx xxxxxx xxxxxx xxxxxx xxxxxx.             *
+ *                                                                     *
+ **********************************************************************/
+ DCL COPYRIGHT   CHAR      (30) STATIC  INIT ('COPYRIGHT KMD A/S 2024');
+                                                                        
+ /*********************************************************************/
+ /*      DEFINITION AF ALLE VARIABLE SOM STATISKE                     */
+ /*********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PROGRAM PARAMETEREN                               */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (*) VAR;                             
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF FILER OG TILHØRENDE FELTER                        * 
+ *********************************************************************/ 
+ DCL     SYSPRINT                   FILE STREAM OUTPUT;                 
+                                                                        
+ DCL     BE9980I                    FILE RECORD INPUT;                  
+                                                                        
+ DCL     EOF_BE9980I                BIT (1) INIT ('0'B);                
+                                                                        
+ DCL     CSV_REC                    CHAR(255) VAR;                      
+                                                                        
+ /********************************************************************* 
+ *       SQL DECLARES                                                 * 
+ *********************************************************************/ 
+ EXEC SQL INCLUDE SQLCA;                                                
+                                                                        
+ EXEC SQL INCLUDE BE83000T; /* Udenlandsk ejd.nr. mapning            */ 
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF EKSTERNE ENTRY'S                                  * 
+ *********************************************************************/ 
+ DCL     ZS61900   ENTRY OPTIONS (INTER ASM); /* UDSKRIFT AF SSI     */ 
+ DCL     ZS30101   ENTRY;                     /* USER ABEND          */ 
+ DCL     ZS67000   ENTRY;                     /* Oversæt SQLCODE.    */ 
+ %INCLUDE ZZ20301M;                           /* SPMF print:         */ 
+                                              /* ZZ20300/ZZ20390     */ 
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL    (STG,CSTG)       BUILTIN;                                       
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF VARIABLE TIL STATISTIK                            */
+ /*********************************************************************/
+ DCL ANT_LÆST_BE9980I               FIXED BIN(31,0) INIT(0);            
+ DCL ANT_INSERT_BE83000T            FIXED BIN(31,0) INIT(0);            
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF VARIABLE TIL STYRING AF COMMIT                    */
+ /*********************************************************************/
+ DCL ANT_COMMIT                     FIXED BIN(31,0) INIT(0);            
+ DCL ANT_ROLLBACK                   FIXED BIN(31,0) INIT(0);            
+                                                                        
+ DCL ANT_RECS_SIDEN_COMMIT          FIXED BIN(31,0) INIT(0);            
+ DCL ANT_RECS_TIL_COMMIT            FIXED BIN(31,0) INIT(500);          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ØVRIGE FELTER                                     */
+ /*********************************************************************/
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+    ON ERROR                                                            
+    BEGIN;                                                              
+       ON ERROR SYSTEM;                                                 
+       CALL PLIDUMP('SHOB');                                            
+    END;                                                                
+                                                                        
+    CALL ZS61900;                          /* UDSKRIVNING AF SSI */     
+                                                                        
+    ON ENDFILE (BE9980I) EOF_BE9980I = '1'B;                            
+                                                                        
+    /* Åbn filer */                                                     
+    CALL OPEN_FILES;                                                    
+                                                                        
+                                                                        
+ /* Definition af struktur og inkludering af kode som kalder BE55650, */
+ /* som læser data på afviklingstabellen BE72100T, hvor aktuel EVS    */
+ /* kørsel hentes.                                                    */
+ DCL 1 BE55600M ALIGNED,                                                
+ %INCLUDE BE55600M;                                                     
+                                                                        
+    /* Tillad kun kørsel af programmet for EVS SLUT */                  
+    SELECT (BE55600M.AFVIKLINGS_ID);                                    
+ /*    WHEN ('OPRET_EVS_FORSK')                                         
+       DO;                                                              
+          WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;                 
+          WS_TIL_EVS_AAR = BE55600M.FORSKÅR;                            
+       END; */                                                          
+       WHEN ('OPRET_EVS_SLUT')                                          
+       DO;                                                              
+ /*       WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;                 
+          WS_TIL_EVS_AAR = BE55600M.SLUTÅR; */                          
+       END;                                                             
+ /*    WHEN ('SUPPL_EVS_SLUT')                                          
+       DO;                                                              
+          WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;                 
+          WS_TIL_EVS_AAR = BE55600M.SLUTÅR;                             
+       END; */                                                          
+       OTHERWISE                                                        
+       DO;                                                              
+          CALL ABEND(PROCNAME(), 101, 'Parameterfejl BE55600M: ' !!     
+                                       BE55600M.AFVIKLINGS_ID);         
+       END;                                                             
+    END;                                                                
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+    CALL BEHANDL_BE9980I;                                               
+                                                                        
+ /**********************************************************************
+ *       AFSLUTNING                                                    *
+ **********************************************************************/
+                                                                        
+    /* Udskriv statistik */                                             
+    CALL UDSKRIV_STATISTIK;                                             
+                                                                        
+    /* Luk filer */                                                     
+    CALL CLOSE_FILES;                                                   
+                                                                        
+ /********************************************************************/ 
+ /* Udskriv statistik fra kørslen                                    */ 
+ /********************************************************************/ 
+ UDSKRIV_STATISTIK: PROC;                                               
+                                                                        
+    CALL SKRIVLIN (' ');                                                
+    CALL SKRIVLIN (' ');                                                
+    CALL SKRIVLIN (TRIM(PACKAGENAME()) !! ': Statistik fra kørslen:');  
+    CALL SKRIVLIN (' ');                                                
+                                                                        
+    CALL SKRIVLIN ('   Læste mængder fra input filer:');                
+    CALL SKRIVLIN ('      Antal læste records fra input fil ....: ' !!  
+               FORMAT_ANT(ANT_LÆST_BE9980I                      ));     
+    CALL SKRIVLIN (' ');                                                
+                                                                        
+    CALL SKRIVLIN ('   Opdaterede mængder på output tabeller:'     );   
+    CALL SKRIVLIN ('      Antal indsatte records BE83000T ......: ' !!  
+               FORMAT_ANT(ANT_INSERT_BE83000T                   ));     
+    CALL SKRIVLIN (' ');                                                
+                                                                        
+    CALL SKRIVLIN ('   Tekniske oplysninger:');                         
+    CALL SKRIVLIN ('      Antal commit .........................: ' !!  
+               FORMAT_ANT(ANT_COMMIT                            ));     
+    CALL SKRIVLIN ('      Antal rollback .......................: ' !!  
+               FORMAT_ANT(ANT_ROLLBACK                          ));     
+    CALL SKRIVLIN (' ');                                                
+                                                                        
+                                                                        
+ /* Formater antallet læseligt */                                       
+ FORMAT_ANT: PROC (ANT) RETURNS (CHAR(11));                             
+                                                                        
+ DCL ANT                            FIXED BIN(31,0);                    
+                                                                        
+ DCL ANT_PIC                        PIC 'ZZZ.ZZZ.ZZ9';                  
+ DCL ANT_CHAR                       CHAR(11) BASED(ADDR(ANT_PIC));      
+                                                                        
+    ANT_PIC = ANT;                                                      
+                                                                        
+    RETURN (ANT_CHAR);                                                  
+                                                                        
+ END FORMAT_ANT;                                                        
+                                                                        
+ END UDSKRIV_STATISTIK;                                                 
+                                                                        
+ /********************************************************************/ 
+ /* Skriv på SPMF output fil 01 (BE99801Y)                           */ 
+ /********************************************************************/ 
+ SKRIVLIN: PROC (TEKST);                                                
+                                                                        
+ DCL TEKST                          CHAR(132) VAR;                      
+                                                                        
+ DCL PRINT_LIN                      CHAR(133);                          
+                                                                        
+    PRINT_LIN = ZZWS1 !! TEKST;                                         
+                                                                        
+    CALL ZZ20300 (PRINT_LIN,'01');                                      
+                                                                        
+ END SKRIVLIN;                                                          
+                                                                        
+ /********************************************************************/ 
+ /* Åbn filer                                                        */ 
+ /********************************************************************/ 
+ OPEN_FILES: PROC;                                                      
+                                                                        
+    OPEN FILE (BE9980I) TITLE('BE99800I');                              
+                                                                        
+    CALL ZZ20390 ('*OPEN','BE99801Y');                                  
+                                                                        
+ END OPEN_FILES;                                                        
+                                                                        
+ /********************************************************************/ 
+ /* Luk filer                                                        */ 
+ /********************************************************************/ 
+ CLOSE_FILES: PROC;                                                     
+                                                                        
+    CLOSE FILE (BE9980I);                                               
+                                                                        
+    CALL ZZ20300 ((133)' ', '99');                                      
+                                                                        
+ END CLOSE_FILES;                                                       
+                                                                        
+ /********************************************************************/ 
+ /* Indlæs fra BE9980I og opdater BE83000T                           */ 
+ /********************************************************************/ 
+ BEHANDL_BE9980I: PROC;                                                 
+                                                                        
+    /* Sæt faste værdier til BE83000T tabellen */                       
+    DCLBE83000T.TIL_EVS_AAR   = BE55600M.TIL_EVS_AAR;                   
+    DCLBE83000T.AFVIKLINGS_ID = BE55600M.AFVIKLINGS_ID;                 
+    DCLBE83000T.DATA_ID       = BE55600M.DATA_ID;                       
+    DCLBE83000T.EKOMNR        = 999; /* Udenlandsk ejendom */           
+    DCLBE83000T.PROGRAMNAVN   = PACKAGENAME();                          
+                                                                        
+    /* Indlæs recordene fra BE9980I filen */                            
+    DO WHILE (READ_BE9980I());                                          
+                                                                        
+       ANT_LÆST_BE9980I += 1;                                           
+                                                                        
+    /* PUT SKIP LIST ('CSV_REC: >' !! CSV_REC !! '<'); */               
+                                                                        
+       /* Pluk felter fra recorden */                                   
+       CALL PLUK_CSV_REC_FELTER;                                        
+                                                                        
+       /* Sæt timestamp */                                              
+       DCLBE83000T.OPRET_TS = SKAF_CURRENT_TS();                        
+                                                                        
+       /* Indsæt record på BE83000T tabellen */                         
+       CALL INSERT_BE83000T;                                            
+                                                                        
+       /* Kontroller for commit */                                      
+       ANT_RECS_SIDEN_COMMIT += 1;                                      
+                                                                        
+       IF ANT_RECS_SIDEN_COMMIT >= ANT_RECS_TIL_COMMIT THEN             
+       DO;                                                              
+          CALL SQL_COMMIT;                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+    CALL SQL_COMMIT;                                                    
+                                                                        
+ END BEHANDL_BE9980I;                                                   
+                                                                        
+ /********************************************************************/ 
+ /* Indlæs record fra BE9980I filen                                  */ 
+ /********************************************************************/ 
+ READ_BE9980I: PROC() RETURNS(BIT(1));                                  
+                                                                        
+    READ FILE (BE9980I) INTO (CSV_REC);                                 
+                                                                        
+    RETURN (^EOF_BE9980I);                                              
+                                                                        
+ END READ_BE9980I;                                                      
+                                                                        
+ /*********************************************************************/
+ /* Pluk de 3 felter fra input recorden som forventes at være         */
+ /* adskilt af tabulatortegn og muligvis med foranstillede eller      */
+ /* efterstillede blanke.                                             */
+ /*********************************************************************/
+ PLUK_CSV_REC_FELTER: PROC;                                             
+                                                                        
+ DCL CSV_FIELD_1                    CHAR(255) VAR;                      
+ DCL CSV_FIELD_2                    CHAR(255) VAR;                      
+ DCL CSV_FIELD_3                    CHAR(255) VAR;                      
+                                                                        
+ DCL FB31                           FIXED BIN(31,0);                    
+                                                                        
+ DCL SEPARATOR                      CHAR(1) INIT('05'X);                
+                                                                        
+                                                                        
+    /* Split input recorden i de 3 input felter */                      
+    CALL PLIPARSE (CSV_REC, CSV_FIELD_1, SEPARATOR,                     
+                            CSV_FIELD_2, SEPARATOR,                     
+                            CSV_FIELD_3);                               
+                                                                        
+    /* Omform og valider fra-ejendomsnummer */                          
+    CALL PLUK_FB31_FELT ('EEJDNR_FRA', CSV_FIELD_1, FB31);              
+    DCLBE83000T.EEJDNR_FRA = FB31;                                      
+                                                                        
+    IF DCLBE83000T.EEJDNR_FRA <= 0 !                                    
+       /* XJY 05.11.2024 Grænse midlertidigt hævet til 803081, som      
+          er den højeste værdi modtaget i testdata fra SKAT             
+          XJY 18.11.2024 Oprindelig grænse genaktiveret.                
+       DCLBE83000T.EEJDNR_FRA >  803081 THEN                            
+       */                                                               
+       DCLBE83000T.EEJDNR_FRA >= 200000 THEN                            
+    DO;                                                                 
+       CALL CSV_FELT_FEJL ('EEJDNR_FRA er ikke gyldig: ' !!             
+                  TRIM(CHAR(DCLBE83000T.EEJDNR_FRA )));                 
+    END;                                                                
+                                                                        
+    /* Omform til-ejendomsnummer */                                     
+    IF CSV_FIELD_2 = '' THEN                                            
+    DO;                                                                 
+       DCLBE83000T.EEJDNR_TIL = 0;                                      
+    END;                                                                
+    ELSE                                                                
+    DO;                                                                 
+       CALL PLUK_FB31_FELT ('EEJDNR_TIL', CSV_FIELD_2, FB31);           
+       DCLBE83000T.EEJDNR_TIL = FB31;                                   
+    END;                                                                
+                                                                        
+    /* Omform slettemarkeringen */                                      
+    CALL PLUK_FB31_FELT ('SLET_MARK' , CSV_FIELD_3, FB31);              
+    SELECT (FB31);                                                      
+       WHEN (0)                                                         
+       DO;                                                              
+          DCLBE83000T.SLET_MARK = '0';                                  
+       END;                                                             
+       WHEN (1)                                                         
+       DO;                                                              
+          DCLBE83000T.SLET_MARK = '1';                                  
+       END;                                                             
+       OTHERWISE                                                        
+       DO;                                                              
+          CALL CSV_FELT_FEJL ('SLET_MARK er ikke gyldig: ' !!           
+                     TRIM(CHAR(FB31)));                                 
+       END;                                                             
+    END;                                                                
+                                                                        
+    /* Tjek at til-ejendomsnummer er angivet, hvis der ikke skal */     
+    /* slettes. */                                                      
+    IF DCLBE83000T.EEJDNR_TIL = 0 & DCLBE83000T.SLET_MARK = '0' THEN    
+    DO;                                                                 
+       CALL CSV_FELT_FEJL ('EEJDNR_TIL må ikke være 0, når ' !!         
+                           'SLET_MARK er 0');                           
+    END;                                                                
+                                                                        
+    /* Valider til-ejendomsnummer, som gerne må være 0, må være  */     
+    /* større end eller lig 200000 og må være samme værdi som    */     
+    /* fra-ejendomsnummeret.                                     */     
+    IF DCLBE83000T.EEJDNR_TIL ^= 0 &                                    
+       DCLBE83000T.EEJDNR_TIL <  200000 &                               
+       DCLBE83000T.EEJDNR_TIL ^= DCLBE83000T.EEJDNR_FRA THEN            
+    DO;                                                                 
+       CALL CSV_FELT_FEJL ('EEJDNR_TIL er ikke gyldig: ' !!             
+                  TRIM(CHAR(DCLBE83000T.EEJDNR_TIL )));                 
+    END;                                                                
+                                                                        
+                                                                        
+ PLUK_FB31_FELT: PROC (P_FELTNAVN, P_CSV_FELT, P_RESULTAT_FB31);        
+                                                                        
+ DCL P_FELTNAVN                     CHAR(20) VAR;                       
+ DCL P_CSV_FELT                     CHAR(255) VAR;                      
+ DCL P_RESULTAT_FB31                FIXED BIN(31,0);                    
+                                                                        
+ DCL CSV_FELT                       CHAR(255) VAR;                      
+                                                                        
+ DCL CHAR9                          CHAR(9);                            
+ DCL PIC99                          PIC '999999999' BASED(ADDR(CHAR9)); 
+                                                                        
+                                                                        
+    /* Fjern foranstillede og efterstillede blanke */                   
+    CSV_FELT = TRIM(P_CSV_FELT);                                        
+                                                                        
+    /* Check at feltet er udfyldt */                                    
+    IF CSV_FELT = '' THEN                                               
+    DO;                                                                 
+       CALL CSV_FELT_FEJL (P_FELTNAVN !! ' er ikke udfyldt');           
+    END;                                                                
+                                                                        
+    /* Check længde af feltet - max. 9 tegn */                          
+    IF LENGTH(CSV_FELT) > 9 THEN                                        
+    DO;                                                                 
+       CALL CSV_FELT_FEJL (P_FELTNAVN !! ' er for langt: ' !!           
+                           CSV_FELT);                                   
+    END;                                                                
+                                                                        
+    /* Flyt feltet til et karakterfelt */                               
+    CHAR9 = RIGHT(CSV_FELT, CSTG(CHAR9), '0');                          
+                                                                        
+    /* Check for numerisk indhold */                                    
+    IF ^VALID(PIC99) THEN                                               
+    DO;                                                                 
+       CALL CSV_FELT_FEJL (P_FELTNAVN !! ' er ikke numerisk: ' !!       
+                           CSV_FELT);                                   
+    END;                                                                
+                                                                        
+    /* Flyt til resultatfeltet */                                       
+    P_RESULTAT_FB31 = PIC99;                                            
+                                                                        
+ END PLUK_FB31_FELT;                                                    
+                                                                        
+                                                                        
+ CSV_FELT_FEJL: PROC (P_TEKST);                                         
+                                                                        
+ DCL P_TEKST                        CHAR(*) VAR;                        
+                                                                        
+    PUT SKIP LIST ('Fejl i record i input filen:');                     
+    PUT SKIP LIST ('   ANT_LÆST_BE9980I: ' !!                           
+             TRIM(CHAR(ANT_LÆST_BE9980I)));                             
+    PUT SKIP LIST ('   P_TEKST ........: ' !!                           
+             TRIM(CHAR(P_TEKST         )));                             
+    PUT SKIP LIST ('   CSV_REC ........: ' !!                           
+             TRIM(CHAR(CSV_REC         )));                             
+    PUT SKIP LIST ('   CSV_FIELD_1 ....: ' !!                           
+             TRIM(CHAR(CSV_FIELD_1     )));                             
+    PUT SKIP LIST ('   CSV_FIELD_2 ....: ' !!                           
+             TRIM(CHAR(CSV_FIELD_2     )));                             
+    PUT SKIP LIST ('   CSV_FIELD_3 ....: ' !!                           
+             TRIM(CHAR(CSV_FIELD_3     )));                             
+                                                                        
+    CALL ABEND(PROCNAME(), 111, 'Fejl i input fil - se log');           
+                                                                        
+ END CSV_FELT_FEJL;                                                     
+                                                                        
+ END PLUK_CSV_REC_FELTER;                                               
+                                                                        
+ /*********************************************************************/
+ /* Hent aktuel tid                                                   */
+ /*********************************************************************/
+ INSERT_BE83000T: PROC;                                                 
+                                                                        
+    EXEC SQL INSERT   INTO BE83000T (                                   
+                      TIL_EVS_AAR                                       
+                     ,AFVIKLINGS_ID                                     
+                     ,DATA_ID                                           
+                     ,EKOMNR                                            
+                     ,EEJDNR_FRA                                        
+                     ,EEJDNR_TIL                                        
+                     ,SLET_MARK                                         
+                     ,PROGRAMNAVN                                       
+                     ,OPRET_TS                                          
+             ) VALUES (                                                 
+                      :DCLBE83000T.TIL_EVS_AAR                          
+                     ,:DCLBE83000T.AFVIKLINGS_ID                        
+                     ,:DCLBE83000T.DATA_ID                              
+                     ,:DCLBE83000T.EKOMNR                               
+                     ,:DCLBE83000T.EEJDNR_FRA                           
+                     ,:DCLBE83000T.EEJDNR_TIL                           
+                     ,:DCLBE83000T.SLET_MARK                            
+                     ,:DCLBE83000T.PROGRAMNAVN                          
+                     ,:DCLBE83000T.OPRET_TS                             
+             );                                                         
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+       WHEN (+000)                                                      
+       DO;                                                              
+          ANT_INSERT_BE83000T += 1;                                     
+       END;                                                             
+       OTHERWISE                                                        
+       DO;                                                              
+          CALL PUT_SKIP_DCLBE83000T;                                    
+                                                                        
+          CALL SQL_ERROR (PROCNAME(), 210 ,'INSERT BE83000T');          
+       END;                                                             
+    END;                                                                
+                                                                        
+ END INSERT_BE83000T;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Udskriv indhold af DCLBE83000T strukturen                         */
+ /*********************************************************************/
+ PUT_SKIP_DCLBE83000T: PROC;                                            
+                                                                        
+    PUT SKIP LIST ('Indhold af DCLBE83000T strukturen:');               
+    PUT SKIP LIST ('   DCLBE83000T.TIL_EVS_AAR .: ' !!                  
+             TRIM(CHAR(DCLBE83000T.TIL_EVS_AAR  )));                    
+    PUT SKIP LIST ('   DCLBE83000T.AFVIKLINGS_ID: ' !!                  
+             TRIM(CHAR(DCLBE83000T.AFVIKLINGS_ID)));                    
+    PUT SKIP LIST ('   DCLBE83000T.DATA_ID .....: ' !!                  
+             TRIM(CHAR(DCLBE83000T.DATA_ID      )));                    
+    PUT SKIP LIST ('   DCLBE83000T.EKOMNR ......: ' !!                  
+             TRIM(CHAR(DCLBE83000T.EKOMNR       )));                    
+    PUT SKIP LIST ('   DCLBE83000T.EEJDNR_FRA ..: ' !!                  
+             TRIM(CHAR(DCLBE83000T.EEJDNR_FRA   )));                    
+    PUT SKIP LIST ('   DCLBE83000T.EEJDNR_TIL ..: ' !!                  
+             TRIM(CHAR(DCLBE83000T.EEJDNR_TIL   )));                    
+    PUT SKIP LIST ('   DCLBE83000T.SLET_MARK ...: ' !!                  
+             TRIM(CHAR(DCLBE83000T.SLET_MARK    )));                    
+    PUT SKIP LIST ('   DCLBE83000T.PROGRAMNAVN .: ' !!                  
+             TRIM(CHAR(DCLBE83000T.PROGRAMNAVN  )));                    
+    PUT SKIP LIST ('   DCLBE83000T.OPRET_TS ....: ' !!                  
+             TRIM(CHAR(DCLBE83000T.OPRET_TS     )));                    
+                                                                        
+ END PUT_SKIP_DCLBE83000T;                                              
+                                                                        
+ /*********************************************************************/
+ /* Hent aktuel tid                                                   */
+ /*********************************************************************/
+ SKAF_CURRENT_TS: PROC RETURNS(CHAR(26));                               
+                                                                        
+ DCL L_TS                           CHAR(26);                           
+                                                                        
+    EXEC SQL SET :L_TS = CURRENT TIMESTAMP;                             
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+       WHEN (+000)                                                      
+       DO;                                                              
+       END;                                                             
+       OTHERWISE                                                        
+       DO;                                                              
+          CALL SQL_ERROR (PROCNAME(), 200 ,'SKAF_CURRENT_TS');          
+       END;                                                             
+    END;                                                                
+                                                                        
+    RETURN (L_TS);                                                      
+                                                                        
+ END SKAF_CURRENT_TS;                                                   
+                                                                        
+ /*********************************************************************/
+ /* Udsted commit                                                     */
+ /*********************************************************************/
+ SQL_COMMIT: PROC;                                                      
+                                                                        
+    EXEC SQL COMMIT;                                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+       WHEN (+000)                                                      
+       DO;                                                              
+       END;                                                             
+       OTHERWISE                                                        
+       DO;                                                              
+          CALL SQL_ERROR (PROCNAME(), 299 ,'COMMIT');                   
+       END;                                                             
+    END;                                                                
+                                                                        
+    ANT_COMMIT += 1;                                                    
+    ANT_RECS_SIDEN_COMMIT = 0;                                          
+                                                                        
+ END SQL_COMMIT;                                                        
+                                                                        
+ /*********************************************************************/
+ /* Håndter afslutning af programmet umiddelbart før abend.           */
+ /*                                                                   */
+ /* Kode udført heri og procedurer kaldt herfra bør IKKE kalde        */
+ /* SQL_ERROR eller ABEND procedurerne, da det resulterer i et        */
+ /* uendeligt loop.                                                   */
+ /*********************************************************************/
+ AFSLUT_PROGRAM_FØR_ABEND: PROC (P_PROCNAME,                            
+                                 P_USER_ABEND_CODE, P_USER_ABEND_TEXT); 
+                                                                        
+ DCL P_PROCNAME                     CHAR(*) VAR;                        
+ DCL P_USER_ABEND_CODE              PIC '999';                          
+ DCL P_USER_ABEND_TEXT              CHAR(*) VAR;                        
+                                                                        
+    /* Udskriv statistik fra programmet */                              
+    CALL UDSKRIV_STATISTIK;                                             
+                                                                        
+    /* Luk filer */                                                     
+    CALL CLOSE_FILES;                                                   
+                                                                        
+ END AFSLUT_PROGRAM_FØR_ABEND;                                          
+                                                                        
+ /**********************************************************************
+ * Inkluderede procedurer                                              *
+ **********************************************************************/
+ %INCLUDE BE99900M; /* SQL_ERROR                                      */
+ %INCLUDE BE99901M; /* ABEND                                          */
+                                                                        
+ /**********************************************************************
+ *                                                                     *
+ **********************************************************************/
+                                                                        
+ END BE99800;                                                           

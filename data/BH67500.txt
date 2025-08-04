@@ -1,0 +1,872 @@
+  PROCESS OPT(TIME);                                                    
+ BH67500:   /* BEREGNING AF LEJEVÆRDI M.V. FOR SAMBESKATTEDE          */
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 1999');       
+ /********************************************************************* 
+ * PROGRAMMET FORETAGER BEREGNINGER AF LEJEVÆRDI, STANDARDFRADRAG OG  * 
+ * NETTORESULTAT M.V., SAMT OPSÆTTER DIVERSE KODER TIL STYRING AF     * 
+ * UDSKRIVNING AF LINIER VEDR. EEN PERSONS EJENDOMME PÅ SELVANGIVELSE * 
+ * ELLER EJENDOMSSKEMA. PROGRAMMET BEHANDLER KUN INDIVIDER SOM HAR    * 
+ * MARKERING FOR AT SAMBESKATNING SKAL FORSØGES.                      * 
+ *                                                                    * 
+ * INPUT  : B.H67901D FORBEHANDLEDE INDIVIDER TIL SAMBESKATNING       * 
+ *                                                                    * 
+ * OUTPUT : B.H67500D (BEREGNET EJENDOMSUDTRÆK)                       * 
+ *          BH67501Y  (KØRSELSKONTROLLISTE)                           * 
+ *                                                                    * 
+ * PROGRAMMERET AF  AAGE RASMUSSEN    PFB SKAT    JANUAR 1998         * 
+ * (PÅ GRUNDLAG AF BH60100)                                           * 
+ ********************************************************************** 
+ *                                                                    * 
+ * ÅRSTILRETTET AF  AAGE RASMUSSEN    PFB SKAT    JULI   1998         * 
+ * ÅRSTILRETTET AF  AAGE RASMUSSEN    PFB SKAT    JANUAR 1999         * 
+ * ÅRSTILRETTET AF  AAGE RASMUSSEN    PUS SKAT    JANUAR 2000         * 
+ *                                                                    * 
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      DECLARE AF FILER                                             */
+ /*********************************************************************/
+ DCL     BH679I          FILE RECORD INPUT;  /* BEREGNINGSBÅND        */
+ DCL     BH675O          FILE RECORD OUTPUT; /* BEREGNINGSBÅND        */
+ DCL     SYSPRINT        EXTERNAL FILE PRINT;                           
+ /*********************************************************************/
+ /*      DECLARE AF OUTPUT  - BEREGNINGSBÅND                          */
+ /*********************************************************************/
+ DCL     BH601_AR   CHAR      (4000) VAR;   /* BEREGNINGSBÅND         */
+ DCL     1 BH601                          BASED(ADDR(BH601_AR)),        
+           2 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BH60100N;                                           
+ DCL     BH601_SKR  CHAR      (4000) VAR;   /* BEREGNINGSBÅND         */
+ DCL     1 BH601_SKR1                     BASED(ADDR(BH601_SKR)),       
+           2 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BH60100N;                                           
+ DCL     BH601_SAM1 CHAR      (4000) VAR;   /* BEREGNINGSBÅND         */
+ DCL     1 BH601_SAM1A                    BASED(ADDR(BH601_SAM1)),      
+           2 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BH60100N;                                           
+ DCL     1 BH60199,                         /* BEREGNINGSBÅND         */
+           %INCLUDE BH60199N;               /* OPTÆLLINGSINDIVID      */
+ /*********************************************************************/
+ /*      DECLARE AF DIVERSE                                           */
+ /*********************************************************************/
+ DCL     BEREGN_TIL      CHAR      (3);                                 
+ DCL     BEREGN          BIT       (1);                                 
+ DCL     JA              BIT       (1)       INIT ('1'B);               
+ DCL     NEJ             BIT       (1)       INIT ('0'B);               
+ DCL     GRÆNSEVÆRDI     FIXED     (7);                                 
+ DCL     HJ_GRÆNSE       PIC       '(7)9';                              
+ DCL     1 GEM           STATIC,    /* GEM FOR SAMME PERSON           */
+         2 DCPRCIR       FIXED (11),/* PERSONNR                       */
+         2 UDSKRLBNR     FIXED (5), /* UDSKRIVNINGSNR.                */
+         2 FLIN          FIXED (5), /* ANTAL LINIER                   */
+         2 CRENERKL      PIC   '9'; /* UDSKRIVNINGSNR.                */
+ DCL     1 GEM_BEREGN    STATIC,    /* GEM BEREGNING M.V. UDEN GRUND  */
+      2 CLEJVBEKOD    PIC   '99',   /* KODE PERSONL.LEJEVÆRDI(SLS)    */
+      2 CDIFLEJE      PIC   '9',    /* KODE LEJEV STEGET 1000 KR.     */
+      2 CDIFLEJE2     PIC   '9',    /* KODE LEJEV > 20 % - 2500       */
+      2 CP20_3500     PIC   '9',    /* KODE 20% EL. 1000/3500 KR.     */
+      2 COVG_1998     CHAR  (1),    /* GL. OVERGANG ELL 2% I 1998?    */
+      2 OVLEJ_1998    FIXED (11),   /* PERSON LEJEVÆRDI GL OVERG 1998 */
+      2 OVG_1998,                   /* 'HELÅRSSOMMERHUS I 1998'       */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL                  */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØRTIDSPENS./EFTERL.    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+      2 COVG_1999     CHAR  (1),    /* GL. OVERGANG ELL 2% I 1999?    */
+      2 OVLEJ_1999    FIXED (11),   /* PERSON LEJEVÆRDI GL OVERG 1999 */
+      2 OVG_1999,                   /* 'HELÅRSSOMMERHUS I 1999'       */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL                  */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØRTIDSPENS./EFTERL.    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+      2 BLEJE1999     FIXED (9),    /* HELÅRLIG LEJEVÆRDI 1999 TIL BOY*/
+      2 PER_LEJEV(2),               /* PERSONLIG ÅRLIG LEJEVÆRDI      */
+        3 BELØB       FIXED (11),   /* NR. 1=JVF. EJD-LEJEVÆRDI       */
+                                    /* NR. 2=JVF. OVG.ORDNING(GL./SOM)*/
+                                    /* NB. HVIS NR. 2 ER MINDRE END   */
+                                    /* NR. 1 ER PERSONEN STADIG I     */
+                                    /* OVERGANGSORDNINGEN             */
+        3 CREDTYP     PIC   '9',    /* KODE 20% EL. 1000/3500 KR.     */
+                                    /* ANGIVER EVT. REDUKTIONSTYPE    */
+                                    /* 0 = INGEN REDUKTION            */
+      2 BSTDF         FIXED (9),    /* STANDARDFRADRAG                */
+                                    /* HEREFTER FØLGER 6 FELTER MED   */
+                                    /* OPLYSNINGER FRA BEREGNINGEN AF */
+                                    /* MODEREJENDOMMEN ALENE:         */
+      2 MODEJD_1999(3),             /* EJENDOMMENS 3 LEJEVÆRDIER 1999 */
+                                    /* FOR 'MODEREJENDOM' HVIS SAMBE- */
+                                    /* SKATNING MED GRUND ER LAVET    */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL                  */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØRTIDSPENS./EFTERL.    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1998-VÆRDIER FRA ESR         */
+                                    /* 2=1999-VÆRDIER UREDUCERET      */
+                                    /* 3=1999-VÆRDIER REDUCERET       */
+      2 MODSOM_1999(3),             /* EJENDOMMENS 3 LEJEVÆRDIER 1999 */
+                                    /* FOR 'MODEREJENDOM' HVIS 'HEL-  */
+                                    /* ÅRSSOMMERHUS' OG SAMBESKATNING */
+                                    /* MED GRUND ER LAVET             */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL  2% SOMMERHUS    */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØR/EFT 2% SOMMERHUS    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1998-VÆRDIER FRA ??????      */
+                                    /* 2=1999-VÆRDIER UREDUCERET      */
+                                    /* 3=1999-VÆRDIER REDUCERET       */
+      2 EJD_1999(3),                /* EJENDOMMENS 3 LEJEVÆRDIER 1999 */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL                  */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØRTIDSPENS./EFTERL.    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1998-VÆRDIER FRA ESR         */
+                                    /* 2=1999-VÆRDIER UREDUCERET      */
+                                    /* 3=1999-VÆRDIER REDUCERET       */
+      2 EJD_2000,                   /* EJENDOMMENS 3 LEJEVÆRDIER 2000 */
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL                  */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØRTIDSPENS./EFTERL.    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1999-VÆRDIER FRA ESR         */
+                                    /* 2=2000-VÆRDIER UREDUCERET      */
+                                    /* 3=2000-VÆRDIER REDUCERET       */
+      2 SOM_1999(3),                /* KUN TIL 'HELÅRSSOMMERHUSE' 1999*/
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL  2% SOMMERHUS    */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØR/EFT 2% SOMMERHUS    */
+        3 BLEJE67     FIXED (11),   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1998-VÆRDIER FRA ?????? 1998 */
+                                    /* 2=1999-VÆRDIER UREDUCERET      */
+                                    /* 3=1999-VÆRDIER REDUCERET       */
+      2 SOM_2000,                   /* KUN TIL 'HELÅRSSOMMERHUSE' 2000*/
+        3 BLEJE       FIXED (11),   /* LEJEV. NORMAL  2% SOMMERHUS    */
+        3 BLEJEFP     FIXED (11),   /* LEJEV. FØR/EFT 2% SOMMERHUS    */
+        3 BLEJE67     FIXED (11);   /* LEJEVÆRDI PENSIONIST           */
+                                    /* 1=1999-VÆRDIER FRA ?????? 1999 */
+                                    /* 2=2000-VÆRDIER UREDUCERET      */
+                                    /* 3=2000-VÆRDIER REDUCERET       */
+                                                                        
+ DCL     EOF_BH679       PIC       '9';                                 
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     FRADATO         PIC       '(8)9'    STATIC;                    
+ DCL     1 FRA           BASED(ADDR(FRADATO)),                          
+         2 ÅR            PIC       '9999',                              
+         2 MD            PIC       '99',                                
+         2 DG            PIC       '99';                                
+                                                                        
+ DCL     TILDATO         PIC       '(8)9'    STATIC;                    
+ DCL     1 TIL           BASED(ADDR(TILDATO)),                          
+         2 ÅR            PIC       '9999',                              
+         2 MD            PIC       '99',                                
+         2 DG            PIC       '99';                                
+                                                                        
+ %INCLUDE ZZ20301M;                                                     
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL     LINIE           CHAR      (133) INIT (' ');                    
+ DCL     1 LIN           DEF       LINIE,                               
+          2 CCA          CHAR      (1),      /* SKIPKARAKTER         */ 
+          2 PRINTLIN     CHAR      (132);                               
+ DCL     1 OVLIN         DEF       LINIE,                               
+          2 HDSP1        CHAR      (1),      /* SKIPKARAKTER         */ 
+          2 T1           CHAR      (53),                                
+          2 T2           CHAR      (55),                                
+          2 T3           CHAR      (14),                                
+          2 DATO         CHAR      (10);                                
+ DCL     1 DETLIN0,                                                     
+          2 CCA          CHAR      (01),                                
+          2 TEKST1       CHAR      (41),                                
+          2 CPUÅR        PIC       '99',                                
+          2 TEKST2       CHAR      (11),                                
+          2 START        PIC       '999999',                            
+          2 TEKST3       CHAR      (9),                                 
+          2 SLUT         PIC       '999999',                            
+          2 TEKST4       CHAR      (57);                                
+ DCL     1 LIN1          DEF       LINIE,                               
+          2 HDSP1        CHAR      (1),                                 
+          2 TEKST1       CHAR      (47),     /* TEKSTFELT            */ 
+          2 TOTAL1       PIC       'ZZZ.ZZZ.ZZZ.ZZZ',/* FELT T. TOT  */ 
+          2 TOTAL(6)     PIC       'ZZ.ZZZ.ZZZ';                        
+ DCL     1 LIN2          DEF       LINIE,                               
+          2 HDSP1        CHAR      (1),                                 
+          2 TXT1         CHAR      (33),     /* TEKSTFELT            */ 
+          2 TAL1         PIC       'Z.ZZZ.ZZZ',                         
+          2 TXT2         CHAR      (8),                                 
+          2 TAL2         PIC   'ZZZ.ZZZ.ZZZ.ZZZ.ZZZ';                   
+ DCL     1 LIN3          DEF       LINIE,                               
+          2 HDSP1        CHAR      (2),                                 
+          2 TV1          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP2        CHAR      (1),                                 
+          2 TV2          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP3        CHAR      (1),                                 
+          2 TV3          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP4        CHAR      (1),                                 
+          2 TV4          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP5        CHAR      (1),                                 
+          2 TV5          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP6        CHAR      (1),                                 
+          2 TV6          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP7        CHAR      (1),                                 
+          2 TV7          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP8        CHAR      (1),                                 
+          2 TV8          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP9        CHAR      (1),                                 
+          2 TV9          PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP10       CHAR      (1),                                 
+          2 TV10         PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP11       CHAR       (1),                                
+          2 TV11         PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP12       CHAR       (1),                                
+          2 TV12         PIC       'Z.ZZZ.ZZZ',                         
+          2 HDSP13       CHAR       (1),                                
+          2 TV13         PIC       'Z.ZZZ.ZZZ';                         
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES OG BUILTINS                               */
+ /*********************************************************************/
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     BH60110         ENTRY;                                         
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*********************************************************************/
+ DCL     (TV_LÆS,                       /* ANTAL LÆSTE ESR-UDTRÆK     */
+          TV_EJPNR,                     /* ANTAL EJER EJ LIG PERSONNR */
+          TV_BH675,                     /* ANTAL PERS.INDV BH601      */
+          TV_KOM,                       /* ANTAL PERS.INDV BH601      */
+          TV_FLEJER,                    /* ANTAL FLERE END EEN EJER   */
+          TV_SKR_IALT,                  /* ANTAL SKRIV BH60100D       */
+          TV_LEJE6,                     /* ANTAL LEJEVÆRDIKODE 6      */
+          TV_LEJE7,                     /* ANTAL LEJEVÆRDIKODE 7      */
+          TV_SAMEJBER,                  /* ANT INDV. IKKE SAMBESKATTET*/
+          TV_SAMBER)                    /* ANT INDV. SAMBESKATTET     */
+                    FIXED (13) INIT (0);/* ANTAL PENSIONISTER         */
+ DCL     1 BH60100M,                                                    
+           %INCLUDE BH60100M;                                           
+ DCL     1 BH60101M      ALIGNED,                                       
+           %INCLUDE BH60101M;                                           
+ DCL     1 BH67502M,                                                    
+           %INCLUDE BH67502M;                                           
+ DCL     I      FIXED BIN (15);                                         
+ /*********************************************************************/
+ /*      HOUSEKEEPING                                                 */
+ /*********************************************************************/
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+         ON ERROR                                                       
+            CALL PLIDUMP ('SNHOB');                                     
+         OPEN FILE (BH679I) TITLE ('BH67901I'),  /* BEREGN. BÅND */     
+              FILE (BH675O) TITLE ('BH67500O');  /* BEREGN. BÅND */     
+         CALL ZZ20390 ('*OPEN','BH67501Y');                             
+         EOF_BH679 = 0;                                                 
+         ON ENDFILE (BH679I)                                            
+            BEGIN;                                                      
+               EOF_BH679 = 1;                                           
+            END;                                                        
+         BH601_SAM1A.LÆNGDE = 0;                                        
+         GEM = '';                                                      
+         BH67502M = '';                                                 
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+                                                                        
+ /*********************************************************************/
+ /*      HOVEDSTYRING                                                 */
+ /*********************************************************************/
+                                                                        
+         READ FILE (BH679I) INTO (BH601_AR);                            
+                                                                        
+         DO WHILE (EOF_BH679 = 0);                                      
+            TV_LÆS = TV_LÆS + 1;                                        
+            IF BH601.SORT_KOMNR = 999 /* KOMMUNE-INDIVID        */      
+            THEN                                                        
+               TV_KOM = TV_KOM + 1;                                     
+            ELSE                                                        
+               CALL BEHANDLING;                                         
+            READ FILE (BH679I) INTO (BH601_AR);                         
+         END;                                                           
+                                                                        
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+                                                                        
+         /* SKRIV LIGE UDSKRLBNR=1 FRA DEN SIDSTE PERSON */             
+                                                                        
+         BH601_SAM1A.FLIN     = GEM.FLIN;                               
+         BH601_SAM1A.CRENERKL = GEM.CRENERKL;                           
+         BH601_SKR = BH601_SAM1;                                        
+         CALL SKRIV_BEREGN;                                             
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL SKRIV_OPTÆLLING;                                          
+         CLOSE FILE (BH679I),                                           
+               FILE (BH675O);                                           
+         LINIE = ' ';                                                   
+         CALL ZZ20301 (LINIE,'99');                                     
+                                                                        
+ /********************************************************************* 
+ *       BEHANDLING AF PERSON FRA ESR_UDTRÆK                          * 
+ *********************************************************************/ 
+ BEHANDLING:                                                            
+ PROC;                                                                  
+                                                                        
+         /* INITIER FELTER PR. PERSON */                                
+                                                                        
+         BH60101M = '';                                                 
+                                                                        
+         BH601.OVG_1999.BLEJE   = 0;                                    
+         BH601.OVG_1999.BLEJEFP = 0;                                    
+         BH601.OVG_1999.BLEJE67 = 0;                                    
+                                                                        
+         /* UNDERSØG OM EJEREN HAR HANDLET I INDKOMSTÅRET */            
+                                                                        
+         KØBT_I_ÅR  = NEJ;                                              
+         SOLGT_I_ÅR = NEJ;                                              
+                                                                        
+         IF BH601.DOVTG > ÅR0101 & BH601.DOVTG <= ÅR1231                
+         THEN                                                           
+            KØBT_I_ÅR = JA;                                             
+                                                                        
+         IF BH601.DAFSTÅ > ÅR0101 & BH601.DAFSTÅ <= ÅR1231              
+         THEN                                                           
+            SOLGT_I_ÅR = JA;                                            
+                                                                        
+         FRADATO = BH601.FRADAG;                                        
+         TILDATO = BH601.TILDAG;                                        
+                                                                        
+         /* BEREGN BRØK TIL PERIODEBEREGNING. ALLE  H E L E  */         
+         /* MÅNEDER BEREGNES SOM VÆRENDE PÅ 30 DAGE          */         
+         /* D.V.S. ET  H E L T  ÅR ER PÅ 360 DAGE            */         
+                                                                        
+         IF (KØBT_I_ÅR  = NEJ &      /* PERSONEN HAR EJET EJENDOMMEN */ 
+             SOLGT_I_ÅR = NEJ)       /*  H E L E  DETTE INDKOMSTÅR   */ 
+         THEN                                                           
+            TÆLLER, NÆVNER = 1;      /* INGEN PERIODEBEREGNING       */ 
+         ELSE                                                           
+            DO;                                                         
+                                                                        
+               NÆVNER = 360;                                            
+                                                                        
+               TÆLLER = (((TIL.MD - 1) * 30) + TIL.DG) -                
+                        (((FRA.MD - 1) * 30) + FRA.DG);                 
+                                                                        
+               IF TÆLLER = 0                                            
+               THEN                                                     
+                  TÆLLER = 1; /* KØB OG SALG SAMME DATO */              
+                                                                        
+            END;                                                        
+         BH601.CUDLEJNING = '0'; /* SKAL GENOPSÆTTES A.H.T. BEREGNING */
+         BH601.CUDLEJET   = '0'; /* SKAL GENOPSÆTTES A.H.T. BEREGNING */
+         IF BH601.FLEJL > 2      !                                      
+          ((BH601.CBENYT = '02'  !                                      
+            BH601.CBENYT = '22'  !                                      
+            BH601.CBENYT = '42') &                                      
+            BH601.FLEJL = 2)                                            
+         THEN                                                           
+            /* OPSÆT KODE FOR UDLEJNINGSEJENDOM */                      
+            BH601.CUDLEJNING = '1';                                     
+         IF BH601.CLEJE  = '7'   !                                      
+          ((BH601.CEJSO  = '1'   !                                      
+            BH601.CEJSO  = '3'   !                                      
+           (BH601.CEJERL = '1' & BH601.DOVTG <= ÅR0101 &                
+            SOLGT_I_ÅR = JA)) &                                         
+           (BH601.CBENYT = '21' !                                       
+            BH601.CBENYT = '22' !                                       
+            BH601.CBENYT = '25' !                                       
+            BH601.CBENYT = '26' !                                       
+            BH601.CBENYT = '27' !                                       
+            BH601.CBENYT = '28' !                                       
+            BH601.CBENYT = '29'))                                       
+         THEN                                                           
+            /* OPSÆT KODE FOR UDLEJET EJENDOM */                        
+            BH601.CUDLEJET = '1';                                       
+         IF (BH601.CEJERL = '1' & BH601.DOVTG <= ÅR0101 &               
+             SOLGT_I_ÅR = NEJ) &                                        
+            (BH601.CBENYT = '21' !                                      
+             BH601.CBENYT = '22' !                                      
+             BH601.CBENYT = '25' !                                      
+             BH601.CBENYT = '26' !                                      
+             BH601.CBENYT = '27' !                                      
+             BH601.CBENYT = '28' !                                      
+             BH601.CBENYT = '29')                                       
+          THEN                                                          
+             /* OPSÆT KODE FOR UDLEJET EJENDOM FOR EN HELÅRS-EJER */    
+             BH601.CUDLEJET = '1';                                      
+         IF BH601.CLEJE = '6'          /* OPTÆL LEJEVÆRDIKODE 6 EJD */  
+         THEN                                                           
+            TV_LEJE6 = TV_LEJE6 + 1;                                    
+         IF BH601.CLEJE = '7'          /* OPTÆL LEJEVÆRDIKODE 7 EJD */  
+         THEN                                                           
+            TV_LEJE7 = TV_LEJE7 + 1;                                    
+         IF GEM.DCPRCIR ^= BH601.DCPRCIR                                
+         THEN                                                           
+            DO;                                                         
+               IF BH601_SAM1A.LÆNGDE > 0                                
+               THEN                                                     
+                  DO;                                                   
+                     /* INDSÆT SAMLET ANTAL LINIER FOR PERSONEN */      
+                     /* SAMT KODE FOR KUN ERKLÆRBARE EJENDOMME  */      
+                     /* I LAVESTE UDSKRLBNR FOR PERSONEN A.H.T. */      
+                     /* AT DE EFTERFØLGENDE PROGRAMMER FORVEN-  */      
+                     /* AT DET LAVESTE UDSKRLBNR PR. PERSON IN- */      
+                     /* DEHOLDER DEN SAMLEDE STATUS.            */      
+                     BH601_SAM1A.FLIN     = GEM.FLIN;                   
+                     BH601_SAM1A.CRENERKL = GEM.CRENERKL;               
+                     BH601_SKR = BH601_SAM1;                            
+                     CALL SKRIV_BEREGN;                                 
+                  END;                                                  
+               /* OG TAG LIGE OG INITIER DIV. TÆLLEVÆRKER M.V. TIL */   
+               /* STYRING AF SLUTLINIE-REDIGERING                  */   
+               GEM = '';                                                
+               GEM.DCPRCIR  = BH601.DCPRCIR;                            
+               GEM.CRENERKL = BH601.CRENERKL;                           
+               GEM.FLIN     = BH601.FLIN;                               
+            END;                                                        
+         GEM_BEREGN = BH601, BY NAME; /* GEM MODEREJENDOMMENS */        
+                                      /* EGEN BEREGNING M.V.  */        
+         BH601.CLEJVBEKOD = 0;                                          
+         BH601.CDIFLEJE   = 0;                                          
+         BH601.CDIFLEJE2  = 0;                                          
+         BH601.CP20_3500  = 0;                                          
+         BH601.CLIN06  = 0;                                             
+         BH601.BNETTO  = 0;                                             
+         BH601.BSTDF   = 0;                                             
+         BH601.BLEJE1  = 0;                                             
+         BH601.BLEJE2  = 0;                                             
+         BH601.PER_LEJEV(1).BELØB = 0;                                  
+         BH601.PER_LEJEV(1).CREDTYP = 0;                                
+         BH601.PER_LEJEV(2).BELØB = 0;                                  
+         BH601.PER_LEJEV(2).CREDTYP = 0;                                
+                                                                        
+         IF BH601.CSAMBSKAT = '9'                                       
+         THEN                                                           
+            DO;                                                         
+               BEREGN_TIL = 'ORD';                                      
+               GRÆNSEVÆRDI = 2393000;       /* OBS.: VÆRDI FOR 1999 */  
+               CALL BH60110(BH601_AR,BH60101M,BEREGN_TIL);              
+            END;                                                        
+         IF BH601.CSAMBSKAT = '1'                                       
+         THEN                                                           
+            DO;                                                         
+               BEREGN_TIL = 'SAM';                                      
+               GRÆNSEVÆRDI = 2393000;                                   
+               /* OBS.:  NY VÆRDI FOR 1999 */                           
+               CALL BH60110(BH601_AR,BH60101M,BEREGN_TIL);              
+            END;                                                        
+         IF BH601.FEJER > 1                                             
+         THEN                                                           
+            TV_FLEJER = TV_FLEJER + 1;                                  
+         IF BH601.CSAMBSKAT = '1' !                                     
+            BH601.CSAMBSKAT = '9'                                       
+         THEN                                                           
+            DO;                                                         
+               CALL STANDARDFRADRAG;                                    
+               CALL NETTORESULTAT;                                      
+               CALL OPSÆT_CLIN;                                         
+            END;                                                        
+         IF (BH601.MLEJE1 > 0 !                                         
+             BH601.MLEJE2 > 0) &                                        
+             BH601.BLEJE1 = 0 &                                         
+             BH601.BLEJE2 = 0                                           
+         THEN                                                           
+            DO;                                                         
+               /* REETABLER TIDLIGERE BEREGNING FOR */                  
+               /* EJENDOMMEN ALENE                  */                  
+               BH601 = GEM_BEREGN, BY NAME;                             
+               BH601.BLEJE1 = BH601.MLEJE1;                             
+               BH601.BLEJE2 = BH601.MLEJE2;                             
+               BH601.BSTDF  = BH601.MSTDF;                              
+               BH601.CREDIG3 = BH601.MREDIG3;                           
+               BH601.CLIN03  = BH601.MLIN03;                            
+               BH601.CLIN06  = BH601.MLIN06;                            
+               BH601.CKOMPONEN  = ' ';                                  
+               BH601.CERKLÆR = 0;                                       
+               IF BH601.CLIN08 = 1                                      
+               THEN                                                     
+                  DO;                                                   
+                     BH601.CSAMBSKAT = '2';                             
+                     BH601.CLIN08 = 0;                                  
+                     BH601.CLIN09 = 1;                                  
+                  END;                                                  
+            END;                                                        
+         CALL OPSÆT_PR_PERSON;                                          
+         CALL OPTÆLLING;                                                
+         IF BH601.UDSKRLBNR = 1                                         
+         THEN                                                           
+            BH601_SAM1 = BH601_AR;                                      
+         ELSE                                                           
+            DO;                                                         
+               BH601_SKR = BH601_AR;                                    
+               CALL SKRIV_BEREGN;                                       
+            END;                                                        
+ END BEHANDLING;                                                        
+                                                                        
+ /*********************************************************************/
+ /* BEREGNING AF STANDARDFRADRAG TIL ORDINÆR ESKEMA.                  */
+ /*********************************************************************/
+ STANDARDFRADRAG:                                                       
+         PROC;                                                          
+                                                                        
+ DCL     HSTDF          FIXED     (11,2);                               
+                                                                        
+         IF BH601.BLEJE1 = 0 &              /*ALTID UNDTAGELSE NÅR DER*/
+            BH601.BLEJE2 = 0                /*IKKE ER BEREGNET LEJE-  */
+         THEN                               /*VÆRDI                   */
+            RETURN;                                                     
+                                                                        
+         /* OPTÆL HVOR MANGE INDIVIDER HAR FÅET BEREGNET 6%-LEJEVÆRDI */
+                                                                        
+         IF HJVÆRDI > GRÆNSEVÆRDI                                       
+         THEN                                                           
+            TVGRÆNSE = TVGRÆNSE + 1;                                    
+                                                                        
+         HSTDF = 0;                                                     
+                                                                        
+         SELECT ( BH601.CBENYT );           /* BENYTTELSESKODER HVOR  */
+                                            /* DER MÅSKE SKAL BEREGNES*/
+           WHEN ('01','02','05','06','07','08',                         
+                 '13','34','41','42','45','48');                        
+           OTHERWISE                                                    
+              RETURN;                                                   
+         END;                                                           
+                                                                        
+         /* UNDTAGELSER BESTEMT AF BENYTTELSESKODE M.V., HAR I DE */    
+         /* FLESTE TILFÆLDE IKKE GIVET LEJEVÆRDI-BEREGNING.       */    
+                                                                        
+         /* UNDTAGELSE    1 - 9    */                                   
+         /* GAV INGEN LEJEVÆRDI    */                                   
+                                                                        
+         IF BH601.CFRED = '1'               /* UNDTAGELSE   10        */
+         THEN                               /* SPECIEL FOR STD.FRADRAG*/
+            RETURN;                                                     
+                                                                        
+         /* BEREGN STANDARDFRADRAG.                               */    
+         /* SOM BEREGNINGSGRUNDLAG BENYTTES NORMALT HJVÆRDI, DER  */    
+         /* ER OPSAT I LEJEVÆRDIBEREGNINGEN.                      */    
+                                                                        
+         SELECT ( BH601.CBENYT );                                       
+                                                                        
+            WHEN ('01','41','45')                                       
+               DO;                                                      
+                  IF BH601.FLEJL = 2        /* BENYT EJENDOMSVÆRDIEN  */
+                  THEN                      /* SOM BEREGNINGSGRUNDLAG */
+                     HJVÆRDI = BH601.BEJDVÆR;                           
+               END;                                                     
+                                                                        
+            WHEN ('06','13')                                            
+               DO;                                                      
+                  IF (BH601.EJEBOL(1).EJBOLTYP > '4' &                  
+                      BH601.EJEBOL(1).BEJEBOL > 0) &                    
+                     BH601.FLEJL = 2                                    
+                  THEN                                                  
+                     HJVÆRDI = BH601.BEJDVÆR;                           
+               END;                                                     
+                                                                        
+            OTHERWISE;                                                  
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+         HSTDF = HJVÆRDI / 100;                                         
+                                                                        
+         IF BH601.FLEJL < 2 !                                           
+           (BH601.EJEBOL(1).EJBOLTYP = '4' &                            
+            BH601.EJEBOL(1).BEJEBOL > 0) !                              
+            BH601.CBENYT = '02' !                                       
+            BH601.CBENYT = '42'                                         
+         THEN                                                           
+            DO;                                                         
+               IF HSTDF < 400                                           
+               THEN                                                     
+                  HSTDF = 400;                                          
+               IF HSTDF > 3000                                          
+               THEN                                                     
+                  HSTDF = 3000;                                         
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               IF HSTDF < 800                                           
+               THEN                                                     
+                  HSTDF = 800;                                          
+               IF HSTDF > 6000                                          
+               THEN                                                     
+                  HSTDF = 6000;                                         
+            END;                                                        
+                                                                        
+         HSTDF = (HSTDF * TÆLLER) / NÆVNER;                             
+         BH601.BSTDF = HSTDF + 0.5;                                     
+                                                                        
+         IF BH601.BSTDF = 0                                             
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         /* OPSÆT REDIGERINGSKODE FOR LINIE 3: LEJEVÆRDI M.V.         */
+                                                                        
+         SELECT ( BH601.CREDIG3 );                                      
+                                                                        
+            WHEN ('1')                                                  
+               BH601.CREDIG3 = '2';  /* IKKE PENSIONIST MED STD.FRAD. */
+                                                                        
+            WHEN ('6')                                                  
+               BH601.CREDIG3 = '7';  /* PENSIONIST MED STD.FRAD.      */
+                                                                        
+            OTHERWISE;                                                  
+                                                                        
+         END;                                                           
+                                                                        
+ END STANDARDFRADRAG;                                                   
+                                                                        
+ %INCLUDE BH60191M;               /* BEREGNING AF NETTORESULTAT       */
+ /*********************************************************************/
+ /*      OPSÆT KODER FOR LINIER VEDR. EJENDOMMEN                      */
+ /*********************************************************************/
+ OPSÆT_CLIN:                                                            
+ PROC;                                                                  
+         SELECT ( BH601.CREDIG3 );   /* OPSÆT REDIGERINGSKODE FOR     */
+                                     /* CLIN03 : LEJEVÆRDI M.V.       */
+                                                                        
+            WHEN ('1')               /* IKKE PENSIONIST UDEN STD.FRAD.*/
+               DO;                                                      
+                  IF BH601.BNETTO ^= 0                                  
+                  THEN                                                  
+                     BH601.CREDIG3 = '5';                               
+               END;                                                     
+            WHEN ('2')               /* IKKE PENSIONIST MED STD.FRAD. */
+               DO;                   /* OG NETTORESULTAT              */
+                  IF BH601.BNETTO = 0 &                                 
+                     BH601.CERKLÆR = 0                                  
+                  THEN;                                                 
+                  ELSE                                                  
+                     IF BH601.BNETTO >= 0                               
+                     THEN                                               
+                        BH601.CREDIG3 = '3';                            
+                     ELSE                                               
+                        BH601.CREDIG3 = '4';                            
+               END;                                                     
+            WHEN ('6')               /* PENSIONIST UDEN STD.FRAD.     */
+               DO;                                                      
+                  IF BH601.BNETTO ^= 0                                  
+                  THEN                                                  
+                     BH601.CREDIG3 = 'A';                               
+               END;                                                     
+            WHEN ('7')               /* PENSIONIST MED STD.FRAD.      */
+               DO;                   /* OG NETTORESULTAT              */
+                  IF BH601.BNETTO = 0 &                                 
+                     BH601.CERKLÆR = 0                                  
+                  THEN;                                                 
+                  ELSE                                                  
+                     IF BH601.BNETTO >= 0                               
+                     THEN                                               
+                        BH601.CREDIG3 = '8';                            
+                     ELSE                                               
+                        BH601.CREDIG3 = '9';                            
+               END;                                                     
+            OTHERWISE;                                                  
+         END;                                                           
+         IF BH601.CEJEV  = '5'                                          
+         THEN                                                           
+            DO;                                                         
+               /* ELLER EJENDOMME MED EJ VURD = 5                    */ 
+               /* SKAL LINIEN MED LEJEVÆRDI OG OVERSKUD ALTID        */ 
+               /* UDSKRIVES MED NUL I BELØBENE                       */ 
+               BH601.CLIN03 = 1;                                        
+               IF BH601.CLEJE = '3'                                     
+               THEN                                                     
+                  /* EJER ELLER ÆGTEFÆLLE 67 */                         
+                  BH601.CREDIG3 = 'A';                                  
+               ELSE                                                     
+                  /* IKKE PENSIONISTER       */                         
+                  BH601.CREDIG3 = '5';                                  
+            END;                                                        
+ END OPSÆT_CLIN;                                                        
+ /*********************************************************************/
+ /*      OPSÆT DIVERSE FELTER PR. PERSON TIL STYRING AF SLUT-LINIER   */
+ /*      SAMT EVT. SAMBESKATNING AF TILSTØDENDE GRUNDE                */
+ /*********************************************************************/
+ OPSÆT_PR_PERSON:                                                       
+ PROC;                                                                  
+         GEM.UDSKRLBNR = GEM.UDSKRLBNR + 1;                             
+         BH601.UDSKRLBNR = GEM.UDSKRLBNR;        /* UDSKRIVNINGSORDEN */
+         IF BH601.CERKLÆR = 0                                           
+         THEN                                                           
+            BH601.CRENERKL = 0;                                         
+         GEM.CRENERKL = BH601.CRENERKL;                                 
+         IF BH601.CLIN06 = 0 &                                          
+            BH601.MLIN06 = 1                                            
+         THEN                                                           
+            DO;                                                         
+               GEM.FLIN = GEM.FLIN - 1;                                 
+               BH601.FLIN = GEM.FLIN;                                   
+            END;                                                        
+         IF BH601.CLIN06 = 1 &                                          
+            BH601.MLIN06 = 0                                            
+         THEN                                                           
+            DO;                                                         
+               GEM.FLIN = GEM.FLIN + 1;                                 
+               BH601.FLIN = GEM.FLIN;                                   
+            END;                                                        
+ END OPSÆT_PR_PERSON;                                                   
+ /*********************************************************************/
+ /*      O P T Æ L L I N G E R  PR. KØRSEL                            */
+ /*********************************************************************/
+ OPTÆLLING:                                                             
+ PROC;                                                                  
+         IF BH601.CUDEJD = 1                                            
+         THEN                                                           
+            TVEJSK = TVEJSK + 1;         /* EJENDOMSSKEMA - ANDRE    */ 
+         IF BH601.BLEJE1 > 0                                            
+         THEN                                                           
+            DO;                                                         
+               TVLEJE = TVLEJE + 1;                                     
+               TVLEJ1 = TVLEJ1 + 1;                                     
+               TVBLØ1 = TVBLØ1 + BH601.BLEJE1;                          
+               TVBLØL = TVBLØL + BH601.BLEJE1;                          
+            END;                                                        
+         IF BH601.BLEJE2 > 0                                            
+         THEN                                                           
+            DO;                                                         
+               TVLEJE = TVLEJE + 1;                                     
+               TVLEJ2 = TVLEJ2 + 1;                                     
+               TVBLØ2 = TVBLØ2 + BH601.BLEJE2;                          
+               TVBLØL = TVBLØL + BH601.BLEJE2;                          
+            END;                                                        
+         IF BH601.BSTDF > 0                                             
+         THEN                                                           
+            DO;                                                         
+               TVBST = TVBST + 1;                                       
+               TVBLØB = TVBLØB + BH601.BSTDF;                           
+            END;                                                        
+ END OPTÆLLING;                                                         
+ /*********************************************************************/
+ /*      UDSKRIVNING AF EJENDOMSSKEMABEREGNING                        */
+ /*********************************************************************/
+ SKRIV_BEREGN:                                                          
+ PROC;                                                                  
+                                                                        
+         IF BH601_SKR1.CSAMBSKAT = '1' !                                
+            BH601_SKR1.CSAMBSKAT = '3'                                  
+         THEN                                                           
+            TV_SAMBER = TV_SAMBER + 1;                                  
+         ELSE                                                           
+            IF BH601_SKR1.CSAMBSKAT = '2' !                             
+               BH601_SKR1.CSAMBSKAT = '4' !                             
+               BH601_SKR1.CSAMBSKAT = '9'                               
+            THEN                                                        
+               DO;                                                      
+                  TV_SAMEJBER = TV_SAMEJBER + 1;                        
+               END;                                                     
+                                                                        
+         TV_BH675 = TV_BH675 + 1;                                       
+         WRITE FILE (BH675O) FROM (BH601_SKR);                          
+                                                                        
+ END SKRIV_BEREGN;                                                      
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE:                                                            
+ PROC;                                                                  
+         LIN.CCA = ZZWS1;                                               
+         OVLIN.T1 = 'PROGRAM: BH67500L';                                
+         OVLIN.T2 = 'BEREGNING TIL EJENDOMSSKEMA';                      
+         OVLIN.T3 = 'UDSKREVET DEN';                                    
+         OVLIN.DATO = UDDATO;                                           
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS2;                   /* SPACE 2 AFTER PRINT  */  
+         PRINTLIN = (57)' ' !! 'KØRSELSKONTROLLISTE';                   
+         CALL ZZ20301 (LINIE,'01');                                     
+         DETLIN0.CCA = ZZWS2;                                           
+         DETLIN0.TEKST1 = 'DENNE BEREGNING ER UDFØRT FOR INDKOMSTÅR=';  
+         DETLIN0.CPUÅR = INDKÅR;                                        
+         DETLIN0.TEKST2 = ' MED START=';                                
+         DETLIN0.START = ÅR0101;                                        
+         DETLIN0.TEKST3 = ' OG SLUT=';                                  
+         DETLIN0.SLUT  = ÅR1231;                                        
+         DETLIN0.TEKST4 = ' ';                                          
+         CALL ZZ20300 (DETLIN0,'01');                                   
+         LIN.CCA = ZZWS1;                   /* SPACE 1 AFTER PRINT  */  
+         PRINTLIN = ' ';                                                
+         LIN1.TEKST1 = 'ANTAL LÆSTE PÅ BEREGNINGSBÅND     B.H67901D';   
+         TOTAL1 = TV_LÆS;                                               
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS1;                   /* SPACE 1 AFTER PRINT  */  
+         PRINTLIN = ' ';                                                
+         LIN1.TEKST1 = 'ANTAL LÆSTE OPTÆLLINGSINDIVIDER            ';   
+         TOTAL1 = TV_KOM;                                               
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS1;                   /* SPACE 1 AFTER PRINT  */  
+         PRINTLIN = ' ';                                                
+         LIN1.TEKST1 = 'HERAF MED LEJEVÆRDIKODE 6                  ';   
+         TOTAL1 = TV_LEJE6;                                             
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS1;                   /* SPACE 1 AFTER PRINT  */  
+         PRINTLIN = ' ';                                                
+         LIN1.TEKST1 = 'HERAF MED LEJEVÆRDIKODE 7                  ';   
+         TOTAL1 = TV_LEJE7;                                             
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS1;                                               
+         LIN1.TEKST1 = 'ANTAL SKREVNE PERSON-INDV. PÅ     B.H67500D';   
+         TOTAL1 = TV_BH675;                                             
+         CALL ZZ20301(LINIE,'01');                                      
+         LIN1.TEKST1 = 'ANTAL INDIVIDER MED MASKINEL SAMBESKATNING';    
+         TOTAL1 = TV_SAMBER;                                            
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN1.TEKST1 = 'ANTAL INDIVIDER UDEN MASKINEL SAMBESKATNING';   
+         TOTAL1 = TV_SAMEJBER;                                          
+         CALL ZZ20301 (LINIE,'01');                                     
+         PRINTLIN = ' ';                                                
+         LIN.CCA = ZZWS2;                   /* SPACE 2 AFTER PRINT  */  
+         LIN1.TEKST1 = 'ANTAL BEREGNEDE INDIVIDER IALT';                
+         TOTAL1 = TVEJSK;                                               
+         CALL ZZ20301 (LINIE,'01');                                     
+         PRINTLIN = ' ';                                                
+         LIN.CCA = ZZWS1;                                               
+         TXT1 = 'BEREGNET LEJEVÆRDI 1      ANTAL:';                     
+         TAL1 = TVLEJ1;                                                 
+         TXT2 = ' BELØB: ';                                             
+         TAL2 = TVBLØ1;                                                 
+         CALL ZZ20301 (LINIE,'01');                                     
+         TXT1 = 'BEREGNET LEJEVÆRDI 2      ANTAL:';                     
+         TAL1 = TVLEJ2;                                                 
+         TAL2 = TVBLØ2;                                                 
+         CALL ZZ20301 (LINIE,'01');                                     
+         LIN.CCA = ZZWS3;                                               
+         TXT1 = 'UDSKREVET LEJEVÆRDI IALT  ANTAL:';                     
+         TAL1 = TVLEJE;                                                 
+         TAL2 = TVBLØL;                                                 
+         CALL ZZ20301 (LINIE,'01');                                     
+         PRINTLIN = ' ';                                                
+         LIN.CCA = ZZWS3;                                               
+         TXT1 = 'BEREGNET STD.FRADRAG      ANTAL:';                     
+         TAL1 = TVBST;                                                  
+         TAL2 = TVBLØB;                                                 
+         CALL ZZ20301 (LINIE,'01');                                     
+         PRINTLIN = ' ';                                                
+         LIN.CCA = ZZWS2;                                               
+         HJ_GRÆNSE = GRÆNSEVÆRDI;                                       
+         LIN1.TEKST1 = 'ANTAL INDV. BER.GRUNDLAG OVER ' !!              
+                       HJ_GRÆNSE !! ' (6%)';                            
+         TOTAL1 = TVGRÆNSE;                                             
+         CALL ZZ20301 (LINIE,'01');                                     
+ END TOTALLISTE;                                                        
+ /********************************************************************* 
+ *       SKRIVNING AF OPTÆLLINGSINDIVIDER                             * 
+ *********************************************************************/ 
+ SKRIV_OPTÆLLING:                                                       
+ PROC;                                                                  
+         BH60199          = '';                                         
+         BH60199.SORT_CITYP = 9;                                        
+         BH60199.SORT_KOMNR = 999;                                      
+         BH60199.SORT_EJDNR = 8888888;                                  
+         BH60199.SORT_CPR = 99999999999;                                
+         BH60199.SORT_EÆKNR = 999;                                      
+         BH60199.ANT_INDV = TV_BH675;                                   
+         WRITE FILE (BH675O) FROM (BH60199);                            
+ END SKRIV_OPTÆLLING;                                                   
+ END  BH67500;                                                          

@@ -1,0 +1,1421 @@
+  BH38300: PROCEDURE OPTIONS (MAIN);                                    
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2015                                       *
+ * PROGRAMNAVN: BH38300.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Mgl. beregning enkeforbrænder                          *
+ *              Programmet finder frem til enker der grundet en for-   *
+ *              kert rækkefølge i records fra CSC har fået fjernet     *
+ *              deres ejerskab og dermed ikke får ejendommen med på    *
+ *              forskudsopgørelsen                                     *
+ *                                                                     *
+ * INDDATA:     BH38301I - Evt. Fejl behæftede.                        *
+ *              BH38302I - Beregningsbåndet.                           *
+ * UDDATA:      BQ30000T/BQ31000T - EVS PERSONTABEL.                   *
+ *              BH35001Y          - KONTROLLISTE.                      *
+ *                                                                     *
+ * KONSTRUKTØR: Claus Marcussen, CMC, KMO              September 2015. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2015');            
+                                                                        
+ DCL     BH38302I FILE RECORD INPUT;     /* Beregningsbåndet          */
+ DCL     BH38303O FILE RECORD OUTPUT;    /* CSV Overtagelsesrecord    */
+ DCL     BH38304O FILE RECORD OUTPUT;    /* Ejerskab BN00600T         */
+ DCL     BH38305O FILE RECORD OUTPUT;    /* Transkation Forskud       */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+                                                                        
+ DCL   1 FEJL_UDTRAEK_ENKE,                                             
+         3 *                CHAR(4),                                    
+         3 ÅRSTAL           CHAR(4),                                    
+         3 *                CHAR(3),                                    
+         3 CPRNR            CHAR(10),                                   
+         3 *                CHAR(5),                                    
+         3 KOMMUNENUMMER    CHAR(3),                                    
+         3 *                CHAR(5),                                    
+         3 EJENDOMSNR       CHAR(7),                                    
+         3 *                CHAR(6),                                    
+         3 ELBNR            CHAR(1),                                    
+         3 *                CHAR(1),                                    
+         3 CDATAFRA         CHAR(1),                                    
+         3 *                CHAR(8),                                    
+         3 AFSTÅ_DATO       CHAR(10),                                   
+         3 *                CHAR(12);                                   
+                                                                        
+ DCL     BH945_BEREGN    CHAR      (6000) VAR;                          
+ DCL     1 BH945_B       BASED     (ADDR(BH945_BEREGN)),                
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90100N;;                                          
+ DCL     1 BH94599_B     BASED     (ADDR(BH945_BEREGN)),                
+           3 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH90099N;                                           
+                                                                        
+ DCL     1 EJER_BN00600T,                                               
+           %INCLUDE BH95100N;;                              /* F2005 */ 
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */        
+ EXEC SQL INCLUDE BQ30000T;     /* */                                   
+ EXEC SQL INCLUDE BQ31000T;     /* */                                   
+ EXEC SQL INCLUDE BQ50000T;     /* */                                   
+ EXEC SQL INCLUDE BN00600T;     /* */                                   
+                                                                        
+ DCL INDK_BGLALM40             BIN FIXED(15);                           
+ DCL INDK_BGLALM50             BIN FIXED(15);                           
+ DCL INDK_BGLFPEL              BIN FIXED(15);                           
+ DCL INDK_BGLPENS              BIN FIXED(15);                           
+ DCL INDK_BGLSUM               BIN FIXED(15);                           
+ DCL INDK_BGLMAN               BIN FIXED(15);                           
+ DCL INDK_BNYMAN               BIN FIXED(15);                           
+ DCL INDK_BFASTSTIGBGR         BIN FIXED(15);                           
+ DCL INDK_BEVSHELÅRGL          BIN FIXED(15);                           
+ DCL INDK_BEJBOLANV            BIN FIXED(15);                           
+ DCL INDK_BEJDVÆR_015ANV       BIN FIXED(15);                           
+ DCL INDK_BEVSGL               BIN FIXED(15);                           
+ DCL INDK_BPENSNEDGL           BIN FIXED(15);                           
+ DCL INDK_BBERGRLGL            BIN FIXED(15);                           
+ DCL INDK_BBER2FAMGL           BIN FIXED(15);                           
+ DCL INDK_BEVSFREM             BIN FIXED(15);                           
+ DCL INDK_BEJDVÆR_02ANV        BIN FIXED(15);                           
+ DCL INDK_BBERGRL_015ANV       BIN FIXED(15);                           
+ DCL INDK_BBERGRL_02ANV        BIN FIXED(15);                           
+ DCL INDK_BBERGRL_AKT          BIN FIXED(15);                           
+                                                                        
+ DCL  1   DCL_TEMP,                                                     
+        3 KOMMUNENUMMER        BIN FIXED(15),                           
+        3 EJENDOMSNR           BIN FIXED(31),                           
+        3 CPRNR                FIXED DEC(11,0),                         
+        3 BH945_RECORD         CHAR(6000) VAR;                          
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL ZS30101        ENTRY;                                              
+ DCL ZS67000        ENTRY;                                              
+ DCL ZS61900        ENTRY;                        /* KST/SSI INFO */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL JA             BIT(1)           VALUE('1'B);                       
+ DCL NEJ            BIT(1)           VALUE('0'B);                       
+                                                                        
+ DCL PARM_EOF       BIT(1)           INIT(NEJ);                         
+ DCL SLUT_FEJLRAMTE BIT(1)           INIT(NEJ);                         
+ DCL BH38302I_EOF   BIT(1)           INIT(NEJ);                         
+                                                                        
+ DCL OK             BIT(1);                                             
+ DCL CUR_EOF        BIT(1)           INIT('0'B);                        
+ DCL FORTSÆT        BIT(1)           INIT('1'B);                        
+ DCL PULS_COUNT     FIXED DEC(11,0)  INIT(0);                           
+ DCL OPDAT_SW       BIT(1)           INIT('0'B);                        
+ DCL KONTROL_SW     BIT(1)           INIT('0'B);                        
+ DCL CSV_TEXT       CHAR(200) VAR;                                      
+                                                                        
+ DCL FDATO          FIXED DEC (9);                                      
+ DCL FTID           FIXED DEC (7);                                      
+                                                                        
+ DCL FEJLTEKST      CHAR (20)        INIT(' ');                         
+ DCL ABENDMEDD      CHAR (56)        INIT(' ');                         
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PARAMETER                                         */
+ /*********************************************************************/
+ DCL     IPARM    FILE  RECORD  INPUT;                                  
+ DCL     1 PARMI,                                                       
+          2 KØRSW    CHAR(1),                                           
+          2 FILLER   CHAR(79);                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+ DCL     (ADDR,DATETIME,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+ DCL   ANTLÆSFEJLOVERTAG BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTAFSTÅSENERE    BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTIFORSKUDEVS    BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTEJBEREGNBÅND   BIN FIXED (31) INIT(0);/*                    */
+ DCL   ANTFLEREBEREGNBÅND BIN FIXED (31) INIT(0);/*                   */
+ DCL   ANTOPRET          BIN FIXED (31) INIT(0);/* OPDATEREDE RÆKKER  */
+ DCL   ANTINSERT         BIN FIXED (31) INIT(0);/* INSERTEDE RÆKKER   */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN1          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL1        CHAR (66);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR(1),                                       
+           2 CPRNR       PIC '9999999999',                              
+           2 FIL1        CHAR(5),                                       
+           2 KOMNR       PIC 'ZZZ9',                                    
+           2 FIL2        CHAR(5),                                       
+           2 EEJDNR      PIC 'ZZZZZZ9',                                 
+           2 FIL3        CHAR(5),                                       
+           2 ELBNR       PIC 'ZZ9',                                     
+           2 FIL4        CHAR(5),                                       
+           2 TEXT        CHAR(88);                                      
+                                                                        
+ %INCLUDE ZZ20301M;                          /* PRINT STYREKARAKTERER */
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+    ON ENDFILE (BH38302I)                                               
+       BH38302I_EOF = JA;                                               
+                                                                        
+    ON ENDFILE (IPARM)                                                  
+       PARM_EOF = JA;                                                   
+                                                                        
+    ON ERROR                                                            
+       BEGIN;                                                           
+          ON ERROR SYSTEM;                                              
+          FLUSH FILE (*);                                               
+          PUT SKIP LIST ('PROGRAMFEJL');                                
+          CALL PLIDUMP  ('SBHO','MODUL BH38300');                       
+       END;                                                             
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+    CALL SKAF_PARM();                                                   
+    CALL ZZ20390('*OPEN','BH38001Y');       /* ÅBEN KONTROLLISTE */     
+    LINIE = ZZWS3 !! ' EVS 2015 MGL. BEREGNING ENKEFOR'                 
+                  !! 'BRÆNDER (24)               ' !! 'DATO: '          
+                  !!   DATETIME('YYYY-MM-DD');                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS3 !! ' PROGRAMID: BH38300 ';                            
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZS61900;                               /* KST/SSI INFO   */    
+                                                                        
+    OPEN FILE (BH38303O) TITLE ('BH38303O');                            
+    OPEN FILE (BH38304O) TITLE ('BH38304O');                            
+    OPEN FILE (BH38305O) TITLE ('BH38305O');                            
+                                                                        
+    CSV_TEXT = '"Cprnr";"Komunnenummer";"Ejendomsnr";"Bemærkning"';     
+    WRITE FILE (BH38303O) FROM(CSV_TEXT);                               
+                                                                        
+    FDATO = FIXED_DAGSDATO;                                             
+    FTID = 182000;                                                      
+                                                                        
+    CALL INITIERING();                                                  
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+    CALL LÆS_FEJLEDE_OVERTAGELSE();                                     
+                                                                        
+    DO WHILE (^SLUT_FEJLRAMTE);                                         
+        CALL BEHANDEL_FEJLRECORD();                                     
+        CALL LÆS_FEJLEDE_OVERTAGELSE();                                 
+    END;                                                                
+                                                                        
+    CALL AFSLUT;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ BEHANDEL_FEJLRECORD: PROC();                                           
+                                                                        
+ DCL   ANTAL                BIN FIXED(31);                              
+                                                                        
+    IF AFSTÅET_SENERE(FEJL_UDTRAEK_ENKE.CPRNR,                          
+                      FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,                  
+                      FEJL_UDTRAEK_ENKE.EJENDOMSNR,                     
+                      FEJL_UDTRAEK_ENKE.AFSTÅ_DATO,                     
+                      2013) !                                           
+       AFSTÅET_SENERE(FEJL_UDTRAEK_ENKE.CPRNR,                          
+                      FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,                  
+                      FEJL_UDTRAEK_ENKE.EJENDOMSNR,                     
+                      FEJL_UDTRAEK_ENKE.AFSTÅ_DATO,                     
+                      2014) THEN                                        
+    DO;                                                                 
+       ANTAFSTÅSENERE = ANTAFSTÅSENERE + 1;                             
+       CALL SKRIV_KONTROL(FEJL_UDTRAEK_ENKE.CPRNR,                      
+                          FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,              
+                          FEJL_UDTRAEK_ENKE.EJENDOMSNR,                 
+                          0,                                            
+                          'Afstået efter ' !!                           
+                             FEJL_UDTRAEK_ENKE.AFSTÅ_DATO);             
+       RETURN;                                                          
+    END;                                                                
+                                                                        
+    IF LÆS_I_EVS_FORSKUD(FEJL_UDTRAEK_ENKE.CPRNR,                       
+                         FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,               
+                         FEJL_UDTRAEK_ENKE.EJENDOMSNR) THEN             
+    DO;                                                                 
+       ANTIFORSKUDEVS = ANTIFORSKUDEVS + 1;                             
+       CALL SKRIV_KONTROL(FEJL_UDTRAEK_ENKE.CPRNR,                      
+                          FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,              
+                          FEJL_UDTRAEK_ENKE.EJENDOMSNR,                 
+                          0,                                            
+                          'Findes i EVS Forskud 2015');                 
+       RETURN;                                                          
+    END;                                                                
+                                                                        
+                                                                        
+    ANTAL = FIND_PÅ_BEREGNINGSBÅND();                                   
+                                                                        
+    SELECT (ANTAL);                                                     
+    WHEN (0)                                                            
+       DO;                                                              
+          ANTEJBEREGNBÅND = ANTEJBEREGNBÅND + 1;                        
+          CALL SKRIV_KONTROL(FEJL_UDTRAEK_ENKE.CPRNR,                   
+                             FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,           
+                             FEJL_UDTRAEK_ENKE.EJENDOMSNR,              
+                             0,                                         
+                             'Ejendom ikke på beregningsbånd');         
+       END;                                                             
+    WHEN (1)                                                            
+       DO;                                                              
+          ANTOPRET = ANTOPRET + 1;                                      
+          CALL SKRIV_KONTROL(FEJL_UDTRAEK_ENKE.CPRNR,                   
+                             FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,           
+                             FEJL_UDTRAEK_ENKE.EJENDOMSNR,              
+                             0,                                         
+                             'Skal oprettes');                          
+          CALL DAN_TRANSAKTION_FORSKUD(FEJL_UDTRAEK_ENKE.KOMMUNENUMMER, 
+                                       FEJL_UDTRAEK_ENKE.CPRNR);        
+          CALL OPRET_EJERSKAB_BN06000T(FEJL_UDTRAEK_ENKE.KOMMUNENUMMER, 
+                                       FEJL_UDTRAEK_ENKE.EJENDOMSNR,    
+                                       FEJL_UDTRAEK_ENKE.CPRNR,         
+                                       BH945_B.ESR.EJER.DCPRCIR);       
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          ANTFLEREBEREGNBÅND = ANTFLEREBEREGNBÅND + 1;                  
+          CALL SKRIV_KONTROL(FEJL_UDTRAEK_ENKE.CPRNR,                   
+                             FEJL_UDTRAEK_ENKE.KOMMUNENUMMER,           
+                             FEJL_UDTRAEK_ENKE.EJENDOMSNR,              
+                             0,                                         
+                             'Ejendom ' !! ANTAL !!                     
+                             ' gange på beregningsbånd');               
+       END;                                                             
+    END;                                                                
+                                                                        
+ END BEHANDEL_FEJLRECORD;                                               
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ AFSTÅET_SENERE: PROC(DCPRN, EKOMNR, EEJDNR, OVERTAG_EFTER_DATO, ÅR)    
+                 RETURNS(BIT(1));                                       
+                                                                        
+ DCL   DCPRN                 DECIMAL(11,0);                             
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+ DCL   OVERTAG_EFTER_DATO    CHAR(10);                                  
+ DCL   ÅR                    BIN FIXED(15);                             
+ DCL   DUMMY_FELT            CHAR(1);                                   
+                                                                        
+    EXEC SQL                                                            
+       SELECT DISTINCT 'X'                                              
+       INTO :DUMMY_FELT                                                 
+       FROM BQ31000T B                                                  
+       WHERE B.FELTKODE  = (SELECT C.FELTKODE                           
+                            FROM BQ50000T  C                            
+                            WHERE DATANAVN = 'DAFSTAA')                 
+         AND B.DINDKAAR  IN (2013, 2014)                                
+         AND B.EKOMNR    = :EKOMNR                                      
+         AND B.EEJDNR    = :EEJDNR                                      
+         AND B.DCPRN     = :DCPRN                                       
+         AND B.INDHOLD_C > :OVERTAG_EFTER_DATO                          
+       WITH UR;                                                         
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0)                                                             
+       DO;                                                              
+          RETURN(JA);                                                   
+       END;                                                             
+    WHEN(100)                                                           
+       DO;                                                              
+          RETURN(NEJ);                                                  
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END AFSTÅET_SENERE;                                                    
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ LÆS_I_EVS_FORSKUD: PROC(DCPRN, EKOMNR, EEJDNR)   RETURNS(BIT (1));     
+                                                                        
+ DCL   DCPRN                 DECIMAL(11,0);                             
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+                                                                        
+    EXEC SQL                                                            
+       SELECT PERSONNUMMER                                              
+            , ELBNR                                                     
+            , DFRAGLD                                                   
+            , DKØRT                                                     
+            , BALMGL                                                    
+            , BFPGL                                                     
+            , BPENSGL                                                   
+            , BSTDGL                                                    
+            , CEVSBENY                                                  
+            , CEJDAKTI                                                  
+            , CEJBEVS                                                   
+            , BBERGRL                                                   
+            , CBERGRL                                                   
+            , CEJDTYPE                                                  
+            , BGRPROM1                                                  
+            , BPROM1                                                    
+            , BGRPROM2                                                  
+            , BPROM2                                                    
+            , CNEDSL1                                                   
+            , BNEDSL1                                                   
+            , CNEDSL2                                                   
+            , BNEDSL2                                                   
+            , CPENSNED                                                  
+            , BPENSNED                                                  
+            , BPENSIND                                                  
+            , BPENSGR                                                   
+            , BPENSRED                                                  
+            , CSTIBEGR                                                  
+            , BSTIBGR                                                   
+            , CSTIBLB                                                   
+            , BSTITIL                                                   
+            , BUDLSKC                                                   
+            , DATO0107                                                  
+            , DOVTG                                                     
+            , DAFSTAA                                                   
+            , FDAGEJ                                                    
+            , FDAGEJEJ                                                  
+            , GPCTEJER                                                  
+            , FDAGUDLE                                                  
+            , GPCTUDLE                                                  
+            , FDAGERHV                                                  
+            , GPCTERHV                                                  
+            , BSUM1                                                     
+            , BNETTO                                                    
+            , BBRUTTO                                                   
+            , BEJERED                                                   
+            , BERHVRED                                                  
+            , BUDLERED                                                  
+            , B100                                                      
+            , BEJERAN                                                   
+            , BEJERANU                                                  
+            , BEVSMAN                                                   
+            , DTILGLD                                                   
+            , FEJLNR                                                    
+            , CICSID                                                    
+            , DINDKAAR                                                  
+            , EKOMNR                                                    
+            , EEJDNR                                                    
+            , BBER2FAM                                                  
+            , BEJBOL1                                                   
+            , BEJBOL2                                                   
+            , CFRED                                                     
+            , CTYPSLUT                                                  
+            , CTYPFOR                                                   
+            , BGLEVS10                                                  
+            , BGLEVS2                                                   
+            , BGLEVS4                                                   
+            , BGLEVSP                                                   
+            , BGLALM40                                                  
+            , BGLALM50                                                  
+            , BGLFPEL                                                   
+            , BGLPENS                                                   
+            , BGLSUM1                                                   
+            , BGLSTIBGR                                                 
+            , BGLSTITIL                                                 
+            , BGLSUM                                                    
+            , BGLMAN                                                    
+            , BNYMAN                                                    
+            , CGLANV                                                    
+            , CENKE                                                     
+            , CÆGTOPR                                                   
+            , CGLSLUTEVS                                                
+            , BGLSLUTEVS                                                
+            , BGLPENSNED                                                
+            , BGLSUM2                                                   
+            , BGLSLUTSTI                                                
+            , BSUM2                                                     
+            , COPR_CEJDTYPE                                             
+            , COPR_BBERGRL                                              
+            , COPR_BBER2FAM                                             
+            , COPR_GPCTEJER                                             
+            , COPR_DOVTG                                                
+            , COPR_DAFSTAA                                              
+            , COPR_CNEDSL1                                              
+            , COPR_CPTYPSLUT                                            
+            , COPR_CPTYPFOR                                             
+            , COPR_CPENSNED                                             
+            , COPR_CEVSBENY                                             
+            , COPR_CEJBEVS                                              
+            , COPR_BGLMAN                                               
+            , COPR_CSTIBEGR                                             
+            , COPR_CFRED                                                
+            , COPR_GPCTUDLE                                             
+            , COPR_FDAGUDLE                                             
+            , COPR_GPCTERHV                                             
+            , COPR_FDAGERHV                                             
+            , COPR_BUDLSKC                                              
+            , COPR_BNYMAN                                               
+            , COPR_CENKE                                                
+            , COPR_CTESTEJD                                             
+            , BEJDVÆRAKTÅR                                              
+            , BGLEJDVÆR5PCT                                             
+            , DINDFLYT                                                  
+            , COPR_DINDFLYT                                             
+            , DFRAFLYT                                                  
+            , COPR_DFRAFLYT                                             
+            , FUBEBOELIG                                                
+            , COPR_FUBEBOELIG                                           
+            , CDATAFRA                                                  
+            , CSLET                                                     
+            , COPR_CSLET                                                
+            , BFASTSTIGBGR                                              
+            , COPR_BFASTSTIGBGR                                         
+            , CBERGRLANV                                                
+            , CHELÅR                                                    
+            , CPENSNED1                                                 
+            , COPR_CPENSNED1                                            
+            , BEVSHELÅRGL                                               
+            , COPR_BEVSHELÅRGL                                          
+            , CKOPI                                                     
+            , BGLEJBOL1                                                 
+            , BGLEJBOL2                                                 
+            , BEJBOLANV                                                 
+            , CANVEBOL                                                  
+            , BUBEBOLRED                                                
+            , CFORSKEL                                                  
+            , BEJDVÆR_015ANV                                            
+            , BEJBOL1_015ANV                                            
+            , CEJBOLTYP1_015ANV                                         
+            , BEJBOL2_015ANV                                            
+            , CEJBOLTYP2_015ANV                                         
+            , BEVSGL                                                    
+            , COPR_BEVSGL                                               
+            , BPENSNEDGL                                                
+            , COPR_BPENSNEDGL                                           
+            , BGLSUM3                                                   
+            , BSUM3                                                     
+            , BBERGRLGL                                                 
+            , BBER2FAMGL                                                
+            , COMPLA                                                    
+            , DOMPLACPR                                                 
+            , ESEKTR                                                    
+            , BEVSFREM                                                  
+            , COPR_BEVSFREM                                             
+            , BEJDVÆR_02ANV                                             
+            , BEJBOL1_02ANV                                             
+            , CEJBOLTYP1_02ANV                                          
+            , BEJBOL2_02ANV                                             
+            , CEJBOLTYP2_02ANV                                          
+            , CEJDTYPE_AKT                                              
+            , CPTYPGL                                                   
+            , CEKSEMP                                                   
+            , COPR_EKSEMP                                               
+            , BBERGRL_015ANV                                            
+            , BBERGRL_02ANV                                             
+            , BBERGRL_AKT                                               
+       INTO   :PERSONEJENDOMSOPL.PERSONNUMMER                           
+            , :PERSONEJENDOMSOPL.ELBNR                                  
+            , :PERSONEJENDOMSOPL.DFRAGLD                                
+            , :PERSONEJENDOMSOPL.DKØRT                                  
+            , :PERSONEJENDOMSOPL.BALMGL                                 
+            , :PERSONEJENDOMSOPL.BFPGL                                  
+            , :PERSONEJENDOMSOPL.BPENSGL                                
+            , :PERSONEJENDOMSOPL.BSTDGL                                 
+            , :PERSONEJENDOMSOPL.CEVSBENY                               
+            , :PERSONEJENDOMSOPL.CEJDAKTI                               
+            , :PERSONEJENDOMSOPL.CEJBEVS                                
+            , :PERSONEJENDOMSOPL.BBERGRL                                
+            , :PERSONEJENDOMSOPL.CBERGRL                                
+            , :PERSONEJENDOMSOPL.CEJDTYPE                               
+            , :PERSONEJENDOMSOPL.BGRPROM1                               
+            , :PERSONEJENDOMSOPL.BPROM1                                 
+            , :PERSONEJENDOMSOPL.BGRPROM2                               
+            , :PERSONEJENDOMSOPL.BPROM2                                 
+            , :PERSONEJENDOMSOPL.CNEDSL1                                
+            , :PERSONEJENDOMSOPL.BNEDSL1                                
+            , :PERSONEJENDOMSOPL.CNEDSL2                                
+            , :PERSONEJENDOMSOPL.BNEDSL2                                
+            , :PERSONEJENDOMSOPL.CPENSNED                               
+            , :PERSONEJENDOMSOPL.BPENSNED                               
+            , :PERSONEJENDOMSOPL.BPENSIND                               
+            , :PERSONEJENDOMSOPL.BPENSGR                                
+            , :PERSONEJENDOMSOPL.BPENSRED                               
+            , :PERSONEJENDOMSOPL.CSTIBEGR                               
+            , :PERSONEJENDOMSOPL.BSTIBGR                                
+            , :PERSONEJENDOMSOPL.CSTIBLB                                
+            , :PERSONEJENDOMSOPL.BSTITIL                                
+            , :PERSONEJENDOMSOPL.BUDLSKC                                
+            , :PERSONEJENDOMSOPL.DATO0107                               
+            , :PERSONEJENDOMSOPL.DOVTG                                  
+            , :PERSONEJENDOMSOPL.DAFSTAA                                
+            , :PERSONEJENDOMSOPL.FDAGEJ                                 
+            , :PERSONEJENDOMSOPL.FDAGEJEJ                               
+            , :PERSONEJENDOMSOPL.GPCTEJER                               
+            , :PERSONEJENDOMSOPL.FDAGUDLE                               
+            , :PERSONEJENDOMSOPL.GPCTUDLE                               
+            , :PERSONEJENDOMSOPL.FDAGERHV                               
+            , :PERSONEJENDOMSOPL.GPCTERHV                               
+            , :PERSONEJENDOMSOPL.BSUM1                                  
+            , :PERSONEJENDOMSOPL.BNETTO                                 
+            , :PERSONEJENDOMSOPL.BBRUTTO                                
+            , :PERSONEJENDOMSOPL.BEJERED                                
+            , :PERSONEJENDOMSOPL.BERHVRED                               
+            , :PERSONEJENDOMSOPL.BUDLERED                               
+            , :PERSONEJENDOMSOPL.B100                                   
+            , :PERSONEJENDOMSOPL.BEJERAN                                
+            , :PERSONEJENDOMSOPL.BEJERANU                               
+            , :PERSONEJENDOMSOPL.BEVSMAN                                
+            , :PERSONEJENDOMSOPL.DTILGLD                                
+            , :PERSONEJENDOMSOPL.FEJLNR                                 
+            , :PERSONEJENDOMSOPL.CICSID                                 
+            , :PERSONEJENDOMSOPL.DINDKAAR                               
+            , :PERSONEJENDOMSOPL.EKOMNR                                 
+            , :PERSONEJENDOMSOPL.EEJDNR                                 
+            , :PERSONEJENDOMSOPL.BBER2FAM                               
+            , :PERSONEJENDOMSOPL.BEJBOL1                                
+            , :PERSONEJENDOMSOPL.BEJBOL2                                
+            , :PERSONEJENDOMSOPL.CFRED                                  
+            , :PERSONEJENDOMSOPL.CTYPSLUT                               
+            , :PERSONEJENDOMSOPL.CTYPFOR                                
+            , :PERSONEJENDOMSOPL.BGLEVS10                               
+            , :PERSONEJENDOMSOPL.BGLEVS2                                
+            , :PERSONEJENDOMSOPL.BGLEVS4                                
+            , :PERSONEJENDOMSOPL.BGLEVSP                                
+            , :PERSONEJENDOMSOPL.BGLALM40      :INDK_BGLALM40           
+            , :PERSONEJENDOMSOPL.BGLALM50      :INDK_BGLALM50           
+            , :PERSONEJENDOMSOPL.BGLFPEL       :INDK_BGLFPEL            
+            , :PERSONEJENDOMSOPL.BGLPENS       :INDK_BGLPENS            
+            , :PERSONEJENDOMSOPL.BGLSUM1                                
+            , :PERSONEJENDOMSOPL.BGLSTIBGR                              
+            , :PERSONEJENDOMSOPL.BGLSTITIL                              
+            , :PERSONEJENDOMSOPL.BGLSUM        :INDK_BGLSUM             
+            , :PERSONEJENDOMSOPL.BGLMAN        :INDK_BGLMAN             
+            , :PERSONEJENDOMSOPL.BNYMAN        :INDK_BNYMAN             
+            , :PERSONEJENDOMSOPL.CGLANV                                 
+            , :PERSONEJENDOMSOPL.CENKE                                  
+            , :PERSONEJENDOMSOPL.CÆGTOPR                                
+            , :PERSONEJENDOMSOPL.CGLSLUTEVS                             
+            , :PERSONEJENDOMSOPL.BGLSLUTEVS                             
+            , :PERSONEJENDOMSOPL.BGLPENSNED                             
+            , :PERSONEJENDOMSOPL.BGLSUM2                                
+            , :PERSONEJENDOMSOPL.BGLSLUTSTI                             
+            , :PERSONEJENDOMSOPL.BSUM2                                  
+            , :PERSONEJENDOMSOPL.COPR_CEJDTYPE                          
+            , :PERSONEJENDOMSOPL.COPR_BBERGRL                           
+            , :PERSONEJENDOMSOPL.COPR_BBER2FAM                          
+            , :PERSONEJENDOMSOPL.COPR_GPCTEJER                          
+            , :PERSONEJENDOMSOPL.COPR_DOVTG                             
+            , :PERSONEJENDOMSOPL.COPR_DAFSTAA                           
+            , :PERSONEJENDOMSOPL.COPR_CNEDSL1                           
+            , :PERSONEJENDOMSOPL.COPR_CPTYPSLUT                         
+            , :PERSONEJENDOMSOPL.COPR_CPTYPFOR                          
+            , :PERSONEJENDOMSOPL.COPR_CPENSNED                          
+            , :PERSONEJENDOMSOPL.COPR_CEVSBENY                          
+            , :PERSONEJENDOMSOPL.COPR_CEJBEVS                           
+            , :PERSONEJENDOMSOPL.COPR_BGLMAN                            
+            , :PERSONEJENDOMSOPL.COPR_CSTIBEGR                          
+            , :PERSONEJENDOMSOPL.COPR_CFRED                             
+            , :PERSONEJENDOMSOPL.COPR_GPCTUDLE                          
+            , :PERSONEJENDOMSOPL.COPR_FDAGUDLE                          
+            , :PERSONEJENDOMSOPL.COPR_GPCTERHV                          
+            , :PERSONEJENDOMSOPL.COPR_FDAGERHV                          
+            , :PERSONEJENDOMSOPL.COPR_BUDLSKC                           
+            , :PERSONEJENDOMSOPL.COPR_BNYMAN                            
+            , :PERSONEJENDOMSOPL.COPR_CENKE                             
+            , :PERSONEJENDOMSOPL.COPR_CTESTEJD                          
+            , :PERSONEJENDOMSOPL.BEJDVÆRAKTÅR                           
+            , :PERSONEJENDOMSOPL.BGLEJDVÆR5PCT                          
+            , :PERSONEJENDOMSOPL.DINDFLYT                               
+            , :PERSONEJENDOMSOPL.COPR_DINDFLYT                          
+            , :PERSONEJENDOMSOPL.DFRAFLYT                               
+            , :PERSONEJENDOMSOPL.COPR_DFRAFLYT                          
+            , :PERSONEJENDOMSOPL.FUBEBOELIG                             
+            , :PERSONEJENDOMSOPL.COPR_FUBEBOELIG                        
+            , :PERSONEJENDOMSOPL.CDATAFRA                               
+            , :PERSONEJENDOMSOPL.CSLET                                  
+            , :PERSONEJENDOMSOPL.COPR_CSLET                             
+            , :PERSONEJENDOMSOPL.BFASTSTIGBGR      :INDK_BFASTSTIGBGR   
+            , :PERSONEJENDOMSOPL.COPR_BFASTSTIGBGR                      
+            , :PERSONEJENDOMSOPL.CBERGRLANV                             
+            , :PERSONEJENDOMSOPL.CHELÅR                                 
+            , :PERSONEJENDOMSOPL.CPENSNED1                              
+            , :PERSONEJENDOMSOPL.COPR_CPENSNED1                         
+            , :PERSONEJENDOMSOPL.BEVSHELÅRGL       :INDK_BEVSHELÅRGL    
+            , :PERSONEJENDOMSOPL.COPR_BEVSHELÅRGL                       
+            , :PERSONEJENDOMSOPL.CKOPI                                  
+            , :PERSONEJENDOMSOPL.BGLEJBOL1                              
+            , :PERSONEJENDOMSOPL.BGLEJBOL2                              
+            , :PERSONEJENDOMSOPL.BEJBOLANV         :INDK_BEJBOLANV      
+            , :PERSONEJENDOMSOPL.CANVEBOL                               
+            , :PERSONEJENDOMSOPL.BUBEBOLRED                             
+            , :PERSONEJENDOMSOPL.CFORSKEL                               
+            , :PERSONEJENDOMSOPL.BEJDVÆR_015ANV    :INDK_BEJDVÆR_015ANV 
+            , :PERSONEJENDOMSOPL.BEJBOL1_015ANV                         
+            , :PERSONEJENDOMSOPL.CEJBOLTYP1_015ANV                      
+            , :PERSONEJENDOMSOPL.BEJBOL2_015ANV                         
+            , :PERSONEJENDOMSOPL.CEJBOLTYP2_015ANV                      
+            , :PERSONEJENDOMSOPL.BEVSGL            :INDK_BEVSGL         
+            , :PERSONEJENDOMSOPL.COPR_BEVSGL                            
+            , :PERSONEJENDOMSOPL.BPENSNEDGL        :INDK_BPENSNEDGL     
+            , :PERSONEJENDOMSOPL.COPR_BPENSNEDGL                        
+            , :PERSONEJENDOMSOPL.BGLSUM3                                
+            , :PERSONEJENDOMSOPL.BSUM3                                  
+            , :PERSONEJENDOMSOPL.BBERGRLGL         :INDK_BBERGRLGL      
+            , :PERSONEJENDOMSOPL.BBER2FAMGL        :INDK_BBER2FAMGL     
+            , :PERSONEJENDOMSOPL.COMPLA                                 
+            , :PERSONEJENDOMSOPL.DOMPLACPR                              
+            , :PERSONEJENDOMSOPL.ESEKTR                                 
+            , :PERSONEJENDOMSOPL.BEVSFREM          :INDK_BEVSFREM       
+            , :PERSONEJENDOMSOPL.COPR_BEVSFREM                          
+            , :PERSONEJENDOMSOPL.BEJDVÆR_02ANV     :INDK_BEJDVÆR_02ANV  
+            , :PERSONEJENDOMSOPL.BEJBOL1_02ANV                          
+            , :PERSONEJENDOMSOPL.CEJBOLTYP1_02ANV                       
+            , :PERSONEJENDOMSOPL.BEJBOL2_02ANV                          
+            , :PERSONEJENDOMSOPL.CEJBOLTYP2_02ANV                       
+            , :PERSONEJENDOMSOPL.CEJDTYPE_AKT                           
+            , :PERSONEJENDOMSOPL.CPTYPGL                                
+            , :PERSONEJENDOMSOPL.CEKSEMP                                
+            , :PERSONEJENDOMSOPL.COPR_EKSEMP                            
+            , :PERSONEJENDOMSOPL.BBERGRL_015ANV    :INDK_BBERGRL_015ANV 
+            , :PERSONEJENDOMSOPL.BBERGRL_02ANV     :INDK_BBERGRL_02ANV  
+            , :PERSONEJENDOMSOPL.BBERGRL_AKT       :INDK_BBERGRL_AKT    
+       FROM BN00600T A                                                  
+       WHERE A.PERSONNUMMER = :DCPRN                                    
+         AND A.EKOMNR       = :EKOMNR                                   
+         AND A.EEJDNR       = :EEJDNR                                   
+         AND A.DINDKAAR     = 2015                                      
+         AND A.DTILGLD      = '9999-12-31-23.59.59.999999'              
+         AND A.ELBNR        = (SELECT MAX(B.ELBNR)                      
+                               FROM BN00600T B                          
+                               WHERE B.PERSONNUMMER = A.PERSONNUMMER    
+                                 AND B.EKOMNR       = A.EKOMNR          
+                                 AND B.EEJDNR       = A.EEJDNR          
+                                 AND B.DINDKAAR     = A.DINDKAAR        
+                                 AND B.DTILGLD      = A.DTILGLD)        
+       WITH UR;                                                         
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0)                                                             
+       DO;                                                              
+          RETURN(JA);                                                   
+       END;                                                             
+    WHEN(100)                                                           
+       DO;                                                              
+          RETURN(NEJ);                                                  
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END LÆS_I_EVS_FORSKUD;                                                 
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ LÆS_FEJLEDE_OVERTAGELSE: PROC();                                       
+                                                                        
+    EXEC SQL                                                            
+       FETCH FEJLRAMTE                                                  
+       INTO :FEJL_UDTRAEK_ENKE.ÅRSTAL                                   
+          , :FEJL_UDTRAEK_ENKE.CPRNR                                    
+          , :FEJL_UDTRAEK_ENKE.KOMMUNENUMMER                            
+          , :FEJL_UDTRAEK_ENKE.EJENDOMSNR                               
+          , :FEJL_UDTRAEK_ENKE.ELBNR                                    
+          , :FEJL_UDTRAEK_ENKE.CDATAFRA                                 
+          , :FEJL_UDTRAEK_ENKE.AFSTÅ_DATO;                              
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0)                                                             
+       DO;                                                              
+          ANTLÆSFEJLOVERTAG = ANTLÆSFEJLOVERTAG + 1;                    
+       END;                                                             
+    WHEN(100)                                                           
+       DO;                                                              
+          SLUT_FEJLRAMTE = JA;                                          
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+ END LÆS_FEJLEDE_OVERTAGELSE;                                           
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ FIND_PÅ_BEREGNINGSBÅND: PROC()   RETURNS(BIN FIXED(15));               
+                                                                        
+ DCL  ANTAL_PÅ_BÅND     BIN FIXED(15);                                  
+                                                                        
+    DCL_TEMP.KOMMUNENUMMER = FEJL_UDTRAEK_ENKE.KOMMUNENUMMER;           
+    DCL_TEMP.EJENDOMSNR    = FEJL_UDTRAEK_ENKE.EJENDOMSNR;              
+    DCL_TEMP.CPRNR         = FEJL_UDTRAEK_ENKE.CPRNR;                   
+                                                                        
+    EXEC SQL                                                            
+       SELECT COUNT(*)                                                  
+       INTO :ANTAL_PÅ_BÅND                                              
+       FROM SESSION.BEREGNBAAND                                         
+       WHERE KOMMUNENUMMER  = :DCL_TEMP.KOMMUNENUMMER                   
+         AND EJENDOMSNR     = :DCL_TEMP.EJENDOMSNR                      
+         AND CPRNR          = :DCL_TEMP.CPRNR;                          
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0)                                                             
+       DO;                                                              
+          IF ANTAL_PÅ_BÅND ^= 1 THEN                                    
+          DO;                                                           
+             RETURN(ANTAL_PÅ_BÅND);                                     
+          END;                                                          
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+    EXEC SQL                                                            
+       SELECT BH945_RECORD                                              
+       INTO :DCL_TEMP.BH945_RECORD                                      
+       FROM SESSION.BEREGNBAAND                                         
+       WHERE KOMMUNENUMMER  = :DCL_TEMP.KOMMUNENUMMER                   
+         AND EJENDOMSNR     = :DCL_TEMP.EJENDOMSNR                      
+         AND CPRNR          = :DCL_TEMP.CPRNR;                          
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0)                                                             
+       DO;                                                              
+          BH945_BEREGN = DCL_TEMP.BH945_RECORD;                         
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+    RETURN(ANTAL_PÅ_BÅND);                                              
+                                                                        
+ END FIND_PÅ_BEREGNINGSBÅND;                                            
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ LÆS_BEREGNINGSBÅNDET: PROC();                                          
+                                                                        
+    READ FILE (BH38302I) INTO (BH945_BEREGN);                           
+                                                                        
+ END LÆS_BEREGNINGSBÅNDET;                                              
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ DAN_TRANSAKTION_FORSKUD: PROC(KOMMUNENUMMER, CPRNR);                   
+                                                                        
+ DCL   KOMMUNENUMMER        FIXED BIN(15);                              
+ DCL   CPRNR                PIC '9999999999';                           
+ DCL   EKOM                 PIC '999';                                  
+                                                                        
+ DCL     UDREC               CHAR     (1000) VAR;                       
+ DCL     1 UD                BASED(ADDR(UDREC)),                        
+           2 LÆNGDE          BIN FIXED  (15),                           
+           % INCLUDE BS38900N;                                          
+                                                                        
+     EKOM                      = KOMMUNENUMMER;                         
+     UD.DKØRT                  = FDATO;                                 
+     UD.DKLOK                  = FTID;                                  
+     UD.CTYPE                  = 3;                                     
+     UD.CSORR                  = '7';                                   
+     UD.CSORP                  = CPRNR;                                 
+     UD.CGENK                  = 0;                                     
+                                                                        
+     UD.HFLYD =   '&911' !! CSORP                                       
+               !! '&374' !! EKOM                                        
+               !! '301'                                                 
+               !! '22'                                                  
+               !! '&790TS05'                                            
+               !! '&9711'                                               
+               !! '&-\';                                                
+                                                                        
+     UD.LÆNGDE = 70;                                                    
+                                                                        
+     WRITE FILE (BH38305O) FROM (UDREC);                                
+                                                                        
+ END DAN_TRANSAKTION_FORSKUD;                                           
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ FLYT_FRA_BEREGN_TIL_DCL: PROC;                                         
+                                                                        
+     PUT SKIP LIST('FLYT_FRA_BEREGN_TIL_DCL');                          
+                                                                        
+     EJER_BN00600T = '';                                                
+                                                                        
+     EJER_BN00600T = BH945_B.VURD_015ANV, BY NAME;                      
+ /*  EJER_BN00600T.BEJDVÆR_015ANV =                                     
+                   BH945_B.VURD_015ANV.BEJDVÆR_015ANV;                  
+     EJER_BN00600T.BEJBOL1_015ANV =                                     
+                   BH945_B.VURD_015ANV.BEJBOL1_015ANV;                  
+     EJER_BN00600T.CEJBOLTYP1_015ANV =                                  
+                   BH945_B.VURD_015ANV.CEJBOLTYP1_015ANV;               
+     EJER_BN00600T.BEJBOL2_015ANV =                                     
+                   BH945_B.VURD_015ANV.BEJBOL2_015ANV;                  
+     EJER_BN00600T.CEJBOLTYP2_015ANV =                                  
+                   BH945_B.VURD_015ANV.CEJBOLTYP2_015ANV;               
+     EJER_BN00600T.BBERGRL_015ANV =                                     
+                   BH945_B.VURD_015ANV.BBERGRL_015ANV;  */              
+                                                                        
+     EJER_BN00600T = BH945_B.VURD_02ANV, BY NAME;                       
+ /*  EJER_BN00600T.BEJDVÆR_02ANV =                                      
+                   BH945_B.VURD_02ANV.BEJDVÆR_02ANV;                    
+     EJER_BN00600T.BEJBOL1_02ANV =                                      
+                   BH945_B.VURD_02ANV.BEJBOL1_02ANV;                    
+     EJER_BN00600T.CEJBOLTYP1_02ANV =                                   
+                   BH945_B.VURD_02ANV.CEJBOLTYP1_02ANV;                 
+     EJER_BN00600T.BEJBOL2_02ANV =                                      
+                   BH945_B.VURD_02ANV.BEJBOL2_02ANV;                    
+     EJER_BN00600T.CEJBOLTYP2_02ANV =                                   
+                   BH945_B.VURD_02ANV.CEJBOLTYP2_02ANV;                 
+     EJER_BN00600T.BBERGRL_02ANV =                                      
+                   BH945_B.VURD_02ANV.BBERGRL_02ANV; */                 
+                                                                        
+     EJER_BN00600T = BH945_B.VURD_AKT, BY NAME;                         
+ /*  EJER_BN00600T.CEJDTYPE_AKT = BH945_B.VURD_AKT.CEJDTYPE_AKT;        
+     EJER_BN00600T.BBERGRL_AKT = BH945_B.VURD_AKT.BBERGRL_AKT; */       
+                                                                        
+     EJER_BN00600T = BH945_B.TIL_EVS, BY NAME;                          
+ /*  EJER_BN00600T.CDATAFRA = BH945_B.TIL_EVS.CDATAFRA;                 
+     EJER_BN00600T.CÆGTOPR = BH945_B.TIL_EVS.CÆGTOPR;                   
+     EJER_BN00600T.CENKE = BH945_B.TIL_EVS.CENKE;                       
+     EJER_BN00600T.FDAGUDLE = BH945_B.TIL_EVS.FDAGUDLE;                 
+     EJER_BN00600T.GPCTUDLE = BH945_B.TIL_EVS.GPCTUDLE;                 
+     EJER_BN00600T.FDAGERHV = BH945_B.TIL_EVS.FDAGERHV;                 
+     EJER_BN00600T.GPCTERHV = BH945_B.TIL_EVS.GPCTERHV;                 
+     EJER_BN00600T.CEKSEMP = BH945_B.TIL_EVS.CEKSEMP;                   
+     EJER_BN00600T.BPENSIND = BH945_B.TIL_EVS.BPENSIND;                 
+     EJER_BN00600T.BBERGRL = BH945_B.TIL_EVS.BBERGRL;                   
+     EJER_BN00600T.BBER2FAM = BH945_B.TIL_EVS.BBER2FAM;                 
+     EJER_BN00600T.CSTIBLB = BH945_B.TIL_EVS.CSTIBLB;                   
+     EJER_BN00600T.BSTIBGR = BH945_B.TIL_EVS.BSTIBGR;                   
+     EJER_BN00600T.BEVSMAN = BH945_B.TIL_EVS.BEVSMAN;                   
+     EJER_BN00600T.BUDLSKC = BH945_B.TIL_EVS.BUDLSKC;                   
+     EJER_BN00600T.BEJERAN = BH945_B.TIL_EVS.BEJERAN;                   
+     EJER_BN00600T.BNYMAN = BH945_B.TIL_EVS.BNYMAN;                     
+     EJER_BN00600T.BBRUTTO = BH945_B.TIL_EVS.BBRUTTO;                   
+     EJER_BN00600T.DOVTG = BH945_B.TIL_EVS.DOVTG;                       
+     EJER_BN00600T.DAFSTAA = BH945_B.TIL_EVS.DAFSTAA;                   
+     EJER_BN00600T.DINDFLYT = BH945_B.TIL_EVS.DINDFLYT;                 
+     EJER_BN00600T.DFRAFLYT = BH945_B.TIL_EVS.DFRAFLYT;                 
+     EJER_BN00600T.CHELÅR = BH945_B.TIL_EVS.CHELÅR;                     
+     EJER_BN00600T.CPTYPGL = BH945_B.TIL_EVS.CPTYPGL;                   
+     EJER_BN00600T.CPTYPSLUT = BH945_B.TIL_EVS.CPTYPSLUT;               
+     EJER_BN00600T.CPTYPFOR = BH945_B.TIL_EVS.CPTYPFOR;                 
+     EJER_BN00600T.CEJBEVS = BH945_B.TIL_EVS.CEJBEVS;                   
+     EJER_BN00600T.CFRED = BH945_B.TIL_EVS.CFRED;                       
+     EJER_BN00600T.CNEDSL1 = BH945_B.TIL_EVS.CNEDSL1;                   
+     EJER_BN00600T.DATO0107 = BH945_B.TIL_EVS.DATO0107;                 
+     EJER_BN00600T.CNEDSL2 = BH945_B.TIL_EVS.CNEDSL2;                   
+     EJER_BN00600T.GPCTEJER = BH945_B.TIL_EVS.GPCTEJER;                 
+     EJER_BN00600T.BFASTSTIGBGR = BH945_B.TIL_EVS.BFASTSTIGBGR;         
+     EJER_BN00600T.BEVSGL = BH945_B.TIL_EVS.BEVSGL;                     
+     EJER_BN00600T.BPENSNEDGL = BH945_B.TIL_EVS.BPENSNEDGL;             
+     EJER_BN00600T.BGLSUM1 = BH945_B.TIL_EVS.BGLSUM1;                   
+     EJER_BN00600T.BGLSLUTEVS = BH945_B.TIL_EVS.BGLSLUTEVS;             
+     EJER_BN00600T.CGLSLUTEVS = BH945_B.TIL_EVS.CGLSLUTEVS;             
+     EJER_BN00600T.BGLPENSNED = BH945_B.TIL_EVS.BGLPENSNED;    */       
+                                                                        
+     EJER_BN00600T = BH945_B.EJERSKAB, BY NAME;                         
+ /*  EJER_BN00600T.BBERGRL = BH945_B.EJERSKAB.BBERGRL;                  
+     EJER_BN00600T.BBER2FAM = BH945_B.EJERSKAB.BBER2FAM;                
+     EJER_BN00600T.BEJBOLANV = BH945_B.EJERSKAB.BEJBOLANV;              
+     EJER_BN00600T.CANVEBOL = BH945_B.EJERSKAB.CANVEBOL;                
+     EJER_BN00600T.CBERGRLANV = BH945_B.EJERSKAB.CBERGRLANV;            
+     EJER_BN00600T.BBERGRLGL = BH945_B.EJERSKAB.BBERGRLGL;              
+     EJER_BN00600T.BBER2FAMGL = BH945_B.EJERSKAB.BBER2FAMGL;            
+     EJER_BN00600T.CEJDTYPE_AKT = BH945_B.EJERSKAB.CEJDTYPE_AKT;        
+     EJER_BN00600T.CEJDTYPE = BH945_B.EJERSKAB.CEJDTYPE;  */            
+                                                                        
+     EJER_BN00600T = BH945_B.EJENDOM, BY NAME;                          
+ /*  EJER_BN00600T.CBERGRL = BH945_B.EJENDOM.CBERGRL;                   
+     EJER_BN00600T.CEJDTYPE = BH945_B.EJENDOM.CEJDTYPE;                 
+     EJER_BN00600T.BEJBOL1 = BH945_B.EJENDOM.BEJBOL1;                   
+     EJER_BN00600T.BEJBOL2 = BH945_B.EJENDOM.BEJBOL2;                   
+     EJER_BN00600T.CFORSKEL = BH945_B.EJENDOM.CFORSKEL;  */             
+                                                                        
+     EJER_BN00600T = BH945_B.FRA_EVS_SLUT, BY NAME;                     
+ /*  EJER_BN00600T.BGLSLUTSTI = BH945_B.FRA_EVS_SLUT.BGLSLUTSTI;        
+     EJER_BN00600T.BGLSTITIL = BH945_B.FRA_EVS_SLUT.BGLSTITIL;          
+     EJER_BN00600T.BGLSTIBGR = BH945_B.FRA_EVS_SLUT.BGLSTIBGR;          
+     EJER_BN00600T.BGLEVS10 = BH945_B.FRA_EVS_SLUT.BGLEVS10;            
+     EJER_BN00600T.BGLEVS2 = BH945_B.FRA_EVS_SLUT.BGLEVS2;              
+     EJER_BN00600T.BGLEVS4 = BH945_B.FRA_EVS_SLUT.BGLEVS4;              
+     EJER_BN00600T.BGLEVSP = BH945_B.FRA_EVS_SLUT.BGLEVSP;              
+     EJER_BN00600T.BGLSUM3 = BH945_B.FRA_EVS_SLUT.BGLSUM3;              
+     EJER_BN00600T.BGLSUM2 = BH945_B.FRA_EVS_SLUT.BGLSUM2;              
+     EJER_BN00600T.BGLSUM1 = BH945_B.FRA_EVS_SLUT.BGLSUM1;              
+     EJER_BN00600T.BEVSGL = BH945_B.FRA_EVS_SLUT.BEVSGL;                
+     EJER_BN00600T.BPENSNEDGL = BH945_B.FRA_EVS_SLUT.BPENSNEDGL;        
+     EJER_BN00600T.CGLANV = BH945_B.FRA_EVS_SLUT.CGLANV; */             
+                                                                        
+     EJER_BN00600T = BH945_B.TIL_EVS_FOR, BY NAME;                      
+ /*  EJER_BN00600T.CPENSNED1 = BH945_B.TIL_EVS_FOR.CPENSNED1;           
+     EJER_BN00600T.BEVSFREM = BH945_B.TIL_EVS_FOR.BEVSFREM;             
+     EJER_BN00600T.FDAGUDLE = BH945_B.TIL_EVS_FOR.FDAGUDLE;             
+     EJER_BN00600T.GPCTUDLE = BH945_B.TIL_EVS_FOR.GPCTUDLE;             
+     EJER_BN00600T.FDAGERHV = BH945_B.TIL_EVS_FOR.FDAGERHV;             
+     EJER_BN00600T.GPCTERHV = BH945_B.TIL_EVS_FOR.GPCTERHV;             
+     EJER_BN00600T.FUBEBOELIG = BH945_B.TIL_EVS_FOR.FUBEBOELIG;         
+     EJER_BN00600T.BUDLSKC = BH945_B.TIL_EVS_FOR.BUDLSKC;               
+     EJER_BN00600T.CEKSEMP = BH945_B.TIL_EVS_FOR.CEKSEMP; */            
+                                                                        
+     EJER_BN00600T = BH945_B.FRA_EVS_FOR, BY NAME;                      
+ /*  EJER_BN00600T.BGLSUM = BH945_B.FRA_EVS_FOR.BGLSUM;                 
+     EJER_BN00600T.BGRPROM1 = BH945_B.FRA_EVS_FOR.BGRPROM1;             
+     EJER_BN00600T.BGRPROM2 = BH945_B.FRA_EVS_FOR.BGRPROM2;             
+     EJER_BN00600T.BSTITIL = BH945_B.FRA_EVS_FOR.BSTITIL;               
+     EJER_BN00600T.CSTIBLB = BH945_B.FRA_EVS_FOR.CSTIBLB;               
+     EJER_BN00600T.FDAGEJ = BH945_B.FRA_EVS_FOR.FDAGEJ;                 
+     EJER_BN00600T.FDAGEJEJ = BH945_B.FRA_EVS_FOR.FDAGEJEJ;             
+     EJER_BN00600T.BPROM1 = BH945_B.FRA_EVS_FOR.BPROM1;                 
+     EJER_BN00600T.BPROM2 = BH945_B.FRA_EVS_FOR.BPROM2;                 
+     EJER_BN00600T.BNEDSL1 = BH945_B.FRA_EVS_FOR.BNEDSL1;               
+     EJER_BN00600T.CNEDSL2 = BH945_B.FRA_EVS_FOR.CNEDSL2;               
+     EJER_BN00600T.BNEDSL2 = BH945_B.FRA_EVS_FOR.BNEDSL2;               
+     EJER_BN00600T.BPENSNED = BH945_B.FRA_EVS_FOR.BPENSNED;             
+     EJER_BN00600T.BSUM2 = BH945_B.FRA_EVS_FOR.BSUM2;                   
+     EJER_BN00600T.BSUM3 = BH945_B.FRA_EVS_FOR.BSUM3;                   
+     EJER_BN00600T.BSUM1 = BH945_B.FRA_EVS_FOR.BSUM1;                   
+     EJER_BN00600T.BSTIBGR = BH945_B.FRA_EVS_FOR.BSTIBGR;               
+     EJER_BN00600T.BNETTO = BH945_B.FRA_EVS_FOR.BNETTO;                 
+     EJER_BN00600T.BPENSRED = BH945_B.FRA_EVS_FOR.BPENSRED;             
+     EJER_BN00600T.BBRUTTO = BH945_B.FRA_EVS_FOR.BBRUTTO;               
+     EJER_BN00600T.BEJERED = BH945_B.FRA_EVS_FOR.BEJERED;               
+     EJER_BN00600T.BUDLERED = BH945_B.FRA_EVS_FOR.BUDLERED;             
+     EJER_BN00600T.BERHVRED = BH945_B.FRA_EVS_FOR.BERHVRED;             
+     EJER_BN00600T.BUBEBOLRED = BH945_B.FRA_EVS_FOR.BUBEBOLRED;         
+     EJER_BN00600T.B100 = BH945_B.FRA_EVS_FOR.B100;                     
+     EJER_BN00600T.BEJERAN = BH945_B.FRA_EVS_FOR.BEJERAN; */            
+                                                                        
+     EJER_BN00600T = BH945_B.TIL_FORSKUD, BY NAME;                      
+ /*  EJER_BN00600T.COPR_CENKE = BH945_B.TIL_FORSKUD.COPR_CENKE;         
+     EJER_BN00600T.COPR_DOVTG = BH945_B.TIL_FORSKUD.COPR_DOVTG;         
+     EJER_BN00600T.COPR_DAFSTAA = BH945_B.TIL_FORSKUD.COPR_DAFSTAA;     
+     EJER_BN00600T.COPR_CPTYPSLUT = BH945_B.TIL_FORSKUD.COPR_CPTYPSLUT; 
+     EJER_BN00600T.COPR_CPTYPFOR = BH945_B.TIL_FORSKUD.COPR_CPTYPFOR;   
+     EJER_BN00600T.COPR_CEJBEVS = BH945_B.TIL_FORSKUD.COPR_CEJBEVS;     
+     EJER_BN00600T.COPR_CEJDTYPE = BH945_B.TIL_FORSKUD.COPR_CEJDTYPE;   
+     EJER_BN00600T.COPR_CFRED = BH945_B.TIL_FORSKUD.COPR_CFRED;         
+     EJER_BN00600T.COPR_CNEDSL1 = BH945_B.TIL_FORSKUD.COPR_CNEDSL1;     
+     EJER_BN00600T.COPR_GPCTEJER = BH945_B.TIL_FORSKUD.COPR_GPCTEJER;   
+     EJER_BN00600T.COPR_BBERGRL = BH945_B.TIL_FORSKUD.COPR_BBERGRL;     
+     EJER_BN00600T.COPR_BBER2FAM = BH945_B.TIL_FORSKUD.COPR_BBER2FAM;   
+     EJER_BN00600T.COPR_BUDLSKC = BH945_B.TIL_FORSKUD.COPR_BUDLSKC;     
+     EJER_BN00600T.COPR_BEVSGL = BH945_B.TIL_FORSKUD.COPR_BEVSGL;       
+     EJER_BN00600T.COPR_BPENSNEDGL =                                    
+                   BH945_B.TIL_FORSKUD.COPR_BPENSNEDGL;                 
+     EJER_BN00600T.COPR_CPENSNED1 = BH945_B.TIL_FORSKUD.COPR_CPENSNED1; 
+     EJER_BN00600T.COPR_BFASTSTIGBGR =                                  
+                   BH945_B.TIL_FORSKUD.COPR_BFASTSTIGBGR;               
+     EJER_BN00600T.COPR_FDAGUDLE = BH945_B.TIL_FORSKUD.COPR_FDAGUDLE;   
+     EJER_BN00600T.COPR_GPCTUDLE = BH945_B.TIL_FORSKUD.COPR_GPCTUDLE;   
+     EJER_BN00600T.COPR_FDAGERHV = BH945_B.TIL_FORSKUD.COPR_FDAGERHV;   
+     EJER_BN00600T.COPR_GPCTERHV = BH945_B.TIL_FORSKUD.COPR_GPCTERHV;   
+     EJER_BN00600T.COPR_BEVSFREM = BH945_B.TIL_FORSKUD.COPR_BEVSFREM;   
+     EJER_BN00600T.COPR_EKSEMP = BH945_B.TIL_FORSKUD.COPR_EKSEMP;  */   
+                                                                        
+     EJER_BN00600T.BALMGL     = 0;                                      
+     EJER_BN00600T.BFPGL      = 0;                                      
+     EJER_BN00600T.BPENSGL    = 0;                                      
+     EJER_BN00600T.BSTDGL     = 0;                                      
+     EJER_BN00600T.CEVSBENY   = '1';                                    
+     EJER_BN00600T.CEJDAKTI   = '0';                                    
+                                                                        
+     IF BH945_B.EJERSKAB.CEJDTYPE > '0'                                 
+     THEN                                                               
+        EJER_BN00600T.CEJDTYPE = BH945_B.EJERSKAB.CEJDTYPE;             
+     ELSE                                                               
+        EJER_BN00600T.CEJDTYPE = BH945_B.EJENDOM.CEJDTYPE;              
+                                                                        
+     EJER_BN00600T.B_NULL1 = '?'; /* BENYTTES IKKE MERE */              
+     EJER_BN00600T.B_NULL2 = '?'; /* BENYTTES IKKE MERE */              
+     EJER_BN00600T.B_NULL3 = '?'; /* BENYTTES IKKE MERE */              
+     EJER_BN00600T.B_NULL4 = '?'; /* BENYTTES IKKE MERE */              
+                                                                        
+     IF BH945_B.FRA_EVS_FOR.BGLSUM_SW = -1 THEN                         
+     DO;                                                                
+        EJER_BN00600T.B_NULL5 = '?';                                    
+     END;                                                               
+                                                                        
+     EJER_BN00600T.B_NULL6 = '?'; /* BENYTTES IKKE MERE */              
+                                                                        
+     EJER_BN00600T.B_NULL7 = '?'; /* BNYMAN KAN IKKE KOMME I.F.M. */    
+                                  /* OPRETTELSEN                  */    
+                                                                        
+     IF BH945_B.TIL_EVS.BFASTSTIGBGR_SW = -1 THEN                       
+     DO;                                                                
+        EJER_BN00600T.B_NULL8 = '?';                                    
+     END;                                                               
+                                                                        
+     EJER_BN00600T.B_NULL9 = '?'; /* BENYTTES IKKE MERE */              
+                                                                        
+     IF BH945_B.EJERSKAB.BEJBOLANV_SW = -1 THEN                         
+     DO;                                                                
+        EJER_BN00600T.B_NULL10 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.VURD_015ANV.BEJDVÆR_015ANV_SW = -1 THEN                 
+     DO;                                                                
+        EJER_BN00600T.B_NULL11 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.FRA_EVS_SLUT.BEVSGL_SW = -1 THEN                        
+     DO;                                                                
+        EJER_BN00600T.B_NULL12 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.FRA_EVS_SLUT.BPENSNEDGL_SW = -1 THEN                    
+     DO;                                                                
+        EJER_BN00600T.B_NULL13 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.EJERSKAB.BBERGRLGL_SW = -1 THEN                         
+     DO;                                                                
+        EJER_BN00600T.B_NULL14 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.TIL_EVS.AKT_EJER.COMPLA = '2' THEN                      
+     DO;                                                                
+        EJER_BN00600T.COMPLA = BH945_B.TIL_EVS.AKT_EJER.COMPLA;         
+        EJER_BN00600T.DOMPLACPR = BH945_B.TIL_EVS.AKT_EJER.DOMPLACPR;   
+     END;                                                               
+                                                                        
+     IF BH945_B.EJERSKAB.BBER2FAMGL_SW = -1 THEN                        
+     DO;                                                                
+        EJER_BN00600T.B_NULL15 = '?';                                   
+     END;                                                               
+                                                                        
+     EJER_BN00600T.CFORSKEL = BH945_B.AKT_VURD.CFORSKEL;                
+                                                                        
+     IF BH945_B.TIL_EVS_FOR.BEVSFREM_SW = -1 THEN                       
+     DO;                                                                
+        BH945_B.TIL_EVS_FOR.BEVSFREM = 0;                               
+        EJER_BN00600T.B_NULL16 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.VURD_02ANV.BEJDVÆR_02ANV_SW = -1 THEN                   
+     DO;                                                                
+        EJER_BN00600T.B_NULL17 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.VURD_015ANV.BBERGRL_015ANV_SW = -1 THEN                 
+     DO;                                                                
+        EJER_BN00600T.B_NULL18 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.VURD_02ANV.BBERGRL_02ANV_SW = -1 THEN                   
+     DO;                                                                
+        EJER_BN00600T.B_NULL19 = '?';                                   
+     END;                                                               
+                                                                        
+     IF BH945_B.VURD_AKT.BBERGRL_AKT_SW = -1 THEN                       
+     DO;                                                                
+        EJER_BN00600T.B_NULL20 = '?';                                   
+     END;                                                               
+                                                                        
+ END FLYT_FRA_BEREGN_TIL_DCL;                                           
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ OPRET_EJERSKAB_BN06000T: PROC(EKOMNR, EEJDNR, CPRNR_NY, CPRNR_GL);     
+                                                                        
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+ DCL   CPRNR_NY              DECIMAL(11,0);                             
+ DCL   CPRNR_GL              DECIMAL(11,0);                             
+                                                                        
+ DCL   BN006_KOPI   LIKE EJER_BN00600T;                                 
+                                                                        
+    CALL FLYT_FRA_BEREGN_TIL_DCL();                                     
+                                                                        
+ /*  Dan record på ny ejer (enke)  */                                   
+                                                                        
+    EJER_BN00600T.DTILGLD    = '9999-12-31-23.59.59.999999';            
+                                                                        
+    EJER_BN00600T.DCPRN      = FEJL_UDTRAEK_ENKE.CPRNR;                 
+    EJER_BN00600T.ELBNR      = 1;                                       
+    EJER_BN00600T.DFRAGLD    = FEJL_UDTRAEK_ENKE.AFSTÅ_DATO             
+                               !! '-01.01.01.000001';                   
+    EJER_BN00600T.DINDKAAR   = 2015;                                    
+    EJER_BN00600T.EKOMNR     = EKOMNR;                                  
+    EJER_BN00600T.EEJDNR     = EEJDNR;                                  
+                                                                        
+    EXEC SQL                                                            
+       SET :EJER_BN00600T.DKØRT = CURRENT TIMESTAMP;                    
+                                                                        
+    WRITE FILE (BH38304O) FROM(EJER_BN00600T);                          
+                                                                        
+ END OPRET_EJERSKAB_BN06000T;                                           
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ SKAF_PARM: PROC;                                                       
+                                                                        
+    OPEN FILE(IPARM) TITLE('BH38300I');                                 
+    READ FILE(IPARM) INTO(PARMI);                                       
+    IF ^PARM_EOF THEN DO;                                               
+       IF PARMI.KØRSW ^= ' ' THEN                                       
+          OPDAT_SW = JA;                                                
+       ELSE                                                             
+          OPDAT_SW = NEJ;                                               
+    END;                                                                
+    ELSE DO;                                                            
+       OPDAT_SW = NEJ;                                                  
+    END;                                                                
+                                                                        
+    IF OPDAT_SW THEN                                                    
+       PUT SKIP LIST('Der sker opdatering');                            
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering');                               
+                                                                        
+    CLOSE FILE(IPARM);                                                  
+                                                                        
+ END SKAF_PARM;                                                         
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ INITIERING: PROC();                                                    
+                                                                        
+    CALL INDLÆS_I_TEMP_TABEL();                                         
+                                                                        
+    EXEC SQL                                                            
+       DECLARE FEJLRAMTE CURSOR WITH HOLD FOR                           
+       SELECT DISTINCT                                                  
+              T1.DINDKAAR                                               
+            , T1.DCPRN                                                  
+            , T1.EKOMNR                                                 
+            , T1.EEJDNR                                                 
+            , T1.ELBNR                                                  
+            , T1.CDATAFRA                                               
+            , T2.INDHOLD_C                                              
+       FROM BQ30000T T1                                                 
+          , BQ31000T T2                                                 
+       WHERE T1.DINDKAAR  = 2013                                        
+         AND T1.ELBNR     = 2                                           
+         AND T1.CDATAFRA  = '6'                                         
+         AND T1.DINDKAAR  = T2.DINDKAAR                                 
+         AND T1.DCPRN     = T2.DCPRN                                    
+         AND T1.EKOMNR    = T2.EKOMNR                                   
+         AND T1.EEJDNR    = T2.EEJDNR                                   
+         AND T1.ELBNR     = T2.ELBNR                                    
+         AND T1.EGENNR    = T2.EGENNR                                   
+         AND T2.FELTKODE  = 96                                          
+         AND T2.INDHOLD_C <= '2013-12-31'                               
+         AND NOT EXISTS (                                               
+                          SELECT 'X'                                    
+                          FROM BN00600T T3                              
+                          WHERE T3.DINDKAAR = 2015                      
+                            AND T1.DCPRN  = T3.PERSONNUMMER             
+                            AND T1.EKOMNR = T3.EKOMNR                   
+                            AND T1.EEJDNR = T3.EEJDNR                   
+                         )                                              
+       WITH UR;                                                         
+                                                                        
+    EXEC SQL                                                            
+       OPEN FEJLRAMTE;                                                  
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+                                                                        
+ END INITIERING;                                                        
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV KONTROL                                                */
+ /*********************************************************************/
+ INDLÆS_I_TEMP_TABEL: PROC();                                           
+                                                                        
+    EXEC SQL                                                            
+       DECLARE GLOBAL TEMPORARY TABLE BEREGNBAAND                       
+          ( KOMMUNENUMMER        SMALLINT NOT NULL                      
+          , EJENDOMSNR           INTEGER NOT NULL                       
+          , CPRNR                DECIMAL(11,0) NOT NULL                 
+          , BH945_RECORD         VARCHAR(6000) NOT NULL                 
+          ) ON COMMIT PRESERVE ROWS;                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+ /*  Manglende autorisation til Create index :-(                        
+     Vil performe bedre med */                                          
+                                                                        
+    EXEC SQL                                                            
+       CREATE INDEX TEMP_IDX1 ON SESSION.BEREGNBAAND                    
+          ( KOMMUNENUMMER                                               
+          , EJENDOMSNR                                                  
+          )                                                             
+          BUFFERPOOL BP4;                                               
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN(0);                                                            
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL();                                              
+       END;                                                             
+    END;                                                                
+                                                                        
+    BH38302I_EOF = NEJ;                                                 
+    OPEN FILE (BH38302I) TITLE ('BH38302I');                            
+                                                                        
+    DO UNTIL (BH38302I_EOF);                                            
+       CALL LÆS_BEREGNINGSBÅNDET();                                     
+       IF ^BH38302I_EOF THEN                                            
+       DO;                                                              
+          DCL_TEMP.KOMMUNENUMMER = BH945_B.SORT_KOMNR;                  
+          DCL_TEMP.EJENDOMSNR    = BH945_B.SORT_EJDNR;                  
+          DCL_TEMP.CPRNR         = BH945_B.SORT_CPR;                    
+          DCL_TEMP.BH945_RECORD  = BH945_BEREGN;                        
+                                                                        
+          EXEC SQL                                                      
+             INSERT INTO SESSION.BEREGNBAAND                            
+             VALUES ( :DCL_TEMP.KOMMUNENUMMER                           
+                    , :DCL_TEMP.EJENDOMSNR                              
+                    , :DCL_TEMP.CPRNR                                   
+                    , :DCL_TEMP.BH945_RECORD );                         
+                                                                        
+          SELECT (SQLCA.SQLCODE);                                       
+          WHEN(0);                                                      
+          OTHERWISE                                                     
+             DO;                                                        
+                CALL SQL_FEJL();                                        
+             END;                                                       
+          END;                                                          
+                                                                        
+       END;                                                             
+    END;                                                                
+                                                                        
+    CLOSE FILE (BH38302I);                                              
+                                                                        
+                                                                        
+ END INDLÆS_I_TEMP_TABEL;                                               
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV KONTROL                                                */
+ /*********************************************************************/
+ SKRIV_KONTROL: PROC(DCPRN, EKOMNR, EEJDNR, ELBNR, TEXT_MEDD);          
+                                                                        
+ DCL   DCPRN                 DECIMAL(11,0);                             
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+ DCL   ELBNR                 BIN FIXED(15);                             
+ DCL   TEXT_MEDD             CHAR(88);                                  
+                                                                        
+    LINIE       = ZZWS2;                                                
+    LIN2.CPRNR  = DCPRN;                                                
+    LIN2.KOMNR  = EKOMNR;                                               
+    LIN2.EEJDNR = EEJDNR;                                               
+    LIN2.ELBNR  = ELBNR;                                                
+    LIN2.TEXT   = TEXT_MEDD;                                            
+    CALL ZZ20300(LINIE,'01');                                           
+                                                                        
+    CSV_TEXT = '"' !! DCPRN !! '";"' !! EKOMNR !! '";"' !!              
+               EEJDNR !! '";"' !! TEXT_MEDD !! '"';                     
+    WRITE FILE (BH38303O) FROM(CSV_TEXT);                               
+                                                                        
+ END SKRIV_KONTROL;                                                     
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+    PUT SKIP LIST('SQL_FEJL.....');                                     
+    PUT SKIP LIST('SQLCA',SQLCA);                                       
+    CALL ZS67000(SQLCA);                                                
+    ABENDMEDD =  'BH38300 ** 550 SQLFEJL: ' !! FEJLTEKST;               
+    CALL ZS30101 (5, ABENDMEDD, 2);                                     
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL LÆSTE OVERTAGELSE RECORD.................';     
+    LIN1.ANT   = ANTLÆSFEJLOVERTAG;                                     
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL AFSTÅET SENERE...........................';     
+    LIN1.ANT   = ANTAFSTÅSENERE;                                        
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL KENDT I EVS FORSKUD 2015.................';     
+    LIN1.ANT   = ANTIFORSKUDEVS;                                        
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL EJ KENDT PÅ BEREGNINGSBÅND...............';     
+    LIN1.ANT   = ANTEJBEREGNBÅND;                                       
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL FLERE PÅ BEREGNINGSBÅND..................';     
+    LIN1.ANT   = ANTFLEREBEREGNBÅND;                                    
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL OPRETTES.. ..............................';     
+    LIN1.ANT   = ANTOPRET;                                              
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */     
+                                                                        
+    EXEC SQL                                                            
+       CLOSE FEJLRAMTE;                                                 
+                                                                        
+    CLOSE FILE (BH38303O);                                              
+    CLOSE FILE (BH38304O);                                              
+    CLOSE FILE (BH38305O);                                              
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+         %INCLUDE BS36103M;                         /* FIXED_DAGSDATO */
+                                                                        
+ END BH38300;                                                           

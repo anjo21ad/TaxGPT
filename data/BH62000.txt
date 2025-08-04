@@ -1,0 +1,1626 @@
+  PROCESS OPT(TIME);                                                    
+ BH62000:   /* DAN UDSKRIVNINGSBÅND - E-SKEMA 1999                    */
+         PROC (EXECPARM) OPTIONS (MAIN) REORDER;                        
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA I/S 1999');       
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : PÅ GRUNDLAG AF BEREGNINGSBÅND DANNES BÅND TIL UDSKRIVNING * 
+ *          AF PERSONEN PÅ SELVANGIVELSE (USA/BSA) ELLER PÅ EJENDOMS- * 
+ *          SKEMA (HVIS EJ PLADS PÅ USA/BSA ELLER PSA).               * 
+ *                                                                    * 
+ *          HVIS PERSONEN SKAL UDSKRIVES PÅ SELVANGIVELSE USA/BSA,    * 
+ *          O G  DER ER PLADS PÅ SELVANGIVELSE USA/BSA,               * 
+ *          OVERSENDES PERSONENS EJENDOMSOPLYSNINGER TIL SLUTMAND-    * 
+ *          TALLET. ELLERS UDSKRIVES PÅ EJENDOMSSKEMA.                * 
+ *                                                                    * 
+ * INPUT  : B.H61101D.XXX  BEREGNINGSBÅND FOR RC (XXX=USA ELLER PSA)  * 
+ *          VB.R90200D     KOMMUNETABEL (FORSKUD)                     * 
+ *          PARM           PARAMETERKORT (INKASSOLISTE M.V.)          * 
+ *                                                                    * 
+ * OUTPUT : B.H62000D      UDTRÆK TIL SELVANGIVELSE                   * 
+ *          B.H62010D      UDTRÆK TIL EJENDOMSSKEMAER                 * 
+ *          B.H62020D      UDTRÆK TIL INKASSO- OG/EL. SOMMERHUSLISTE  * 
+ *          B.H62001Y      TOTALLISTE                                 * 
+ *          B.H62002Y      KØRSELSTOTALER                             * 
+ *          B.H62003Y      FEJLLISTE MASKINEL AFSTEMNING              * 
+ *                                                                    * 
+ * PROGRAMMØR: MARGIT PEDERSBÆK     AUG.    1987                      * 
+ *  RETTET   : MARGIT PEDERSBÆK     AUG.    1988                      * 
+ *  RETTET   : JESPER OLSEN         SEP.    1989                      * 
+ *  RETTET   : MARGIT PEDERSBÆK     SEP.    1990                      * 
+ *  RETTET   : AAGE RASMUSSEN       NOV.    1991                      * 
+ *  RETTET   : AAGE RASMUSSEN       NOV.    1992                      * 
+ *  RETTET   : AAGE RASMUSSEN       DEC.    1993                      * 
+ *  RETTET   : AAGE RASMUSSEN, PUS  DEC.    1994                      * 
+ *  RETTET   : AAGE RASMUSSEN, PUS  DEC.    1995                      * 
+ *  RETTET   : AAGE RASMUSSEN, PFB  JAN.    1996                      * 
+ *  RETTET   : AAGE RASMUSSEN, PFB  JAN.    1997                      * 
+ *  RETTET   : AAGE RASMUSSEN, PFB  JAN.    1998                      * 
+ *  RETTET   : AAGE RASMUSSEN, PFB  JAN.    1999                      * 
+ *  RETTET   : AAGE RASMUSSEN, PFB  JAN.    2000                      * 
+ *                                                                    * 
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED;                            
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     BH611I  FILE RECORD INPUT;          /*  BEREGNINGSBÅND      */ 
+ DCL     BH6201O FILE RECORD OUTPUT;         /*  UDTRÆK TIL EJD.SKEMA*/ 
+ DCL     BH6202O FILE RECORD OUTPUT;         /*  UDTRÆK TIL INKASSOL.*/ 
+ /********************************************************************* 
+ *             DECLARE AF BEREGNINGSBÅND                              * 
+ *********************************************************************/ 
+ DCL     BH611_AR        CHAR      (4000) VAR;                          
+ DCL     1 BH61101                        BASED(ADDR(BH611_AR)),        
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH60101N;                                           
+ DCL     1 BH611                          BASED(ADDR(BH611_AR)),        
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH60100N;                                           
+ DCL     1 BH61199                        BASED(ADDR(BH611_AR)),        
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH60199N;                                           
+ DCL     SLUTLIN         CHAR      (1)    BASED(ADDR(BH611.CLIN16));    
+ DCL     BH_ADRTAB(5)    CHAR      (35)   BASED(ADDR(BH611.ANAVN));     
+ DCL     GEM_BH611_AR    CHAR      (2000) VAR;                          
+ DCL     1 GEM_BH611                      BASED(ADDR(GEM_BH611_AR)),    
+           2 LÆNGDE      BIN FIXED (15),                                
+           %INCLUDE BH62010N;                                           
+ DCL     HJ_CLIN(16)     PIC       '9'    BASED(ADDR(GEM_BH611.CLIN01));
+ DCL     GEM_SLUTLIN     CHAR      (1)    BASED(ADDR(GEM_BH611.CLIN16));
+ DCL     1 OPT_SKEMA,                                                   
+           %INCLUDE BH60199N;                                           
+ /********************************************************************* 
+ *             DECLARE AF PARAMETERKORT                               * 
+ *********************************************************************/ 
+ DCL     PMK             CHAR      (80);                                
+ DCL     1 PKORT DEF PMK,                                               
+           2 ID          CHAR      (9),      /* ALTID >>BH62000      */ 
+           2 BLANK       CHAR      (1),                                 
+           2 KNR         CHAR      (3),      /* KOMMUNENR            */ 
+           2 KODE1       CHAR      (1),      /* 1=INKASSOLISTE UDSK. */ 
+           2 KODE2       CHAR      (1);      /* 1=SOMMERHUSLISTE UDSK*/ 
+ DCL     HJKOMNR         PIC       '999'  DEF PMK POS (11);             
+ DCL     1 PARMTAB(101:999),                                            
+           2 KOMNR        FIXED    (2),                                 
+           2 LISTE        PIC      '9';                                 
+ /********************************************************************* 
+ *             DECLARE AF UDTRÆK TIL INKASSO-/SOMMERHUSLISTE          * 
+ *********************************************************************/ 
+ DCL     1 INKAS,                                  %INCLUDE BH62020N;   
+ DCL     1 SOMMERHUS,                              %INCLUDE BH62021N;   
+ DCL     1 BH62022,                                %INCLUDE BH62022N;   
+ /********************************************************************* 
+ *               DECLARE AF TÆLLEVÆRKER TIL TOTALLISTE                * 
+ *********************************************************************/ 
+ DCL     ANT_LÆS             FIXED (07)  INIT (0);                      
+ DCL     ANT_KOMREG          FIXED (07)  INIT (0);                      
+ DCL     ANT_FRAS            FIXED (07)  INIT (0);                      
+ DCL     ANT_SKEMAER         FIXED (07)  INIT (0);                      
+ DCL     ANT_EJDSELV         FIXED (07)  INIT (0);                      
+ DCL     ANT_SELVANG         FIXED (07)  INIT (0);                      
+ DCL     ANT_INKAS           FIXED (07)  INIT (0);                      
+ DCL     ANT_INKAS_KOM       FIXED (07)  INIT (0);                      
+ DCL     ANT_SOMMERHUS       FIXED (07)  INIT (0);                      
+ DCL     OPT_LINIER(0:30,3)  FIXED (07);                                
+ /********************************************************************* 
+ *               DECLARE AF TÆLLEVÆRKER TIL KOMMUNELISTE              * 
+ *********************************************************************/ 
+ DCL     1 KOM_OPT(350),                                                
+           2 EÆKNR             FIXED (3),                               
+           2 TV_SELVANG        FIXED (7),                               
+           2 SM,                                                        
+             3 TV_1EJD         FIXED (7),                               
+             3 TV_2EJD         FIXED (7),                               
+             3 TV_3EJD         FIXED (7),                               
+             3 TV_4EJD         FIXED (7),                               
+             3 TV_5EJD         FIXED (7),                               
+           2 TV_ESKEMA_USA     FIXED (7),                               
+           2 SKEMA_USA,                                                 
+             3 TV_1EJD         FIXED (7),                               
+             3 TV_2EJD         FIXED (7),                               
+             3 TV_3EJD         FIXED (7),                               
+             3 TV_4EJD         FIXED (7),                               
+             3 TV_5EJD         FIXED (7),                               
+           2 TV_PSA            FIXED (7),                               
+           2 PSA,                                                       
+             3 TV_1EJD         FIXED (7),                               
+             3 TV_2EJD         FIXED (7),                               
+             3 TV_3EJD         FIXED (7),                               
+             3 TV_4EJD         FIXED (7),                               
+             3 TV_5EJD         FIXED (7),                               
+           2 TV_ESKEMA_PSA     FIXED (7),                               
+           2 SKEMA_PSA,                                                 
+             3 TV_1EJD         FIXED (7),                               
+             3 TV_2EJD         FIXED (7),                               
+             3 TV_3EJD         FIXED (7),                               
+             3 TV_4EJD         FIXED (7),                               
+             3 TV_5EJD         FIXED (7),                               
+           2 TV_ESKEMA_ØVR     FIXED (7),                               
+           2 SKEMA_ØVR,                                                 
+             3 TV_1EJD         FIXED (7),                               
+             3 TV_2EJD         FIXED (7),                               
+             3 TV_3EJD         FIXED (7),                               
+             3 TV_4EJD         FIXED (7),                               
+             3 TV_5EJD         FIXED (7),                               
+           2 TV_SKRIV          FIXED (7),                               
+           2 TV_KØB            FIXED (7),                               
+           2 TV_SALG           FIXED (7),                               
+           2 TV_NETTO          FIXED (7),                               
+           2 TV_EJER           FIXED (7),                               
+           2 TV_ERKLÆR         FIXED (7),                               
+           2 TV_INKAS          FIXED (7),                               
+           2 TV_SOMMERHUS      FIXED (7);                               
+ DCL     TV_KOM                FIXED (7);                               
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     EOF_BH611       BIT       (01);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         BASED(ADDR(DATO1)),                            
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DAG         CHAR      (02);                                
+ DCL     ANT_EJD         BIN FIXED (15);                                
+ DCL     1 GEM,                                                         
+           2 DCPRCIR     FIXED     (10),                                
+           2 DSORP       FIXED     (10),                                
+           2 CPART       CHAR      (1),                                 
+           2 CAJOUR      CHAR      (1),                                 
+           2 FEJD        FIXED     (5),                                 
+           2 FLIN        FIXED     (5),                                 
+           2 CUDLEJNING  CHAR      (1),                                 
+           2 CUDEJD      PIC       '9',                                 
+           2 CSÆREJD     PIC       '9',                                 
+           2 CSMUDS      CHAR      (1),                                 
+           2 SLUTLINIER  CHAR      (1),                                 
+           2 CRENERKL    PIC       '9',                                 
+           2 SORT_EÆKNR  FIXED     (3);                                 
+ DCL     1 HJGL_NØGLE,                                 /* SEKV.TEST */  
+           2 SORT_EÆKNR  FIXED     (3)  INIT (0),                       
+           2 SORT_CPR    FIXED     (10) INIT (0);                       
+ DCL     GL_NØGLE        CHAR      (8)  BASED(ADDR(HJGL_NØGLE));        
+ DCL     GL_UDSKRLBNR    FIXED     (5)  INIT (0);      /* SEKV.TEST */  
+ DCL     I               BIN FIXED (15);                                
+ DCL     INDX            BIN FIXED (15);                                
+ DCL     NETTORES        CHAR      (03);                                
+ DCL     SELVANG         CHAR      (03);                                
+ DCL     FØRSTEGANG      BIT       (1);                                 
+ DCL     JA              BIT       (1)  INIT ('1'B);                    
+ DCL     NEJ             BIT       (1)  INIT ('0'B);                    
+ DCL     1 BH60100M,                                                    
+         %INCLUDE BH60100M;                                             
+ /*********************************************************************/
+ /*          DECLARE AF ENTRY OG BUILTIN                              */
+ /*********************************************************************/
+ DCL     ZS30101         ENTRY;     /* ABEND          */                
+ DCL     ZS61900         ENTRY OPTIONS (INTER ASM);   /* UDSKRIV SSI  */
+ DCL     ZS34900         ENTRY OPTIONS (INTER ASM);                     
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     SUM             BUILTIN;                                       
+ /*********************************************************************/
+ /*      LINIER TIL DIVERSE KØRSELSKONTROLLISTER                      */
+ /*********************************************************************/
+ DCL     1 OVERLIN1,                                                    
+           2 CTL         CHAR      (1),                                 
+           2 TX1         CHAR      (25) INIT ('PROGRAM BH62000L'),      
+           2 TX2         CHAR      (37) INIT                            
+             ('EJENDOMSSKEMA - DAN BÅND TIL UDSKRIV '),                 
+           2 TX3         CHAR      (46),                                
+           2 TX4         CHAR      (14) INIT ('UDSKREVET DEN '),        
+           2 DATO,                                                      
+             3 DAG         CHAR      (02),                              
+             3 F1          CHAR      (01) INIT ('.'),                   
+             3 MD          CHAR      (02),                              
+             3 F2          CHAR      (01) INIT ('.'),                   
+             3 ÅR          CHAR      (04);                              
+ DCL     1 OVERLIN2,                                                    
+           2 CTL         CHAR      (1),                                 
+           2 TX1         CHAR      (9)  INIT ('999 RC = '),             
+           2 RCKODE      CHAR      (1),                                 
+           2 TX2         CHAR      (31) INIT ((31)' '),                 
+           2 TX3         CHAR      (91) INIT ('KØRSELSKONTROLLISTE');   
+ DCL     1 DETLIN,                                                      
+          2 CTL          CHAR       (1),                                
+          2 TEKST        CHAR       (81),                               
+          2 ANT          PIC        'ZZZ.ZZZ.ZZZ',                      
+          2 REST         CHAR       (40) INIT (' ');                    
+ DCL     1 LIN3,                                                        
+          2 CTL          CHAR (1),                                      
+          2 TEKST        CHAR (80),                                     
+          2 ANT          PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 REST         CHAR (41) INIT (' ');                          
+ DCL     1 LIN4,                                                        
+          2 CTL          CHAR (1),                                      
+          2 F1           CHAR (50)      INIT  (' '),                    
+          2 TEKST1       CHAR (16)      INIT ('  PSA      '),           
+          2 TEKST2       CHAR (16)      INIT ('  USA / BSA'),           
+          2 TEKST3       CHAR (16)      INIT ('  EJD.SKEMA'),           
+          2 TEKST4       CHAR (11)      INIT ('       IALT'),           
+          2 REST         CHAR (23);                                     
+ DCL     1 LIN5,                                                        
+          2 CTL          CHAR (1),                                      
+          2 TEKST1       CHAR (22)      INIT ('ANTAL SKATTEYDERE MED '),
+          2 ANTLIN       PIC  'ZZ',                                     
+          2 TEKST2       CHAR (26)      INIT (' LINIER '),              
+          2 ANT1         PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 F1           CHAR (5),                                      
+          2 ANT2         PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 F2           CHAR (5),                                      
+          2 ANT3         PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 F3           CHAR (5),                                      
+          2 ANT4         PIC  'ZZZ.ZZZ.ZZZ',                            
+          2 REST         CHAR (23);                                     
+ DCL     1 LIN_BLANK,                                                   
+          2 CTL          CHAR (1),                                      
+          2 F1           CHAR (132)  INIT (' ');                        
+  %INCLUDE ZZ20301M;                                                    
+ /********************************************************************* 
+ *                       HOUSEKEEPING.                                * 
+ *********************************************************************/ 
+         CALL ZS61900;                                                  
+         EOF_BH611 = NEJ;                                               
+         ON ERROR CALL PLIDUMP ('SNHOB');                               
+         OPEN FILE (BH611I)  TITLE ('BH61101I');                        
+         OPEN FILE (BH6201O) TITLE ('BH62010O');                        
+         OPEN FILE (BH6202O) TITLE ('BH62020O');                        
+         ON ENDFILE (BH611I)                                            
+         BEGIN;                                                         
+            EOF_BH611 = JA;                                             
+            BH611.SORT_CPR = 99999999999;                               
+         END;                                                           
+         CALL ZZ20390 ('*OPEN','BH62001Y');                             
+         CALL ZZ20390 ('*OPEN','BH62002Y');                             
+         KOM_OPT(*)    = 0;                                             
+         OPT_LINIER(*) = 0;                                             
+         NETTORES      = 'JA';                                          
+         ANT_EJD = 0;                                                   
+         TV_KOM = 1;                                                    
+         GEM    = '';                                                   
+         FØRSTEGANG = JA;                                               
+         CALL SKAF_PARM_OPLYSNINGER;                                    
+ /********************************************************************* 
+ *                  PROCES                                            * 
+ *********************************************************************/ 
+         CALL LÆS_BH611;                                                
+         KOM_OPT.EÆKNR(1) = 101;                                        
+                                                                        
+         DO WHILE ( EOF_BH611 = NEJ );                                  
+            IF BH611.SORT_KOMNR < 999 &                                 
+               BH611.SORT_CPR > 0                                       
+            THEN                                                        
+               DO;                                                      
+                  IF GEM.DCPRCIR = BH611.DCPRCIR &                      
+                     GEM_BH611.CINVPNR = '0'                            
+                  THEN                                                  
+                     DO;                                                
+                        ANT_EJD = ANT_EJD + 1;                          
+                        CALL NULSTIL_SLUTLIN;                           
+                        CALL SKRIV_ESKEMA;                              
+                        GEM_BH611_AR = BH611_AR;                        
+                     END;                                               
+                  ELSE     /* SKIFT PÅ PERSONNR. */                     
+                     DO;                                                
+                        IF FØRSTEGANG = NEJ                             
+                        THEN                                            
+                           DO;                                          
+                              ANT_SELVANG = ANT_SELVANG + 1;            
+                              CALL OPTÆL_KOMLIST;                       
+                              CALL OVERF_SLUTLIN;                       
+                              CALL SKRIV_ESKEMA;                        
+                           END;                                         
+                        FØRSTEGANG = NEJ;                               
+                        GEM_BH611_AR = BH611_AR;                        
+                        NETTORES = 'JA';                                
+                        GEM = '';                                       
+                        GEM = BH611, BY NAME;                           
+                        GEM = BH611.ESR, BY NAME;                       
+                        IF BH611.DSORP_SL > 0                           
+                        THEN                                            
+                           DO;                                          
+                              GEM.DSORP = BH611.DSORP_SL;               
+                              GEM.CPART = BH611.CPART_SL;               
+                           END;                                         
+                        ELSE                                            
+                           DO;                                          
+                              GEM.DSORP = BH611.MT.DSORP;               
+                              GEM.CPART = BH611.MT.CPART;               
+                           END;                                         
+                        GEM.SLUTLINIER = SLUTLIN;                       
+                        CALL OPSÆT_SELVANG;                             
+                        CALL OPTÆL_LINIER;                              
+                        ANT_EJD = 1;                                    
+                     END;                                               
+                  IF BH611.CERKLÆR ^= 1                                 
+                  THEN                                                  
+                     NETTORES = 'NEJ';                                  
+               END;                                                     
+                                                                        
+            IF BH611.SORT_KOMNR < 999 &                                 
+               BH611.SORT_EJDNR > 0   &                                 
+               BH611.SORT_EÆKNR ^= KOM_OPT.EÆKNR(TV_KOM)                
+            THEN                                                        
+               DO;                                                      
+                  CALL FAKTURER_KLM;                                    
+                  TV_KOM = TV_KOM + 1;                                  
+                  KOM_OPT(TV_KOM).EÆKNR = BH611.SORT_EÆKNR;             
+               END;                                                     
+            CALL LÆS_BH611;                                             
+         END;               /* DO WHILE ( EOF_BH611 = NEJ ) */          
+                                                                        
+         /* SIDSTE PERSON */                                            
+                                                                        
+         IF GEM_BH611.CUDEJD = 1                                        
+         THEN                                                           
+            ANT_SELVANG = ANT_SELVANG + 1;                              
+                                                                        
+         CALL OVERF_SLUTLIN;                                            
+         CALL SKRIV_ESKEMA;                                             
+         CALL OPTÆL_KOMLIST;                                            
+         CALL FAKTURER_KLM;                                             
+                                                                        
+      /* KOM_OPT.EÆKNR(*) = 0; */                                       
+         DO I = 1 TO TV_KOM;                                            
+            IF KOM_OPT.EÆKNR(I) = 101                                   
+            THEN                                                        
+               KOM_OPT(347) = KOM_OPT(347) + KOM_OPT(I), BY NAME;       
+            ELSE                                                        
+               IF (KOM_OPT.EÆKNR(I) >= 751 &                            
+                   KOM_OPT.EÆKNR(I) <= 756)                             
+               THEN                                                     
+                  KOM_OPT(348) = KOM_OPT(348) + KOM_OPT(I), BY NAME;    
+               ELSE                                                     
+                  KOM_OPT(349) = KOM_OPT(349) + KOM_OPT(I), BY NAME;    
+            KOM_OPT(350) = KOM_OPT(350) + KOM_OPT(I), BY NAME;          
+         END;                                                           
+         TV_KOM = 350; /* RC-TOTAL */                                   
+         CALL FAKTURER_TS; /* TOLD & SKAT */                            
+                                                                        
+         CALL UDSKRIV_KOMLIST;  /* RC-TOTAL UDSKRIVES       */          
+         CALL TOTALLISTE;                                               
+         CALL MASK_AFSTEMNING;                                          
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      KONTROLLER OM PARM-OPLYSNINGER SKAL TAGES FRA VB.R90200D     */
+ /*      (FORSKUDS KOMMUNETABEL)  E L L E R  FRA PARAMETERKORT.       */
+ /*                                                                   */
+ /*      VB.R90200D BRUGES  K U N  HVIS DD-NAVN PARM ER SAT LIG DUMMY */
+ /*      I JCL-LET, D.V.S. AT OPLYSNINGER  A L T I D  TAGES FRA EVT.  */
+ /*      PARAMETERKORT HVIS DD-NAVN  I K K E  ER SAT LIG DUMMY.       */
+ /*                                                                   */
+ /*********************************************************************/
+ SKAF_PARM_OPLYSNINGER: PROC;                                           
+                                                                        
+ DCL     BR902I  FILE RECORD INPUT SEQUENTIAL KEYED ENV(VSAM);          
+ DCL     PARMFIL FILE RECORD INPUT;                                     
+                                                                        
+ DCL     1 BR902,                                                       
+         %INCLUDE BR90200N;                                             
+                                                                        
+ DCL     EOF_BR902        BIT      (1);                                 
+ DCL     EOF_PARM         BIT      (1);                                 
+                                                                        
+ DCL     ZS61500         ENTRY OPTIONS(INTER ASM); /* SKAF DSN-NAVN   */
+                                                                        
+ DCL     DDNAVN          CHAR      (8);                                 
+ DCL     DSNNAVN         CHAR      (44);                                
+ DCL     VOLNR           CHAR      (6);                                 
+                                                                        
+         PARMTAB(*) = '';                                               
+                                                                        
+         DDNAVN = 'PARM    ';                                           
+         CALL ZS61500(DDNAVN,DSNNAVN,VOLNR);                            
+                                                                        
+         IF SUBSTR(DSNNAVN,1,8) = 'NULLFILE'                            
+         THEN                                                           
+            DO;                                                         
+               /* D.V.S. DDNAVN PARM ER SAT LIG DUMMY */                
+                                                                        
+               EOF_BR902 = NEJ;                                         
+               OPEN FILE (BR902I) TITLE ('BR90200I');                   
+               ON ENDFILE (BR902I)                                      
+                  EOF_BR902 = JA;                                       
+                                                                        
+               CALL SKAF_BESTILLINGER;                                  
+                                                                        
+               CLOSE FILE (BR902I);                                     
+                                                                        
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+                                                                        
+               EOF_PARM = NEJ;                                          
+               OPEN FILE (PARMFIL) TITLE ('PARM');                      
+               ON ENDFILE (PARMFIL)                                     
+                  EOF_PARM = JA;                                        
+                                                                        
+               CALL INDLÆS_PARM;                                        
+                                                                        
+               CLOSE FILE (PARMFIL);                                    
+                                                                        
+            END;                                                        
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      SKAF PARM-OPLYSNINGER FRA VB.R90200D (FORSKUD-KOMMUNETABEL)  */
+ /*                                                                   */
+ /*********************************************************************/
+ SKAF_BESTILLINGER: PROC;                                               
+                                                                        
+         READ FILE(BR902I) INTO (BR902);                                
+                                                                        
+         DO WHILE (EOF_BR902 = NEJ);                                    
+                                                                        
+            IF BR902.EMYND > 100                                        
+            THEN                                                        
+               DO;                                                      
+                  PARMTAB(BR902.EMYND).KOMNR = BR902.EMYND;             
+                  IF BR902.INCASLST = '1'                               
+                  THEN                                                  
+                     PARMTAB(BR902.EMYND).LISTE = 1;                    
+               END;                                                     
+                                                                        
+            READ FILE(BR902I) INTO (BR902);                             
+                                                                        
+         END;                                                           
+                                                                        
+ END SKAF_BESTILLINGER;                                                 
+ /********************************************************************* 
+ *    PARAMETERKORTENE INDLÆSES OG VALIDERES                          * 
+ *********************************************************************/ 
+ INDLÆS_PARM:                                                           
+         PROC;                                                          
+                                                                        
+         READ FILE (PARMFIL ) INTO (PMK);                               
+         DO WHILE ( EOF_PARM = NEJ );                                   
+            IF ID ^= '>>BH62000'                                        
+            THEN                                                        
+               CALL ZS30101(5,'BH62000 ** 252 FEJL IDENT I PARMKORT',2);
+            IF PKORT.KNR < '101' !                                      
+               PKORT.KNR > '899'                                        
+            THEN                                                        
+               CALL ZS30101(5,'BH62000 ** 253 KOMNR FEJL I PARMKORT',2);
+            IF PKORT.KODE1 ^= '1' &                                     
+               PKORT.KODE1 ^= ' '                                       
+            THEN                                                        
+               CALL ZS30101                                             
+                   (5,'BH62000 ** 254 KODE FOR INKASSOLISTE FORKERT',2);
+            IF PKORT.KODE2 ^= '1' &                                     
+               PKORT.KODE2 ^= ' '                                       
+            THEN                                                        
+               CALL ZS30101                                             
+                   (5,'BH62000 ** 255 KODE FOR SOMMERHUSLISTE FEJL ',2);
+            PARMTAB(HJKOMNR).KOMNR = HJKOMNR;                           
+            IF PKORT.KODE1 = '1' &                                      
+               PKORT.KODE2 = '1'                                        
+            THEN                                                        
+               PARMTAB(HJKOMNR).LISTE = 3;                 /* BÅDE/OG */
+            ELSE                                                        
+               IF PKORT.KODE1 = '1'                                     
+               THEN                                                     
+                  PARMTAB(HJKOMNR).LISTE = 1;          /* KUN INKASSO */
+               ELSE                                                     
+                  IF PKORT.KODE2 = '1'                                  
+                  THEN                                                  
+                     PARMTAB(HJKOMNR).LISTE = 2;     /* KUN SOMMERHUS */
+            READ FILE (PARMFIL ) INTO (PMK);                            
+         END;                                                           
+ END INDLÆS_PARM;                                                       
+                                                                        
+ END SKAF_PARM_OPLYSNINGER;                                             
+                                                                        
+ /********************************************************************* 
+ *    BEREGNINGSBÅND INDLÆSES                                         * 
+ *********************************************************************/ 
+ LÆS_BH611:                                                             
+         PROC;                                                          
+ DCL     NY_NØGLE        CHAR      (8);                                 
+ DCL     NY_UDSKRLBNR    FIXED     (5);                                 
+ DCL     1 HJNY_NØGLE    BASED     (ADDR(NY_NØGLE)),                    
+           2 SORT_EÆKNR  FIXED     (3),                                 
+           2 SORT_CPR    FIXED     (10);                                
+         DO UNTIL ( BH611.CUDEJD = 1 !                                  
+                    EOF_BH611 = JA );                                   
+            READ FILE (BH611I) INTO (BH611_AR);                         
+            IF BH611.SORT_KOMNR < 999  &    /* ALTSÅ ER DET ET */       
+               BH611.SORT_CPR = 0      &    /* KOMMUNEINDIVID  */       
+               EOF_BH611 = NEJ                                          
+            THEN                                                        
+               DO;                                                      
+                  WRITE FILE (BH6201O) FROM (BH611_AR);                 
+                  ANT_KOMREG = ANT_KOMREG + 1;                          
+                  BH62022 = '';                                         
+                  BH62022.EÆKNR = BH61101.EÆKNR;                        
+                  BH62022.MYNVNADR = BH61101.MYNVNADR;                  
+                  WRITE FILE(BH6202O) FROM(BH62022);                    
+                  ANT_INKAS_KOM = ANT_INKAS_KOM + 1;                    
+               END;                                                     
+            IF BH611.SORT_KOMNR < 999  &    /* IKKE OPTÆLL.INDIVID */   
+               BH611.SORT_CPR > 0      &    /* IKKE KOMMUNEINDIVID */   
+               EOF_BH611 = NEJ                                          
+            THEN                                                        
+               DO;                                                      
+                  CALL RESET_CLIN;     /* TILPAS CLINXX TIL CSMUDS */   
+                  CALL RESET_SLUTLIN;  /* TILPAS EVT. SLUTLINIER   */   
+                  ANT_LÆS = ANT_LÆS + 1;                                
+                  IF BH611.CUDEJD  = 0   !                              
+                    (BH611.CAJOUR = 'S' &                               
+                    (BH611.CSMUDS = 'B' !                               
+                     BH611.CSMUDS = 'E' !                               
+                     BH611.CSMUDS = 'I' !                               
+                     BH611.CSMUDS = 'J' !                               
+                     BH611.CSMUDS = 'K' !                               
+                     BH611.CSMUDS = 'L' !                               
+                     BH611.CSMUDS = 'H' !                               
+                     BH611.CSÆREJD = 1  !                               
+                     BH611.CSÆREJD = 2)) !                              
+                    (BH611.CAJOUR = 'P' &                               
+                    (BH611.CSMUDS >= 'B' &                              
+                     BH611.CSMUDS <= 'G') !                             
+                     BH611.CSMUDS = 'I' !                               
+                     BH611.CSMUDS = 'J' !                               
+                     BH611.CSMUDS = 'K' !                               
+                     BH611.CSMUDS = 'L' !                               
+                     BH611.CSMUDS = 'H' !                               
+                     BH611.CSMUDS = 'O' !                               
+                     BH611.CSMUDS = 'P')                                
+                  THEN                                                  
+                     ANT_FRAS = ANT_FRAS + 1;                           
+               END;                                                     
+            HJNY_NØGLE.SORT_EÆKNR = BH611.SORT_EÆKNR;                   
+            HJNY_NØGLE.SORT_CPR = BH611.SORT_CPR;                       
+            NY_UDSKRLBNR = BH611.UDSKRLBNR;                             
+            IF NY_NØGLE < GL_NØGLE                                      
+            THEN                                                        
+               CALL ZS30101                                             
+               (5,'BH62000 ** 250 SEKVENSFEJL PÅ B.H61101D',2);         
+            IF NY_NØGLE = GL_NØGLE &                                    
+               NY_UDSKRLBNR < GL_UDSKRLBNR                              
+            THEN                                                        
+               DO;                                                      
+                  CALL ZS30101                                          
+                  (5,'BH62000 ** 250 SEKVENSFEJL PÅ B.H61101D',2);      
+               END;                                                     
+            GL_NØGLE = NY_NØGLE;                                        
+            GL_UDSKRLBNR = NY_UDSKRLBNR;                                
+            IF BH611.SORT_KOMNR < 999 &     /* IKKE OPTÆLL.INDIVID */   
+               BH611.SORT_CPR > 0           /* IKKE KOMMUNEINDIVID */   
+            THEN                                                        
+               CALL INKASSO;                   /* INKASSOLISTE      */  
+         END;                                                           
+         IF BH611.SORT_KOMNR = 999 !           /* OPTÆLLINGSINDIVID */  
+            BH611.SORT_CPR = 0     !           /* KOMMUNEINDIVID */     
+            BH611.CUDEJD   = 0                 /* EJ TIL UDSKRIV */     
+         THEN                                                           
+            RETURN;                                                     
+         IF BH611.DOVTG >= ÅR0101 &                                     
+            BH611.DOVTG <= ÅR1231                                       
+         THEN                                                           
+            TV_KØB(TV_KOM) = TV_KØB(TV_KOM) + 1;                        
+         IF BH611.DAFSTÅ >= ÅR0101 &                                    
+            BH611.DAFSTÅ <= ÅR1231                                      
+         THEN                                                           
+            TV_SALG(TV_KOM) = TV_SALG(TV_KOM) + 1;                      
+         IF BH611.CERKLÆR = '1'                                         
+         THEN                                                           
+            TV_NETTO(TV_KOM) = TV_NETTO(TV_KOM) + 1;                    
+ END LÆS_BH611;                                                         
+ /********************************************************************* 
+ *    SÅFREMT KOMMUNEN SKAL HAVE UDSKREVET INKASSOLISTE IFØLGE PARA-  * 
+ *    METERKORT, DANNES UDTRÆK TIL INKASSOLISTE                       * 
+ *    SÆLGERE UDSKRIVES IKKE PÅ INKASSOLISTE                          * 
+ *********************************************************************/ 
+ INKASSO:                                                               
+         PROC;                                                          
+         IF BH611.CBENYT > '90' !                                       
+            BH611.SORT_CPR = 0                     /* KOMMUNEINDIVID */ 
+         THEN                                                           
+            RETURN;                                                     
+         IF (PARMTAB(BH611.SORT_EÆKNR).LISTE = 1 !                      
+             PARMTAB(BH611.SORT_EÆKNR).LISTE = 3) &                     
+            BH611.CITYP < '5'                                           
+         THEN                                                           
+            DO;                                                         
+               INKAS = BH611.ESR, BY NAME;                              
+               INKAS.EÆKNR = BH611.SORT_EÆKNR;                          
+               INKAS.DHENVN = BH611.DHENVN_SL;                          
+               INKAS.DSORP = BH611.DSORP_SL;                            
+               INKAS.CPART = BH611.CPART_SL;                            
+               IF SUBSTR(BH_ADRTAB(1),1,10) = 'BOET EFTER' !            
+                  SUBSTR(BH_ADRTAB(1),1,10) = 'Boet Efter' !            
+                  SUBSTR(BH_ADRTAB(1),1,10) = 'Boet efter' !            
+                  SUBSTR(BH_ADRTAB(1),1,10) = 'boet efter'              
+               THEN                                                     
+                  INKAS.ANAVN = BH_ADRTAB(2);                           
+               INKAS.CRAPTYP = 1;                                       
+               WRITE FILE(BH6202O) FROM(INKAS);                         
+               ANT_INKAS = ANT_INKAS + 1;                               
+               IF BH611.SORT_EÆKNR = KOM_OPT.EÆKNR(TV_KOM) !            
+                  FØRSTEGANG                                            
+               THEN                                                     
+                  TV_INKAS(TV_KOM) = TV_INKAS(TV_KOM) + 1;              
+               ELSE                                                     
+                  TV_INKAS(TV_KOM + 1) = TV_INKAS(TV_KOM + 1) + 1;      
+            END;                                                        
+         IF (PARMTAB(BH611.SORT_EÆKNR).LISTE = 2 !                      
+             PARMTAB(BH611.SORT_EÆKNR).LISTE = 3) &                     
+            (BH611.SORT_EÆKNR ^= BH611.EKOMNR) &                        
+         /*  BH611.CMTSLUTM = 1 &  */                                   
+            (BH611.CBENYT = '08' !                                      
+             BH611.CBENYT = '28' !                                      
+             BH611.CBENYT = '48' !                                      
+             BH611.CBENYT = '21' !                                      
+             BH611.CBENYT = '22' !                                      
+             BH611.CBENYT = '26' !                                      
+             BH611.CBENYT = '27' !                                      
+             BH611.BBRANV = '510')                                      
+         THEN                                                           
+           DO;                                                          
+             IF ANT_INKAS + ANT_SOMMERHUS = 0                           
+             THEN                                                       
+                OPEN FILE (BH6202O) TITLE ('BH62020O');                 
+             IF BH611.GANE = 0 &                                        
+                BH611.FEJER = 1                                         
+             THEN                                                       
+                BH611.GANE = 10000;                                     
+             SOMMERHUS = BH611, BY NAME;                                
+             SOMMERHUS = BH611.ESR, BY NAME;                            
+             SOMMERHUS.EÆKNR = BH611.SORT_EÆKNR;                        
+             SOMMERHUS.DHENVN = BH611.DHENVN_SL;                        
+             SOMMERHUS.DSORP = BH611.DSORP_SL;                          
+             SOMMERHUS.CPART = BH611.CPART_SL;                          
+             IF SUBSTR(BH_ADRTAB(1),1,10) = 'BOET EFTER' !              
+                SUBSTR(BH_ADRTAB(1),1,10) = 'Boet Efter' !              
+                SUBSTR(BH_ADRTAB(1),1,10) = 'Boet efter' !              
+                SUBSTR(BH_ADRTAB(1),1,10) = 'boet efter'                
+             THEN                                                       
+                SOMMERHUS.ANAVN = BH_ADRTAB(2);                         
+             SOMMERHUS.CRAPTYP = 2;                                     
+             WRITE FILE(BH6202O) FROM(SOMMERHUS);                       
+             ANT_SOMMERHUS  = ANT_SOMMERHUS + 1;                        
+             IF BH611.SORT_EÆKNR = KOM_OPT.EÆKNR(TV_KOM) !              
+                FØRSTEGANG                                              
+             THEN                                                       
+                TV_SOMMERHUS(TV_KOM) = TV_SOMMERHUS(TV_KOM) + 1;        
+             ELSE                                                       
+                TV_SOMMERHUS(TV_KOM + 1) = TV_SOMMERHUS(TV_KOM + 1) + 1;
+           END;                                                         
+ END INKASSO;                                                           
+ /********************************************************************* 
+ *    HVIS ALLE PERSONENS EJENDOMME HAR FÅET BEREGNET OVERSKUD UD-    * 
+ *    SKRIVES DE PÅ SELVANGIVELSE, ELLERS PÅ EJENDOMSSKEMAER.         * 
+ *    DOG UDSKRIVES 09 EJENDOMME OGSÅ PÅ SELVANGIVELSE                * 
+ *********************************************************************/ 
+ OPSÆT_SELVANG:                                                         
+         PROC;                                                          
+         SELVANG = 'JA';                                                
+         IF BH611.CLIN16 = 1          /* SLUTLINIE MEDTÆLLES */         
+         THEN                                                           
+            BH611.FLIN = BH611.FLIN + 1;                                
+         BH611.FLIN = BH611.FLIN + BH611.FEJD; /* BLK LINIE MELLEM EJD*/
+         IF BH611.CLIN16 = 0          /* INGEN BLK LINIE EFTER SIDSTE */
+         THEN                         /* EJD HVIS INGEN SLUTLINIE     */
+            BH611.FLIN = BH611.FLIN - 1;                                
+         IF BH611.CSÆREJD = '1' !        /* DØD IFLG MT            */   
+            BH611.CSÆREJD = '2' !        /* EJ PÅ MT               */   
+            BH611.CSMUDS  = 'B' !        /* USA                    */   
+            BH611.CSMUDS  = 'C' !        /* USA-MED BILAG          */   
+            BH611.CSMUDS  = 'D' !        /* USA-C/O KOMMUNEN       */   
+            BH611.CSMUDS  = 'E' !        /* BSA                    */   
+            BH611.CSMUDS  = 'F' !        /* BSA-MED BILAG          */   
+            BH611.CSMUDS  = 'G' !        /* BSA-C/O KOMMUNEN       */   
+            BH611.CSMUDS  = 'I' !        /* USA-TIDL EJ PÅ MT      */   
+            BH611.CSMUDS  = 'J' !        /* USA-DØD PÅ EFTLEV      */   
+            BH611.CSMUDS  = 'K' !        /* BSA-TIDL EJ PÅ MT      */   
+            BH611.CSMUDS  = 'L' !        /* BSA-DØD PÅ EFTLEV      */   
+            BH611.CSMUDS  = 'H' !        /* PSA                    */   
+            BH611.CSMUDS  = 'O' !        /* PSA-TIDL EJ PÅ MT      */   
+            BH611.CSMUDS  = 'P' !        /* PSA-DØD PÅ EFTLEV      */   
+            BH611.CSMUDS  = 'M' !        /* EJD.SKEMA PSA EJ PLADS */   
+            BH611.CSMUDS  = 'N'          /* EJD.SKEMA PSA EJ PLADS */   
+         THEN                                                           
+            SELVANG = 'NEJ';                                            
+         GEM.FLIN = BH611.FLIN;                                         
+ END OPSÆT_SELVANG;                                                     
+ /********************************************************************* 
+ *    LINIEKODERNE PÅ DEN ENKELTE EJENDOM SKAL EVT. ÆNDRES, SÅ DE     * 
+ *    KOMMER TIL AT PASSE TIL CSMUDS, IDET LINIEKODERNE ER OPSAT VED  * 
+ *    BEREGNINGEN, SOM OM  A L L E  PERSONER SKAL UDSKRIVES  B Å D E  * 
+ *    PÅ USA, BSA SAMT PSA (EVT. EJENDOMSSKEMA).                      * 
+ *    OBS.: ANTAL LINIER IALT TIL PERSONEN ER VED BEREGNINGEN OPSAT   * 
+ *          SOM OM  A L L E  PERSONER  K U N  SKAL UDSKRIVES PÅ USA   * 
+ *          ELLER BSA.                                                * 
+ *********************************************************************/ 
+ RESET_CLIN:                                                            
+         PROC;                                                          
+         IF BH611.CAJOUR = 'S'                                          
+         THEN                                                           
+            DO;                                                         
+               /* USA, BSA */                                           
+               IF BH611.CLIN11 = 1        /* LINIE SOM KUN    */        
+               THEN                       /* UDSKRIVES PÅ PSA */        
+                  BH611.CLIN11 = 0;                                     
+               IF BH611.CLIN13 = 1        /* LINIE SOM KUN    */        
+               THEN                       /* UDSKRIVES PÅ PSA */        
+                  BH611.CLIN13 = 0;                                     
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               IF BH611.CSMUDS = 'M' !                                  
+                  BH611.CSMUDS = 'N'                                    
+               THEN                                                     
+                  DO;                                                   
+                     /* EJD.SKEMA - PSA EJ PLADS */                     
+                     IF BH611.CLIN12 = 1 /* LINIER SOM KUN       */     
+                     THEN                /* UDSKRIVES PÅ USA/BSA */     
+                        BH611.CLIN12 = 0;                               
+                     IF BH611.CLIN14 = 1 /* LINIE SOM KUN        */     
+                     THEN                /* UDSKRIVES PÅ USA/BSA */     
+                        BH611.CLIN14 = 0;                               
+                     IF BH611.CLIN16 = 1  /* SLUTLINIE SOM KUN    */    
+                     THEN                 /* UDSKRIVES PÅ USA/BSA */    
+                        BH611.CLIN16 = 0;                               
+                  END;                                                  
+               ELSE                                                     
+                  DO;                                                   
+                     /* EJD.SKEMA - DØDE, EJ PÅ MANDTAL */              
+                     IF BH611.CLIN11 = 1   /* LINIE SOM KUN    */       
+                     THEN                  /* UDSKRIVES PÅ PSA */       
+                        BH611.CLIN11 = 0;                               
+                     IF BH611.CLIN13 = 1   /* LINIE SOM KUN    */       
+                     THEN                  /* UDSKRIVES PÅ PSA */       
+                        BH611.CLIN13 = 0;                               
+                  END;                                                  
+            END;                                                        
+ END RESET_CLIN;                                                        
+ /**********************************************************************
+ *    SLUTLINIER TIL EN PERSON, SOM BÅDE                               *
+ *             SKAL HAVE TILPASSET SLUTLINIERNE XX TIL YY, SÅ DE PAS-  *
+ *    SER TIL PERSONENS SAMLEDE EJERFORHOLD.                           *
+ **********************************************************************/
+ RESET_SLUTLIN:                                                         
+         PROC;                                                          
+                                                                        
+         /* DER ER INGEN TILPASNING FOR ESKEMA 1999 */                  
+                                                                        
+ END RESET_SLUTLIN;                                                     
+                                                                        
+ /********************************************************************* 
+ *    KODER FOR SLUTLINIER SKAL KUN VÆRE OPSAT I FØRSTE REC. TIL EN   * 
+ *    PERSON. I DE ØVRIGE RECORDS NULSTILLES DISSE LINIER.            * 
+ *    CUDLEJNING OVERFØRES FRA FØRSTE RECORD TIL DE ØVRIGE RECORDS    * 
+ *    TIL SAMME PERSON.                                               * 
+ *********************************************************************/ 
+ NULSTIL_SLUTLIN:                                                       
+         PROC;                                                          
+         DO I = 16 TO 16;                                               
+            HJ_CLIN (I) = 0;                                            
+         END;                                                           
+         GEM_BH611.CUDLEJNING = GEM.CUDLEJNING;                         
+         GEM_BH611.CSMUDS   = GEM.CSMUDS;                               
+         GEM_BH611.FLIN     = GEM.FLIN;                                 
+         GEM_BH611.CRENERKL = GEM.CRENERKL;                             
+ END NULSTIL_SLUTLIN;                                                   
+ /********************************************************************* 
+ *    KODER FOR SLUTLINIER OVERFØRES TIL SIDSTE REC. TIL PERSONEN.    * 
+ *********************************************************************/ 
+ OVERF_SLUTLIN:                                                         
+         PROC;                                                          
+         GEM_SLUTLIN = GEM.SLUTLINIER;                                  
+         GEM_BH611.CUDLEJNING = GEM.CUDLEJNING;                         
+         GEM_BH611.CSMUDS   = GEM.CSMUDS;                               
+         GEM_BH611.FLIN     = GEM.FLIN;                                 
+         GEM_BH611.CRENERKL = GEM.CRENERKL;                             
+ END OVERF_SLUTLIN;                                                     
+ /********************************************************************* 
+ *    UDTRÆK TIL E-SKEMA DANNES. UDTRÆKKET HAR SAMME STRUKTUR SOM     * 
+ *    BEREGNINGSBÅND DOG EXCL. EVT. SAMBESKATNINGSOPLYSNINGER         * 
+ *********************************************************************/ 
+ SKRIV_ESKEMA:                                                          
+         PROC;                                                          
+                                                                        
+         IF GEM_BH611.CUDEJD = 0          /* RENE ERHVERV KUN TIL SLS */
+         THEN                             /* SE-NUMMER EJET EJENDOMME */
+            RETURN;                       /* ØVR. INDV EJ TIL UDSKRIV */
+                                                                        
+         IF GEM.CSMUDS = 'H' !                /* PSA */                 
+            GEM.CSMUDS = 'O' !                /* EJ PÅ MT ELLER DØDE */ 
+            GEM.CSMUDS = 'P'                                            
+         THEN                                                           
+            RETURN;                                                     
+                                                                        
+         IF GEM.CAJOUR = 'S'                  /* KØRSEL USA/BSA */      
+         THEN                                                           
+            DO;                                                         
+               IF GEM.CSMUDS = 'C' !       /* USA MED BILAG  */         
+                  GEM.CSMUDS = 'D' !       /* USA C/O KOMM.  */         
+                  GEM.CSMUDS = 'F' !       /* BSA MED BILAG  */         
+                  GEM.CSMUDS = 'G'         /* BSA C/O KOMM.  */         
+               THEN;                                                    
+               ELSE                                                     
+                  RETURN;                                               
+            END;                                                        
+                                                                        
+         IF GEM.CAJOUR = 'P'                 /* KØRSEL PSA EJ PLADS */  
+         THEN                                                           
+            DO;                                                         
+               IF GEM.CSMUDS  = 'M' !        /* PSA EJ PLADS (KOMM.)*/  
+                  GEM.CSMUDS  = 'N' !        /* PSA EJ PLADS (DIR.) */  
+                  GEM.CSÆREJD = 1   !        /* DØD IFLG MT */          
+                  GEM.CSÆREJD = 2            /* EJ PÅ MT    */          
+               THEN;                                                    
+               ELSE                                                     
+                  RETURN;                                               
+            END;                                                        
+                                                                        
+         IF GEM_BH611.DSORP_SL > 0                                      
+         THEN                                                           
+            DO;                                                         
+               GEM_BH611.SORT_CPR = GEM_BH611.DSORP_SL;                 
+               GEM_BH611.SORT_CPART = GEM_BH611.CPART_SL;               
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               GEM_BH611.SORT_CPR = GEM_BH611.MT.DSORP;                 
+               GEM_BH611.SORT_CPART = GEM_BH611.MT.CPART;               
+            END;                                                        
+                                                                        
+         WRITE FILE (BH6201O) FROM (GEM_BH611_AR);                      
+                                                                        
+         ANT_SKEMAER = ANT_SKEMAER + 1;                                 
+                                                                        
+ END SKRIV_ESKEMA;                                                      
+ /********************************************************************* 
+ *    DER OPTÆLLES LINIER PR.SKATTEYDER TIL BRUG FOR TOTALLISTEN      * 
+ *    SKEMAER                                                         * 
+ *********************************************************************/ 
+ OPTÆL_LINIER:  PROC;                                                   
+ DCL     INDX1           FIXED     (3);                                 
+ DCL     INDX2           FIXED     (3);                                 
+      /* RETURN; */                                                     
+         IF BH611.CUDEJD = 0             /* INDV EJ TIL UDSKRIVNING  */ 
+         THEN                                                           
+            RETURN;                                                     
+         IF SELVANG = 'NEJ'                                             
+         THEN                                                           
+            DO;                                                         
+               IF BH611.CSMUDS = 'H' !                                  
+                  BH611.CSMUDS = 'O' !                                  
+                  BH611.CSMUDS = 'P'                                    
+               THEN                                                     
+                  INDX2 = 1;                   /* PSA */                
+               ELSE                                                     
+                  IF BH611.CSMUDS = 'B' !                               
+                     BH611.CSMUDS = 'E' !                               
+                     BH611.CSMUDS = 'I' !                               
+                     BH611.CSMUDS = 'J' !                               
+                     BH611.CSMUDS = 'K' !                               
+                     BH611.CSMUDS = 'L'                                 
+                  THEN                                                  
+                    INDX2 = 1;                 /* USA/BSA */            
+                  ELSE                                                  
+                    INDX2 = 3;                 /* ØVRIGE  */            
+            END;                                                        
+         ELSE                                                           
+            INDX2 = 2;                         /* USA / BSA        */   
+         IF BH611.FLIN > 30                                             
+         THEN                                                           
+            INDX1 = 30;                                                 
+         ELSE                                                           
+            INDX1 = BH611.FLIN;                                         
+         OPT_LINIER(INDX1,INDX2) = OPT_LINIER(INDX1,INDX2) + 1;         
+ END OPTÆL_LINIER;                                                      
+ /********************************************************************* 
+ *    DER OPTÆLLES TIL BRUG FOR KOMMUNELISTE                          * 
+ *    SKEMAER                                                         * 
+ *********************************************************************/ 
+ OPTÆL_KOMLIST:  PROC;                                                  
+         TV_SKRIV(TV_KOM) = TV_SKRIV(TV_KOM) + ANT_EJD;                 
+         TV_EJER(TV_KOM)  = TV_EJER(TV_KOM)  + 1;                       
+         IF NETTORES = 'JA'                                             
+         THEN                                                           
+            TV_ERKLÆR(TV_KOM)  = TV_ERKLÆR(TV_KOM)  + 1;                
+         /* PLADS PÅ USA/BSA */                                         
+         IF GEM.CSMUDS = 'B' ! /* USA */                                
+            GEM.CSMUDS = 'I' ! /* USA (EJ TIDL PÅ MT->NU PÅ MT) */      
+            GEM.CSMUDS = 'J' ! /* USA (DØD OVERFØRT -> EFTERLEV.*/      
+            GEM.CSMUDS = 'E' ! /* BSA */                                
+            GEM.CSMUDS = 'K' ! /* BSA (EJ TIDL PÅ MT->NU PÅ MT) */      
+            GEM.CSMUDS = 'L'   /* BSA (DØD OVERFØRT -> EFTERLEV.*/      
+         THEN                                                           
+            DO;                                                         
+               TV_SELVANG(TV_KOM) = TV_SELVANG(TV_KOM) + ANT_EJD;       
+               SELECT(ANT_EJD);                                         
+                  WHEN(1)                                               
+                     SM.TV_1EJD(TV_KOM) = SM.TV_1EJD(TV_KOM) + 1;       
+                  WHEN(2)                                               
+                     SM.TV_2EJD(TV_KOM) = SM.TV_2EJD(TV_KOM) + 1;       
+                  WHEN(3)                                               
+                     SM.TV_3EJD(TV_KOM) = SM.TV_3EJD(TV_KOM) + 1;       
+                  WHEN(4)                                               
+                     SM.TV_4EJD(TV_KOM) = SM.TV_4EJD(TV_KOM) + 1;       
+                  OTHERWISE                                             
+                     SM.TV_5EJD(TV_KOM) = SM.TV_5EJD(TV_KOM) + 1;       
+               END;                                                     
+               RETURN;                                                  
+            END;                                                        
+         /* EJ PLADS PÅ USA/BSA */                                      
+         IF GEM.CSMUDS = 'C' ! /* USA MED BILAG  */                     
+            GEM.CSMUDS = 'D' ! /* USA C/O KOMM.  */                     
+            GEM.CSMUDS = 'E' ! /* BSA */                                
+            GEM.CSMUDS = 'F'   /* BSA MED BILAG  */                     
+         THEN                                                           
+            DO;                                                         
+               TV_ESKEMA_USA(TV_KOM) =                                  
+               TV_ESKEMA_USA(TV_KOM) + ANT_EJD;                         
+               SELECT(ANT_EJD);                                         
+                  WHEN(1)                                               
+                     SKEMA_USA.TV_1EJD(TV_KOM) =                        
+                     SKEMA_USA.TV_1EJD(TV_KOM) + 1;                     
+                  WHEN(2)                                               
+                     SKEMA_USA.TV_2EJD(TV_KOM) =                        
+                     SKEMA_USA.TV_2EJD(TV_KOM) + 1;                     
+                  WHEN(3)                                               
+                     SKEMA_USA.TV_3EJD(TV_KOM) =                        
+                     SKEMA_USA.TV_3EJD(TV_KOM) + 1;                     
+                  WHEN(4)                                               
+                     SKEMA_USA.TV_4EJD(TV_KOM) =                        
+                     SKEMA_USA.TV_4EJD(TV_KOM) + 1;                     
+                  OTHERWISE                                             
+                     SKEMA_USA.TV_5EJD(TV_KOM) =                        
+                     SKEMA_USA.TV_5EJD(TV_KOM) + 1;                     
+               END;                                                     
+               RETURN;                                                  
+            END;                                                        
+         /* SELVANG = 'NEJ' */                                          
+         IF GEM.CSMUDS = 'H' ! /* PSA */                                
+            GEM.CSMUDS = 'O' ! /* PSA (EJ TIDL PÅ MT->NU PÅ MT) */      
+            GEM.CSMUDS = 'P'   /* PSA (DØD OVERFØRT -> EFTERLEV.*/      
+         THEN                                                           
+            DO;                                                         
+               TV_PSA(TV_KOM) = TV_PSA(TV_KOM) + ANT_EJD;               
+               SELECT(ANT_EJD);                                         
+                  WHEN(1)                                               
+                     PSA.TV_1EJD(TV_KOM) = PSA.TV_1EJD(TV_KOM) + 1;     
+                  WHEN(2)                                               
+                     PSA.TV_2EJD(TV_KOM) = PSA.TV_2EJD(TV_KOM) + 1;     
+                  WHEN(3)                                               
+                     PSA.TV_3EJD(TV_KOM) = PSA.TV_3EJD(TV_KOM) + 1;     
+                  WHEN(4)                                               
+                     PSA.TV_4EJD(TV_KOM) = PSA.TV_4EJD(TV_KOM) + 1;     
+                  OTHERWISE                                             
+                     PSA.TV_5EJD(TV_KOM) = PSA.TV_5EJD(TV_KOM) + 1;     
+               END;                                                     
+               RETURN;                                                  
+            END;                                                        
+         SELECT(GEM.CSMUDS);                                            
+            WHEN('C','D','F','G') /* USA/BSA */                         
+               CALL OPTÆL_SKEMA_USA;                                    
+            WHEN('M','N')                 /* PSA EJ PLADS */            
+               CALL OPTÆL_SKEMA_PSA;                                    
+            OTHERWISE                                                   
+               CALL OPTÆL_SKEMA_ØVR;      /* DØDE, EJ PÅ MT */          
+         END; /* SELECT */                                              
+ END OPTÆL_KOMLIST;                                                     
+ /********************************************************************* 
+ *    DER OPTÆLLES TIL BRUG FOR KOMMUNELISTE                          * 
+ *    EJENDOMSSKEMAER VEDR. EJ PLADS PÅ USA/BSA                       * 
+ *********************************************************************/ 
+ OPTÆL_SKEMA_USA: PROC;                                                 
+         TV_ESKEMA_USA(TV_KOM) = TV_ESKEMA_USA(TV_KOM) + ANT_EJD;       
+         SELECT(ANT_EJD);                                               
+            WHEN(1)                                                     
+               SKEMA_USA.TV_1EJD(TV_KOM) =                              
+               SKEMA_USA.TV_1EJD(TV_KOM) + 1;                           
+            WHEN(2)                                                     
+               SKEMA_USA.TV_2EJD(TV_KOM) =                              
+               SKEMA_USA.TV_2EJD(TV_KOM) + 1;                           
+            WHEN(3)                                                     
+               SKEMA_USA.TV_3EJD(TV_KOM) =                              
+               SKEMA_USA.TV_3EJD(TV_KOM) + 1;                           
+            WHEN(4)                                                     
+               SKEMA_USA.TV_4EJD(TV_KOM) =                              
+               SKEMA_USA.TV_4EJD(TV_KOM) + 1;                           
+            OTHERWISE                                                   
+               SKEMA_USA.TV_5EJD(TV_KOM) =                              
+               SKEMA_USA.TV_5EJD(TV_KOM) + 1;                           
+         END; /* SELECT */                                              
+ END OPTÆL_SKEMA_USA;                                                   
+ /********************************************************************* 
+ *    DER OPTÆLLES TIL BRUG FOR KOMMUNELISTE                          * 
+ *    EJENDOMSSKEMAER VEDR. EJ PLADS PÅ PSA                           * 
+ *********************************************************************/ 
+ OPTÆL_SKEMA_PSA: PROC;                                                 
+         TV_ESKEMA_PSA(TV_KOM) = TV_ESKEMA_PSA(TV_KOM) + ANT_EJD;       
+         SELECT(ANT_EJD);                                               
+            WHEN(1)                                                     
+               SKEMA_PSA.TV_1EJD(TV_KOM) =                              
+               SKEMA_PSA.TV_1EJD(TV_KOM) + 1;                           
+            WHEN(2)                                                     
+               SKEMA_PSA.TV_2EJD(TV_KOM) =                              
+               SKEMA_PSA.TV_2EJD(TV_KOM) + 1;                           
+            WHEN(3)                                                     
+               SKEMA_PSA.TV_3EJD(TV_KOM) =                              
+               SKEMA_PSA.TV_3EJD(TV_KOM) + 1;                           
+            WHEN(4)                                                     
+               SKEMA_PSA.TV_4EJD(TV_KOM) =                              
+               SKEMA_PSA.TV_4EJD(TV_KOM) + 1;                           
+            OTHERWISE                                                   
+               SKEMA_PSA.TV_5EJD(TV_KOM) =                              
+               SKEMA_PSA.TV_5EJD(TV_KOM) + 1;                           
+         END; /* SELECT */                                              
+ END OPTÆL_SKEMA_PSA;                                                   
+ /********************************************************************* 
+ *    DER OPTÆLLES TIL BRUG FOR KOMMUNELISTE                          * 
+ *    EJENDOMSSKEMAER VEDR. DØDE OG EJ PÅ MANDTAL                     * 
+ *********************************************************************/ 
+ OPTÆL_SKEMA_ØVR: PROC;                                                 
+         TV_ESKEMA_ØVR(TV_KOM) = TV_ESKEMA_ØVR(TV_KOM) + ANT_EJD;       
+         SELECT(ANT_EJD);                                               
+            WHEN(1)                                                     
+               SKEMA_ØVR.TV_1EJD(TV_KOM) =                              
+               SKEMA_ØVR.TV_1EJD(TV_KOM) + 1;                           
+            WHEN(2)                                                     
+               SKEMA_ØVR.TV_2EJD(TV_KOM) =                              
+               SKEMA_ØVR.TV_2EJD(TV_KOM) + 1;                           
+            WHEN(3)                                                     
+               SKEMA_ØVR.TV_3EJD(TV_KOM) =                              
+               SKEMA_ØVR.TV_3EJD(TV_KOM) + 1;                           
+            WHEN(4)                                                     
+               SKEMA_ØVR.TV_4EJD(TV_KOM) =                              
+               SKEMA_ØVR.TV_4EJD(TV_KOM) + 1;                           
+            OTHERWISE                                                   
+               SKEMA_ØVR.TV_5EJD(TV_KOM) =                              
+               SKEMA_ØVR.TV_5EJD(TV_KOM) + 1;                           
+         END; /* SELECT */                                              
+ END OPTÆL_SKEMA_ØVR;                                                   
+ /********************************************************************* 
+ * DER UDSKRIVES EN SIDE PR KOMMUNE MED OPTÆLLINGER AF ANTAL SKEMAER. * 
+ * (OBS. FRA OG MED 1991 UDSKRIVES KUN RC-TOTALEN)                    * 
+ *********************************************************************/ 
+ UDSKRIV_KOMLIST:                                                       
+         PROC;                                                          
+ DCL     SP_KOM          CHAR      (8)  INIT ('0000    ');              
+ DCL     1 SPOOL         DEF SP_KOM,                                    
+           2 F1          CHAR      (1),                                 
+           2 KOMNR       PIC       '999';                               
+         IF TV_KOM = 350                                                
+         THEN                                                           
+            DO;                                                         
+               KOM_OPT.EÆKNR(347) = 999;       /* RC 1-TOTAL */         
+               KOM_OPT.EÆKNR(348) = 999;       /* RC 4-TOTAL */         
+               KOM_OPT.EÆKNR(349) = 999;       /* RC 3+5+6-TOTAL */     
+               KOM_OPT.EÆKNR(350) = 999;       /* LANDS-TOTAL */        
+            END;                                                        
+         ELSE                                                           
+            RETURN;            /* KUN RC-/LANDSTOTALER SKRIVES */       
+         SPOOL.KOMNR = KOM_OPT.EÆKNR(TV_KOM);                           
+         CALL ZZ20390('*SUB','BH62001Y',SP_KOM);                        
+         TV_KOM = 347;                                                  
+         CALL UDSKRIV_RC;                                               
+         TV_KOM = 348;                                                  
+         CALL UDSKRIV_RC;                                               
+         TV_KOM = 349;                                                  
+         CALL UDSKRIV_RC;                                               
+         TV_KOM = 350;                                                  
+         CALL UDSKRIV_RC;                                               
+ UDSKRIV_RC:                                                            
+         PROC;                                                          
+         LIN_BLANK = ZZIK1;                                             
+         CALL ZZ20300 (LIN_BLANK,'01');                                 
+         OVERLIN1.CTL = ZZWS1;                                          
+         IF GEM.CAJOUR = 'S'                                            
+         THEN                                                           
+           OVERLIN1.TX3 = 'USA, BSA (EVT. EJENDOMSSKEMA)';              
+         ELSE                                                           
+           OVERLIN1.TX3 = 'EJD.SKEMA(PSA EJ PLADS,DØDE,EJ PÅ MANDTAL)'; 
+         CALL ZS38100(DATO1);                                           
+         OVERLIN1.DATO = DATO2, BY NAME;                                
+         CALL ZZ20300 (OVERLIN1,'01');                                  
+         OVERLIN2.CTL = ZZWS3;                                          
+         SELECT (TV_KOM);                                               
+           WHEN (347)                                                   
+              OVERLIN2.RCKODE = '1';                                    
+           WHEN (348)                                                   
+              OVERLIN2.RCKODE = '4';                                    
+           WHEN (349)                                                   
+              OVERLIN2.RCKODE = '6';                                    
+           WHEN (350)                                                   
+              OVERLIN2.RCKODE = '9';                                    
+           OTHERWISE                                                    
+              OVERLIN2.RCKODE = '?';                                    
+         END;                                                           
+         CALL ZZ20300 (OVERLIN2,'01');                                  
+         CALL UDSKRIV_KOMLIST_USA;                                      
+         CALL UDSKRIV_KOMLIST_SKEMA_USA;                                
+         CALL UDSKRIV_KOMLIST_PSA;                                      
+         CALL UDSKRIV_KOMLIST_SKEMA_PSA;                                
+         CALL UDSKRIV_KOMLIST_SKEMA_ØVR;                                
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_SKRIV;                         
+         DETLIN.TEKST = 'ANTAL EJENDOMME UDSKREVET I ALT';              
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_KØB;                           
+         DETLIN.TEKST = ' - HERAF ANTAL KØBERE I INDEVÆRENDE ÅR';       
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_SALG;                          
+         DETLIN.TEKST = ' - HERAF ANTAL SÆLGERE I INDEVÆRENDE ÅR';      
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_NETTO;                         
+         DETLIN.TEKST = ' - HERAF ANTAL EJENDOMME MED BEREGNET NETTORESU
+ LTAT';                                                                 
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_EJER;                          
+         DETLIN.TEKST = 'ANTAL EJERE IALT ';                            
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_ERKLÆR;                        
+         DETLIN.TEKST = ' - HERAF EJERE, DER KAN ERKLÆRE SIG FOR OVERSKU
+ D AF EJD.';                                                            
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = ANT_INKAS_KOM;                                    
+         DETLIN.TEKST = 'ANTAL KOMMUNEINDIVIDER TIL INKASSO-/SOMMERHUSLI
+ STE';                                                                  
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_INKAS;                         
+         DETLIN.TEKST = 'ANTAL EJENDOMME I ALT TIL UDSKRIVNING PÅ INKASS
+ OLISTE';                                                               
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_SOMMERHUS;                     
+         DETLIN.TEKST = 'ANTAL EJENDOMME I ALT TIL UDSKRIVNING PÅ SOMMER
+ HUSLISTE';                                                             
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_RC;                                                        
+ END UDSKRIV_KOMLIST;                                                   
+ UDSKRIV_KOMLIST_USA:                                                   
+         PROC;                                                          
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_SELVANG;                       
+         DETLIN.TEKST = 'ANTAL EJENDOMME UDSKREVET PÅ SELVANGIVELSE USA/
+ BSA';                                                                  
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SM.TV_1EJD;                       
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 1 EJENDOM';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SM.TV_2EJD;                       
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 2 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SM.TV_3EJD;                       
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 3 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SM.TV_4EJD;                       
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 4 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SM.TV_5EJD;                       
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 5 ELLER FLERE EJ
+ ENDOMME';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_KOMLIST_USA;                                               
+ UDSKRIV_KOMLIST_PSA:                                                   
+         PROC;                                                          
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_PSA;                           
+         DETLIN.TEKST = 'ANTAL EJENDOMME UDSKREVET PÅ PRINTSELVANGIVELSE
+  (PSA)';                                                               
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).PSA.TV_1EJD;                      
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 1 EJENDOM';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).PSA.TV_2EJD;                      
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 2 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).PSA.TV_3EJD;                      
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 3 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).PSA.TV_4EJD;                      
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 4 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).PSA.TV_5EJD;                      
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 5 ELLER FLERE EJ
+ ENDOMME';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_KOMLIST_PSA;                                               
+ UDSKRIV_KOMLIST_SKEMA_USA:                                             
+         PROC;                                                          
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_ESKEMA_USA;                    
+         DETLIN.TEKST = 'ANTAL EJENDOMME SKREVET PÅ EJD.SKEMA (EJ PLADS 
+ PÅ USA ELL. BSA)';                                                     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_USA.TV_1EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 1 EJENDOM';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_USA.TV_2EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 2 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_USA.TV_3EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 3 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_USA.TV_4EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 4 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_USA.TV_5EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 5 ELLER FLERE EJ
+ ENDOMME';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_KOMLIST_SKEMA_USA;                                         
+ UDSKRIV_KOMLIST_SKEMA_PSA:                                             
+         PROC;                                                          
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_ESKEMA_PSA;                    
+         DETLIN.TEKST = 'ANTAL EJENDOMME SKREVET PÅ EJD.SKEMA (EJ PLADS 
+ PÅ PSA)';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_PSA.TV_1EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 1 EJENDOM';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_PSA.TV_2EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 2 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_PSA.TV_3EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 3 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_PSA.TV_4EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 4 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_PSA.TV_5EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 5 ELLER FLERE EJ
+ ENDOMME';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_KOMLIST_SKEMA_PSA;                                         
+ UDSKRIV_KOMLIST_SKEMA_ØVR:                                             
+         PROC;                                                          
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).TV_ESKEMA_ØVR;                    
+         DETLIN.TEKST = 'ANTAL EJENDOMME SKREVET PÅ EJD.SKEMA (DØDE ELL.
+  EJ PÅ MANDTAL)';                                                      
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_ØVR.TV_1EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 1 EJENDOM';     
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_ØVR.TV_2EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 2 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_ØVR.TV_3EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 3 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS1;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_ØVR.TV_4EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 4 EJENDOMME';   
+         CALL ZZ20300 (DETLIN,'01');                                    
+         DETLIN.CTL = ZZWS2;                                            
+         DETLIN.ANT = KOM_OPT(TV_KOM).SKEMA_ØVR.TV_5EJD;                
+         DETLIN.TEKST = ' - HERAF EJERE REGISTRERET MED 5 ELLER FLERE EJ
+ ENDOMME';                                                              
+         CALL ZZ20300 (DETLIN,'01');                                    
+ END UDSKRIV_KOMLIST_SKEMA_ØVR;                                         
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE:                                                            
+         PROC;                                                          
+         LIN_BLANK = ZZIK1;                                             
+         CALL ZZ20300 (LIN_BLANK,'02');                                 
+         CALL ZZ20300 (OVERLIN1,'02');                                  
+         CALL ZZ20300 (OVERLIN2,'02');                                  
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.ANT = ANT_LÆS;                                            
+         LIN3.TEKST = 'ANTAL LÆSTE PÅ B.H61101D';                       
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.ANT = ANT_KOMREG;                                         
+         LIN3.TEKST = '      HERAF KOMMUNEINDIVIDER';                   
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.ANT = ANT_FRAS;                                           
+         LIN3.TEKST = 'ANTAL FRASORTEREDE, SOM IKKE UDSKRIVES (HERUNDER 
+ USA-B/BSA-E OG PSA-H)';                                                
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.ANT = ANT_SKEMAER;                                        
+         LIN3.TEKST = 'ANTAL INDIVIDER TIL EJDSKEMA          B.H62010D';
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.CTL = ZZWS1;                                              
+         LIN3.ANT = ANT_EJDSELV;                                        
+         LIN3.TEKST = 'ANTAL INDIVIDER TIL USA/BSA';                    
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.CTL = ZZWS2;                                              
+         LIN3.ANT = ANT_SELVANG;                                        
+         LIN3.TEKST = 'ANTAL PERSONER MED EJD.OPL. PÅ SELVANG/ESKEMA';  
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.ANT = ANT_INKAS;                                          
+         LIN3.TEKST = 'ANTAL SKREVNE INKASSOINDIVIDER PÅ B.H62020D';    
+         CALL ZZ20300 (LIN3,'02');                                      
+         LIN3.ANT = ANT_SOMMERHUS;                                      
+         LIN3.TEKST = 'ANTAL SKREVNE SOMMERHUSINDIVIDER PÅ B.H62020D';  
+         CALL ZZ20300 (LIN3,'02');                                      
+                                                                        
+         LIN_BLANK = ZZIK1;                                             
+         CALL ZZ20300 (LIN_BLANK,'02');                                 
+         CALL ZZ20300 (OVERLIN1,'02');                                  
+         CALL ZZ20300 (OVERLIN2,'02');                                  
+         OVERLIN2.CTL = ZZWS2;                                          
+         OVERLIN2.TX3 = 'OPTÆLLINGER VEDR. ANTAL LINIER PR. SKATTEYDER';
+         CALL ZZ20300 (OVERLIN2,'02');                                  
+         LIN4.CTL = ZZWS2;                                              
+         CALL ZZ20300 (LIN4,'02');                                      
+         LIN5.CTL = ZZWS1;                                              
+         DO I = 0 TO 30;                                                
+            LIN5.ANTLIN = I;                                            
+            IF I = 30                                                   
+            THEN                                                        
+               LIN5.TEKST2 = ' ELLER FLERE LINIER';                     
+            LIN5.ANT1 = OPT_LINIER (I,1);                               
+            LIN5.ANT2 = OPT_LINIER (I,2);                               
+            LIN5.ANT3 = OPT_LINIER (I,3);                               
+            LIN5.ANT4 = SUM(OPT_LINIER (I,*));                          
+            CALL ZZ20300 (LIN5,'02');                                   
+         END;                                                           
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /*      HALVAUTOMATISK FAKTURERING AF SYSTEMAFGIFT TIL KOMMUNERNE    */
+ /*      SYSTEMAFGIFTEN BETALES  K U N  AF KOMMUNERNE                 */
+ /*********************************************************************/
+ FAKTURER_KLM:  PROC;                                                   
+                                                                        
+ DCL   1 SMF,                                                           
+         2 RETURKODE     BIT       (8),                                 
+         2 EKOMNR        PIC       '9999',                              
+         2 EINST         CHAR      (3),                                 
+         2 ANTENH        PIC       '(7)9',                              
+         2 CENHED        CHAR      (3),                                 
+         2 AENHED        CHAR      (20);                                
+                                                                        
+         IF GEM.CAJOUR = 'S' /* DER SKAL KUN DEBITERES */               
+         THEN                /* I KØRSEL PSA EJ PLADS  */               
+            RETURN;                                                     
+                                                                        
+         SMF.EKOMNR = KOM_OPT(TV_KOM).EÆKNR;                            
+                                                                        
+         LIN_BLANK.CTL =  ZZWS2;                                        
+         LIN_BLANK.F1  = (43)'*'  !!  '  KOMMUNENR '!! SMF.EKOMNR !!    
+                       '  FEJL I HALVAUTO. FAKTURERING SYSTEMAFGIFT  '  
+                       !!  (28)'*';                                     
+                                                                        
+         SMF.EINST  = '000';                                            
+         SMF.ANTENH = KOM_OPT(TV_KOM).TV_SKRIV;                         
+         SMF.CENHED = '901';                                            
+         SMF.AENHED = 'ANT EJD OPLYSNINGER ';                           
+         CALL ZS34900 (SMF);                                            
+                                                                        
+         IF SMF.RETURKODE ^= '00000000'B                                
+         THEN                                                           
+            CALL ZZ20300 (LIN_BLANK,'02');                              
+                                                                        
+ END FAKTURER_KLM;                                                      
+ /*********************************************************************/
+ /*      HALVAUTOMATISK FAKTURERING AF EJENDOMSOPLYSNINGER PÅ USA,    */
+ /*      BSA ELLER PSA. BETALES  K U N  AF TOLD & SKAT PR. RC.        */
+ /*      OBS.: DA KØRSLEN FORETAGES CENTRALT KUN PÅ BC FRA OG MED     */
+ /*            ORD ESKEMA 1999 FAKTURERES 3 GANGE.                    */
+ /*            1 GANG FOR KOMMUNE 101                                 */
+ /*            2 GANG FOR KOMMUNE 751 TIL 756 (ÅKI)                   */
+ /*            3 GANG FOR ØVRIGE KOMMUNER                             */
+ /*********************************************************************/
+ FAKTURER_TS:  PROC;                                                    
+                                                                        
+ DCL   1 SMF,                                                           
+         2 RETURKODE     BIT       (8),                                 
+         2 EKOMNR        PIC       '9999',                              
+         2 EINST         CHAR      (3),                                 
+         2 ANTENH        PIC       '(7)9',                              
+         2 CENHED        CHAR      (3),                                 
+         2 AENHED        CHAR      (20);                                
+                                                                        
+         IF GEM.CAJOUR = 'S' /* DER SKAL KUN DEBITERES */               
+         THEN                /* I KØRSEL PSA EJ PLADS  */               
+            RETURN;                                                     
+                                                                        
+         /* FØRST FOR KØBENHAVNS KOMMUNE */                             
+                                                                        
+         SMF.EKOMNR = 6989; /*T&S*/                                     
+         SMF.EINST  = '100';                                            
+                                                                        
+         LIN_BLANK.CTL =  ZZWS2;                                        
+         LIN_BLANK.F1  = (43)'*'  !!  '  KOMMUNENR '!! SMF.EKOMNR !!    
+                       '  FEJL I HALVAUTO. FAKTURERING EJD.OPLYSN.   '  
+                       !!  (28)'*';                                     
+                                                                        
+         SMF.ANTENH = KOM_OPT(347).TV_SELVANG +                         
+                      KOM_OPT(347).TV_PSA;                              
+         SMF.CENHED = '902';                                            
+         SMF.AENHED = 'ANT EJD OPL PÅ SELV ';                           
+         CALL ZS34900 (SMF);                                            
+                                                                        
+         IF SMF.RETURKODE ^= '00000000'B                                
+         THEN                                                           
+            CALL ZZ20300 (LIN_BLANK,'02');                              
+                                                                        
+                                                                        
+         /* OG SÅ FOR ÅRHUS KOMMUNE */                                  
+                                                                        
+         SMF.EKOMNR = 6989; /*T&S*/                                     
+         SMF.EINST  = '400';                                            
+                                                                        
+         LIN_BLANK.CTL =  ZZWS2;                                        
+         LIN_BLANK.F1  = (43)'*'  !!  '  KOMMUNENR '!! SMF.EKOMNR !!    
+                       '  FEJL I HALVAUTO. FAKTURERING EJD.OPLYSN.   '  
+                       !!  (28)'*';                                     
+                                                                        
+         SMF.ANTENH = KOM_OPT(348).TV_SELVANG +                         
+                      KOM_OPT(348).TV_PSA;                              
+         SMF.CENHED = '902';                                            
+         SMF.AENHED = 'ANT EJD OPL PÅ SELV ';                           
+         CALL ZS34900 (SMF);                                            
+                                                                        
+         IF SMF.RETURKODE ^= '00000000'B                                
+         THEN                                                           
+            CALL ZZ20300 (LIN_BLANK,'02');                              
+                                                                        
+                                                                        
+         /* OG SÅ FOR ØVRIGE KOMMUNER */                                
+                                                                        
+         SMF.EKOMNR = 6989; /*T&S*/                                     
+         SMF.EINST  = '600';                                            
+                                                                        
+         LIN_BLANK.CTL =  ZZWS2;                                        
+         LIN_BLANK.F1  = (43)'*'  !!  '  KOMMUNENR '!! SMF.EKOMNR !!    
+                       '  FEJL I HALVAUTO. FAKTURERING EJD.OPLYSN.   '  
+                       !!  (28)'*';                                     
+                                                                        
+         SMF.ANTENH = KOM_OPT(349).TV_SELVANG +                         
+                      KOM_OPT(349).TV_PSA;                              
+         SMF.CENHED = '902';                                            
+         SMF.AENHED = 'ANT EJD OPL PÅ SELV ';                           
+         CALL ZS34900 (SMF);                                            
+                                                                        
+         IF SMF.RETURKODE ^= '00000000'B                                
+         THEN                                                           
+            CALL ZZ20300 (LIN_BLANK,'02');                              
+                                                                        
+ END FAKTURER_TS;                                                       
+ /********************************************************************* 
+ *            MASKINEL AFSTEMNING                                     * 
+ *********************************************************************/ 
+ MASK_AFSTEMNING:                                                       
+         PROC;                                                          
+      /* RETURN; */                                                     
+                                                                        
+         OPT_SKEMA = '';                                                
+         OPT_SKEMA.SORT_KOMNR = 999;                                    
+         OPT_SKEMA.SORT_EJDNR = 8888888;                                
+         OPT_SKEMA.SORT_CPR = 99999999999;                              
+         OPT_SKEMA.SORT_EÆKNR = 999;                                    
+         OPT_SKEMA.ANT_INDV = ANT_SKEMAER;                              
+         OPT_SKEMA.ANT_SKEMA = ANT_SKEMAER;                             
+         OPT_SKEMA.ANT_KOM = ANT_KOMREG;                                
+         WRITE FILE (BH6201O) FROM (OPT_SKEMA);                         
+                                                                        
+         IF BH611.SORT_KOMNR ^= 999      /* OPTÆLLINGSINDIVID MANGLER */
+         THEN                                                           
+            DO;                                                         
+               CALL AFSTEM_FEJL('1');                                   
+               CALL ZS30101(5,'BH62000 ** 251 ' !!                      
+                        'KONSTATERET AFSTEMNINGSFEJL              ',2); 
+            END;                                                        
+                                                                        
+         IF EX_PARM ^= 'TEST' &                                         
+            BH61199.ANT_INDV ^= ANT_LÆS    /* AFSTEMNINGS FEJL    */    
+         THEN                                                           
+            DO;                                                         
+               CALL AFSTEM_FEJL('2');                                   
+               CALL ZS30101(5,'BH62000 ** 251 ' !!                      
+                        'KONSTATERET AFSTEMNINGSFEJL              ',2); 
+            END;                                                        
+                                                                        
+         RETURN; /* DENNE KONTROL ER OVERFLØDIG */                      
+                                                                        
+         IF EX_PARM ^= 'TEST' &                                         
+            BH61199.ANT_SKEMA ^= KOM_OPT(300).TV_SKRIV                  
+         THEN                                                           
+            DO;                                                         
+               CALL AFSTEM_FEJL('3');                                   
+               CALL ZS30101(5,'BH62000 ** 251 ' !!                      
+                        'KONSTATERET AFSTEMNINGSFEJL              ',2); 
+            END;                                                        
+                                                                        
+ END MASK_AFSTEMNING;                                                   
+ /*********************************************************************/
+ /*      UDSKRIV FEJLLISTE HVIS DER ER KONSTATERET FEJL VED           */
+ /*      MASKINEL AFSTEMNING                                          */
+ /*********************************************************************/
+ AFSTEM_FEJL:                                                           
+         PROC(FEJL);                                                    
+ DCL     FEJL            CHAR      (01);                                
+ DCL     1 FLIN1,                                                       
+           2 CTL         CHAR      (1),                                 
+           2 TX1         CHAR      (9)  INIT ('999 RC = '),             
+           2 RCKODE      CHAR      (1),                                 
+           2 TX2         CHAR      (31) INIT ((31)' '),                 
+           2 TX3         CHAR      (91) INIT                            
+             ('FEJLLISTE VEDR. MASKINEL AFSTEMNING');                   
+ DCL     1 FLIN2,                                                       
+           2 CTL         CHAR      (01),                                
+           2 TEKST       CHAR      (70),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (53)      INIT      (' ');           
+         CALL ZZ20390 ('*OPEN','BH62003Y');                             
+         LIN_BLANK.CTL = ZZIK1;                                         
+         CALL ZZ20300 (LIN_BLANK,'03');                                 
+         CALL ZZ20300 (OVERLIN1,'03');                                  
+         FLIN1.CTL = ZZWS2;                                             
+         FLIN1.RCKODE = '6';                                            
+         CALL ZZ20300 (FLIN1,'03');                                     
+         SELECT (FEJL);                                                 
+            WHEN('1')                   /* OPTÆLLINGSINDIVID MANGER */  
+            DO;                                                         
+               LIN_BLANK.CTL = ZZWS2;                                   
+               LIN_BLANK.F1  = 'OPTÆLLINGSINDIVID MANGLER PÅ B.H61101D';
+               CALL ZZ20300 (LIN_BLANK,'03');                           
+            END;                                                        
+            WHEN('2')                   /* ANTAL LÆSTE STEMMER IKKE */  
+            DO;                                                         
+               FLIN2.CTL   = ZZWS2;                                     
+               FLIN2.TEKST = 'ANTAL LÆSTE RECORDS PÅ B.H61101D';        
+               FLIN2.ANTAL = ANT_LÆS;                                   
+               CALL ZZ20300 (FLIN2,'03');                               
+               FLIN2.CTL   = ZZWS2;                                     
+               FLIN2.TEKST = 'ANTAL RECORDS PÅ B.H61101D IFØLGE OPTÆLLIN
+ GSINDIVID';                                                            
+               FLIN2.ANTAL = BH61199.ANT_INDV;                          
+               CALL ZZ20300 (FLIN2,'03');                               
+            END;                                                        
+            WHEN('3')                   /* ANTAL SKEMAER STEMMER IKKE */
+            DO;                                                         
+               FLIN2.CTL   = ZZWS2;                                     
+               FLIN2.TEKST = 'ANTAL INDIVIDER TIL UDSKRIVNING PÅ USA,BSA
+ ,PSA ELL. EJD.SKEMA ';                                                 
+               FLIN2.ANTAL = KOM_OPT(300).TV_SKRIV;                     
+               CALL ZZ20300 (FLIN2,'03');                               
+               FLIN2.CTL   = ZZWS2;                                     
+               FLIN2.TEKST = 'ANTAL INDIVIDER TIL UDSKRIVNING IFLG. OPTÆ
+ LLINGSINDIVID PÅ B.H61101D';                                           
+               FLIN2.ANTAL = BH61199.ANT_SKEMA;                         
+               CALL ZZ20300 (FLIN2,'03');                               
+            END;                                                        
+         END;    /* SELECT */                                           
+ END AFSTEM_FEJL;                                                       
+         CLOSE FILE (BH611I),                                           
+               FILE (BH6201O),                                          
+               FILE (BH6202O);                                          
+                                                                        
+         CALL ZZ20300 (LIN_BLANK,'99');                                 
+                                                                        
+ END  BH62000;                                                          

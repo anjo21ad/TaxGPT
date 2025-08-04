@@ -1,0 +1,197 @@
+ PROCESS OPT(TIME);                                                     
+ BH21600:   /* FORBRÆNDER OPSÆT ESR_SORTDATO TIL BH21800 */             
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /********************************************************************/ 
+  DCL COPYRIGHT   CHAR (30) STATIC    INIT ('COPYRIGHT KMD A/S 2013');  
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : Datasæt fra ESR indlæses,                                   
+ *          Sortdato tildeles til brug for BH21800                      
+ *                                                                    * 
+ *                                                                    * 
+ * INPUT  : C.N570X0D  UDTRÆK FRA ESR (X=1 HVIS SLUT,X=4 HVIS FORSKUD)* 
+ *                                                                    * 
+ * OUTPUT : ESR UDTRÆK PÅ MED SORTDATO OPSAT                          * 
+ *          BH21601Y   KØRSELSKONTROLLISTE                            * 
+ *                                                                    * 
+ * PROGRAMMØR: LENE MAJ JENSEN   QLE            OKT 2017              * 
+ *********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     CN570I  FILE RECORD INPUT;     /* ESR UDTRÆK */                
+ DCL     CN570O  FILE RECORD OUTPUT;    /* ESR UDTRÆK med sortdato */   
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+ /********************************************************************* 
+ *       DECLARE AF ESR UDTRÆK INPUT                                  * 
+ *********************************************************************/ 
+ DCL     CN570_AR        CHAR      (2000) VAR;                          
+ DCL     1 CN570         BASED     (ADDR(CN570_AR)),                    
+           4 LÆNGDE BIN FIXED (15),                                     
+           %INCLUDE BH31800N;                                           
+                                                                        
+ DCL     OUT_CN570_AR        CHAR      (2000) VAR;                      
+ DCL     1 OUT_CN570         BASED     (ADDR(OUT_CN570_AR)),            
+           4 OUTLÆNGDE BIN FIXED (15),                                  
+           %INCLUDE BH21600N;                                           
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH21600');              
+                                                                        
+ DCL     ANTAL_LÆST         fixed dec (15,0) init (0);                  
+ DCL     ANTAL_SKREVET      fixed dec (15,0) init (0);                  
+                                                                        
+                                                                        
+ DCL     EOF_CN570                 BIT       (1);                       
+                                                                        
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     HJ_DATOEN       PIC  '(8)9';                                   
+ DCL     1 HJ_DATO       BASED(ADDR(HJ_DATOEN)),                        
+           2 AAR         PIC  '9999',                                   
+           2 MD          PIC  '99',                                     
+           2 DG          PIC  '99';                                     
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH21600'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     MOD             BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+                                                                        
+ /********************************************************************* 
+ *       ON CONDITIONS                                                * 
+ *********************************************************************/ 
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         EOF_CN570 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH21600L');             
+            END;                                                        
+                                                                        
+         OPEN FILE (CN570I)  TITLE ('CN57010I');                        
+         ON ENDFILE (CN570I)                                            
+         BEGIN;                                                         
+            EOF_CN570 = JA;                                             
+         END;                                                           
+                                                                        
+         OPEN FILE (CN570O)  TITLE ('CN57010O');                        
+                                                                        
+         CALL ZS38100(DATO1);                                           
+                                                                        
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+                                                                        
+         OUT_CN570 = '';                                                
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         READ FILE (CN570I) INTO (CN570_AR);                            
+                                                                        
+         DO WHILE (EOF_CN570 = NEJ);                                    
+            ANTAL_LÆST = ANTAL_LÆST + 1;                                
+            IF CN570.DCPRCIR < 9999999999                               
+            THEN DO;                                                    
+               CALL BEHANDL;                                            
+               ANTAL_SKREVET = ANTAL_SKREVET + 1;                       
+            END;                                                        
+            READ FILE (CN570I) INTO (CN570_AR);                         
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       BEHANDL EJERE                                                * 
+ *********************************************************************/ 
+ BEHANDL:                                                               
+ PROC;                                                                  
+                                                                        
+         OUT_CN570 = CN570, by name;                                    
+                                                                        
+         IF CN570.DAFSTÅ > 0                                            
+         THEN                                                           
+            OUT_CN570.ESR_SORTDATO = CN570.DAFSTÅ;                      
+         ELSE                                                           
+            OUT_CN570.ESR_SORTDATO = 99991231;                          
+                                                                        
+         OUTLÆNGDE = LÆNGDE + 5; /* gl længde + sortdato */             
+                                                                        
+         WRITE FILE (CN570O) FROM (OUT_CN570_AR);                       
+                                                                        
+ END BEHANDL;                                                           
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      CLOSE AF FILER OG SPOOL                                      */
+ /*********************************************************************/
+ AFSLUT:                                                                
+         PROC;                                                          
+                                                                        
+         put skip list ('Antal læste ESR records: ' !! antal_LÆST);     
+         put skip list ('Antal opdaterede/skrevne ESR records ' !!      
+                                        antal_skrevet);                 
+         CLOSE FILE (CN570I),                                           
+               FILE (CN570O);                                           
+                                                                        
+ END AFSLUT;                                                            
+ END  BH21600;                                                          

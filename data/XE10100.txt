@@ -1,0 +1,447 @@
+  XE10100: PROC(EXECPARM) OPTIONS (MAIN) REORDER;                       
+ /**********************************************************************
+ **                                                                     
+ **     NAVN              -   XE10100                                   
+ **                                                                     
+ **     FUNKTION          -   OPBYG JCL TIL ANALYSE JOB                 
+ **                                                                     
+ **     PROGRAMMØR        -   CLAUS MARCUSSEN, KMO, FEBRUAR 2016        
+ **                                                                     
+ **********************************************************************/
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+                                                                        
+ /**********************************************************************
+ * ØVRIGE FELTER                                                        
+ **********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+                                                                        
+ DCL     ADDR            BUILTIN;                                       
+ DCL     NULL            BUILTIN;                                       
+ DCL     STG             BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     LENGTH          BUILTIN;                                       
+ DCL     PLIRETC         BUILTIN;                                       
+                                                                        
+ DCL     PGNAVN          CHAR (7) INIT ('XE10100');                     
+                                                                        
+ DCL     BPXWDYN EXTERNAL ENTRY OPTIONS(ASM INTER RETCODE);             
+ DCL     TMP     FILE RECORD INPUT;     /* Dynamisk allokering        */
+                                                                        
+ DCL     JCL     FILE RECORD OUTPUT;    /* Genereret JCL              */
+                                                                        
+                                                                        
+ DCL TRUE                    BIT(1) INIT('1'B);                         
+ DCL FALSE                   BIT(1) INIT('0'B);                         
+                                                                        
+       %INCLUDE ZX66600M; /* INTERFACE + DCL AF MEMBER-LÆSERUTINER */   
+                                                                        
+ /**********************************************************************
+ *      DCL DIVERSE                                                     
+ **********************************************************************/
+                                                                        
+ DCL  LIB_PREFIX        CHAR(5) VALUE('CMAN.');                         
+ DCL  LIB_SUFFIX        CHAR(6) VALUE('.BAS0.');                        
+ DCL  TMP_PREFIX        CHAR(8) VALUE('&SYSUID.');                      
+                                                                        
+ DCL  ZMFAPPL           CHAR(4);                                        
+ DCL  RC                BIN FIXED (31)  INIT(0);                        
+                                                                        
+ DCL  1 JCL_DELE(1:10),                                                 
+      5 ANVENDT          FIXED BIN(15)   INIT(0),                       
+      5 JCL_LINJE(1:100) CHAR(80);                                      
+                                                                        
+ DCL  IDX_JOBKORT        FIXED BIN(15)   VALUE(1);                      
+ DCL  IDX_JOBLIB         FIXED BIN(15)   VALUE(2);                      
+ DCL  IDX_REPRO          FIXED BIN(15)   VALUE(3);                      
+ DCL  IDX_SCAN           FIXED BIN(15)   VALUE(4);                      
+ DCL  IDX_SLET           FIXED BIN(15)   VALUE(5);                      
+                                                                        
+ /*********************************************************************/
+ /*                     ON UNITS                                      */
+ /*********************************************************************/
+                                                                        
+     ON ERROR BEGIN;                                                    
+        ON ERROR SYSTEM;                                                
+           FLUSH FILE (*);                                              
+           CALL PLIDUMP ('SHBO');                                       
+     END;                                                               
+                                                                        
+     ON ENDPAGE;                                                        
+                                                                        
+ /**********************************************************************
+ **     HOVEDSTYRING                                                    
+ **********************************************************************/
+                                                                        
+     RC = INITIERING(ZMFAPPL);                                          
+                                                                        
+     CALL DAN_JOBKORT();                                                
+                                                                        
+     CALL DAN_JOBLIB();                                                 
+                                                                        
+     CALL DAN_SCANSTEP();                                               
+                                                                        
+     RC = BEHANDL_SOURCE('INC');                                        
+     RC = BEHANDL_SOURCE('SRB');                                        
+     RC = BEHANDL_SOURCE('SRC');                                        
+     RC = BEHANDL_SOURCE('SRX');                                        
+                                                                        
+     CALL SKRIV_JCL();                                                  
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ INITIERING: PROC(ZMFAPPL) RETURNS(FIXED BIN(31));                      
+                                                                        
+ DCL  ZMFAPPL                CHAR(4);                                   
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+                                                                        
+     RC =  0;                                                           
+                                                                        
+     EX_PARM = EXECPARM;                                                
+     ZMFAPPL = EX_PARM;                                                 
+                                                                        
+     OPEN FILE(JCL) TITLE('SUBJCL');                                    
+                                                                        
+     RETURN(RC);                                                        
+                                                                        
+ END INITIERING;                                                        
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ BEHANDL_SOURCE: PROC(SRCTYPE) RETURNS(FIXED BIN(31));                  
+                                                                        
+ DCL  SRCTYPE                CHAR(3);                                   
+ DCL  DSN_LIBRIAN            CHAR(44) VAR;                              
+ DCL  DSN_PDS                CHAR(44) VAR;                              
+                                                                        
+ DCL  TXT                    CHAR(80);                                  
+ DCL  RC                     BIN FIXED (31)  INIT(0);                   
+                                                                        
+     RC =  0;                                                           
+                                                                        
+     IF FINDES_LIBRIAN(SRCTYPE, DSN_LIBRIAN) THEN                       
+     DO;                                                                
+                                                                        
+ /* Dan repro til PDS datasæt */                                        
+        CALL DAN_REPRO(SRCTYPE, DSN_LIBRIAN, DSN_PDS);                  
+                                                                        
+ /* Dan repro til PDS datasæt */                                        
+        CALL DAN_SLET(SRCTYPE, DSN_PDS);                                
+                                                                        
+ /* Opsæt datasæt */                                                    
+        TXT = '//' !! SRCTYPE !! '      DD  DISP=SHR,DSN=' !!           
+              DSN_PDS !! ',';                                           
+        CALL GEM_JCL(TXT, IDX_SCAN);                                    
+        TXT = '//             DCB=(RECFM=U,BLKSIZE=256)';               
+        CALL GEM_JCL(TXT, IDX_SCAN);                                    
+     END;                                                               
+                                                                        
+     RETURN(RC);                                                        
+                                                                        
+ END BEHANDL_SOURCE;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ FINDES_LIBRIAN: PROC(SRCTYPE, DSNTXT) RETURNS(BIT(1));                 
+                                                                        
+ DCL  SRCTYPE         CHAR(3);                                          
+ DCL  DSNTXT          CHAR(44) VAR  BYADDR;                             
+                                                                        
+ DCL  RC              BIN FIXED (31)  INIT(0);                          
+ DCL  PUNKTUM_POS_1   BIN FIXED (15);                                   
+ DCL  PUNKTUM_POS_2   BIN FIXED (15);                                   
+ DCL  EXISTS          BIT (1);                                          
+                                                                        
+ DCL  DYNSTR          CHAR(255) VAR;                                    
+                                                                        
+  ON UNDEFINEDFILE(TMP)                                                 
+     BEGIN;                                                             
+        EXISTS = FALSE;                                                 
+     END;                                                               
+                                                                        
+     DSNTXT  = TRIM(LIB_PREFIX) !!                                      
+               TRIM(ZMFAPPL) !!                                         
+               TRIM(LIB_SUFFIX) !!                                      
+               TRIM(SRCTYPE);                                           
+     DYNSTR = 'ALLOC FI(TMP) DA(''' !! DSNTXT !! ''') SHR REUSE';       
+                                                                        
+     CALL BPXWDYN(DYNSTR);                                              
+                                                                        
+     EXISTS = TRUE;                                                     
+     OPEN FILE(TMP);                                                    
+     IF EXISTS THEN                                                     
+     DO;                                                                
+        CLOSE FILE(TMP);                                                
+     END;                                                               
+                                                                        
+     RETURN(EXISTS);                                                    
+                                                                        
+ NEVER_CALL_ME: PROC;                                                   
+     RELEASE BPXWDYN;                                                   
+ END NEVER_CALL_ME;                                                     
+                                                                        
+ END FINDES_LIBRIAN;                                                    
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ DAN_JOBKORT: PROC();                                                   
+                                                                        
+ DCL  TXT                    CHAR(80);                                  
+ DCL  JOBNAME                CHAR(8);                                   
+                                                                        
+     JOBNAME = ZMFAPPL !! 'SCNT';                                       
+                                                                        
+     TXT = '//' !! JOBNAME !!                                           
+           ' JOB (59990),''SRC ANALYSE'',MSGCLASS=X,CLASS=T,';          
+     CALL GEM_JCL(TXT, IDX_JOBKORT);                                    
+     TXT = '// NOTIFY=&SYSUID';                                         
+     CALL GEM_JCL(TXT, IDX_JOBKORT);                                    
+                                                                        
+ END DAN_JOBKORT;                                                       
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ DAN_JOBLIB: PROC();                                                    
+                                                                        
+ DCL  TXT                    CHAR(80);                                  
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_JOBLIB);                                     
+     TXT = '//*    JOBLIB';                                             
+     CALL GEM_JCL(TXT, IDX_JOBLIB);                                     
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_JOBLIB);                                     
+                                                                        
+     CALL JOB_STEPLIB('JOBLIB', IDX_JOBLIB);                            
+                                                                        
+ END DAN_JOBLIB;                                                        
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ DAN_SCANSTEP: PROC();                                                  
+                                                                        
+ DCL  TXT                    CHAR(80);                                  
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+     TXT = '//*    UDFØRELSE AF SCAN';                                  
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//XE10000  EXEC PGM=IKJEFT01,DYNAMNBR=20,COND=(8,LT)';      
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     CALL JOB_STEPLIB('STEPLIB', IDX_SCAN);                             
+                                                                        
+     TXT = '//SYSPRINT DD  SYSOUT=X';                                   
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//PLIDUMP  DD  SYSOUT=X';                                   
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//SYSUDUMP DD  SYSOUT=X';                                   
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//SYSTSPRT DD  SYSOUT=X';                                   
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '//SYSTSIN  DD  *';                                          
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = 'DSN SYSTEM(DSNT)';                                          
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = 'RUN PROGRAM(XE10000L) PLAN(KMD00BTB)';                      
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = 'END';                                                       
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+     TXT = '/*';                                                        
+     CALL GEM_JCL(TXT, IDX_SCAN);                                       
+                                                                        
+ END DAN_SCANSTEP;                                                      
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ JOB_STEPLIB: PROC(DDNAVN, IDX);                                        
+                                                                        
+ DCL  DDNAVN          CHAR      (8);                                    
+ DCL  IDX             FIXED BIN(15);                                    
+                                                                        
+ DCL  TXT             CHAR(80);                                         
+                                                                        
+ DCL  ZS61500   ENTRY OPTIONS (ASM INTER);                              
+ DCL  DSNAVN          CHAR      (44);                                   
+ DCL  VOLNUM          CHAR      (6);                                    
+                                                                        
+                                                                        
+     DSNAVN      = '';                                                  
+     VOLNUM      = '';                                                  
+     CALL ZS61500(DDNAVN,DSNAVN,VOLNUM);                                
+                                                                        
+     IF DSNAVN = 'NODDNAME' THEN                                        
+        RETURN;                                                         
+                                                                        
+     TXT = '//' !! DDNAVN !! ' DD  DISP=SHR,DSN=' !! DSNAVN;            
+     CALL GEM_JCL(TXT, IDX);                                            
+                                                                        
+ END JOB_STEPLIB;                                                       
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ DAN_REPRO: PROC(SRCTYPE, DSNIND, DSNUD);                               
+                                                                        
+ DCL  SRCTYPE         CHAR(3);                                          
+ DCL  DSNIND          CHAR(44) VAR;                                     
+ DCL  DSNUD           CHAR(44) VAR;                                     
+ DCL  TXT             CHAR(80);                                         
+                                                                        
+     DSNUD = TMP_PREFIX !!                                              
+             '.' !!                                                     
+             SUBSTR(DSNIND, LENGTH(LIB_PREFIX) + 1) !!                  
+             '.PDS';                                                    
+     PUT SKIP LIST(DSNUD);                                              
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+     TXT = '//*    REPRO AF ' !! SRCTYPE !! ' TIL PDS';                 
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//REPRO' !! SRCTYPE !! ' EXEC PGM=IEBCOPY';                 
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//SYSPRINT DD SYSOUT=*';                                    
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//SYSIN    DD *';                                           
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//SYSUT1   DD DSN=' !! DSNIND !! ',DISP=SHR';               
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//SYSUT2   DD DSN=' !! DSNUD !! ',';                        
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//         DISP=(NEW,CATLG,DELETE),';                       
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//         SPACE=(CYL,(30,30,5),RLSE),';                    
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '//         DCB=(RECFM=FB,LRECL=80,BLKSIZE=27920)';          
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+     TXT = '/*';                                                        
+     CALL GEM_JCL(TXT, IDX_REPRO);                                      
+                                                                        
+ END DAN_REPRO;                                                         
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ DAN_SLET: PROC(SRCTYPE, SLETDSN);                                      
+                                                                        
+ DCL  SRCTYPE         CHAR(3);                                          
+ DCL  SLETDSN         CHAR(44) VAR;                                     
+ DCL  TXT             CHAR(80);                                         
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+     TXT = '//*    SLETNING AF ' !! SRCTYPE !! ' PDS';                  
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+     TXT = '//**********************************' !!                    
+            '**********************************';                       
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+     TXT = '//SLET' !! SRCTYPE !! '  EXEC PGM=IEFBR14';                 
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+     TXT = '//SLET     DD DSN=' !! SLETDSN !! ',';                      
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+     TXT = '//         DISP=(OLD,DELETE)';                              
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+     TXT = '/*';                                                        
+     CALL GEM_JCL(TXT, IDX_SLET);                                       
+                                                                        
+ END DAN_SLET;                                                          
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ GEM_JCL: PROC(JCL, PART);                                              
+                                                                        
+ DCL  JCL             CHAR(80);                                         
+ DCL  IDX             FIXED BIN(15);                                    
+ DCL  PART            FIXED BIN(15);                                    
+                                                                        
+     JCL_DELE(PART).ANVENDT = JCL_DELE(PART).ANVENDT + 1;               
+     IDX = JCL_DELE(PART).ANVENDT;                                      
+                                                                        
+     JCL_DELE(PART).JCL_LINJE(IDX) = JCL;                               
+                                                                        
+ END GEM_JCL;                                                           
+                                                                        
+ /**********************************************************************
+ **                                                                     
+ **********************************************************************/
+                                                                        
+ SKRIV_JCL: PROC();                                                     
+                                                                        
+ DCL  IDX1            FIXED BIN(15);                                    
+ DCL  IDX2            FIXED BIN(15);                                    
+                                                                        
+     IDX1 = 1;                                                          
+     DO WHILE (IDX1 <= 10);                                             
+        IDX2 = 1;                                                       
+        DO WHILE (IDX2 <= JCL_DELE(IDX1).ANVENDT);                      
+           WRITE FILE(JCL) FROM(JCL_DELE(IDX1).JCL_LINJE(IDX2));        
+           PUT SKIP LIST(JCL_DELE(IDX1).JCL_LINJE(IDX2));               
+           IDX2 = IDX2 + 1;                                             
+        END;                                                            
+        IDX1 = IDX1 + 1;                                                
+     END;                                                               
+                                                                        
+ END SKRIV_JCL;                                                         
+                                                                        
+ /*********************************************************************/
+     CLOSE FILE(JCL);                                                   
+                                                                        
+     CALL PLIRETC(RC);                                                  
+                                                                        
+ END XE10100;                                                           

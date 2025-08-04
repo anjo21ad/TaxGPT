@@ -5,16 +5,23 @@
  /********************************************************************* 
  *                                                                     *
  * FORMÅL :                                                            *
- * Programmet skal udtrække alle med CPTYPSLUT = '4' fra BQ30000T og   *
- * BQ31000T.  Dette lagres på dataset.                                 *
- * herefter hentes følgende felter og samtlige data gemmes på dataset  *
- * (denne del mangler endnu)                                           *
- * Der ønskes en fil med CPENSNED1, CSTIBLB, BPENSNED og               *
- * personens alder som skal beregnes ud fra personnummer.              *
+ * Programmet skal udtrække alle personer med                          *
+ *     CPTYPSLUT = '4'          (86)                                   *
+ *     FELT158   = '0'          (63)                                   *
+ *     BEVSGL    > 0            (28)                                   *
+ *     BGLSUM1   > 0            (178)                                  *
+ *     CEJDTYPE  = '1'          (204)                                  *
+ *     FELT759   = '1'          (110)                                  *
+ *     BNETTO    > 0            (37)                                   *
+ *     hvor BNEDSL1 IKKE findes (35)                                   *
+ *     og personen er alderspensionist i indkomståret                  *
+ * til et dataset, samt danne et dataset kun indeholdende cprnr og     *
+ * ejendomsnr                                                          *
  *                                                                     *
  * INPUT  : BQ30000T BQ31000T                                          *
  *                                                                     *
  * OUTPUT : Fil med udtrukne personer                                  *
+ *          Fil med cprnr, kommunenr og ejendomsnr                     *
  *                                                                     *
  * PROGRAMMØR: Lene Maj Jensen, QLE  2016                              *
  * RETTET:                                                             *
@@ -27,31 +34,25 @@
  *                       DECLARE AF REGISTRE                           *
  **********************************************************************/
  DCL     BH4021O FILE RECORD OUTPUT;     /* Udtræk af personer        */
- DCL     BH4022I FILE RECORD INPUT;      /* Udtræk benyttes som input */
- DCL     BH4023O FILE RECORD OUTPUT;     /* Endeligt udtræk */          
+ DCL     BH4022O FILE RECORD OUTPUT;     /* udtrukne cprnr */           
  DCL     SYSPRINT FILE OUTPUT;                                          
  /**********************************************************************
  *       DECLARE AF RECORDS                                            *
  **********************************************************************/
- DCL     UDDATA_EJER         CHAR(376);                                 
+ DCL     UDDATA_EJER         CHAR(1164);                                
  DCL     1 EJER_STRUK_OUT BASED     (ADDR(UDDATA_EJER)),                
-        %INCLUDE BH40200N;                                              
+           %INCLUDE BH40200N;                                           
                                                                         
- DCL     INDDATA_EJER         CHAR(376);                                
- DCL     1 EJER_STRUK_IN BASED     (ADDR(INDDATA_EJER)),                
-        %INCLUDE BH40210N;                                              
-                                                                        
- DCL     UDDATA_OEVR         CHAR(1138);                                
- DCL     1 OEVR_STRUK_OUT BASED     (ADDR(UDDATA_OEVR)),                
-        %INCLUDE BH40220N;                                              
+ DCL     UDDATA_CPR         CHAR(16);                                   
+ DCL     1 CPR_STRUK_OUT BASED     (ADDR(UDDATA_CPR)),                  
+           %INCLUDE BH40230N;                                           
                                                                         
  /**********************************************************************
  *               DECLARE AF DIV. TÆLLEVÆRKER                           *
  **********************************************************************/
                                                                         
- DCL     ANT_UDTR_PART1    FIXED DEC(15,0)    INIT(0);                  
- DCL     ANT_LAEST        FIXED DEC(15,0)    INIT(0);                   
  DCL     ANT_ENDELIGT     FIXED DEC(15,0)    INIT(0);                   
+ DCL     ANT_CPR          FIXED DEC(15,0)    INIT(0);                   
                                                                         
  /********************************************************************* 
  *       DECLARE AF BUILTIN'S                                         * 
@@ -64,6 +65,16 @@
  DCL     ZS30101         ENTRY;                                         
  DCL     ZS61900         ENTRY;                                         
  DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+                                                                        
+ /* beregn alder */                                                     
+ DCL     ZS65100      ENTRY    OPTIONS(INTER ASM);                      
+ DCL     1 ZS651CB,                                                     
+           2 ZS651DAT FIXED BIN(31),                                    
+           2 ZS651RC  FIXED BIN(15);                                    
+                                                                        
+ DCL     1 PARMLIST,                                                    
+           2 CPRPTR   PTR,                                              
+           2 CBPTR    PTR;                                              
  /********************************************************************* 
  *       DECLARE AF DIV. FÆLLESMACROER                                * 
  *********************************************************************/ 
@@ -78,9 +89,25 @@
  DCL     JA              BIT       (1)     INIT('1'B);                  
  DCL     NEJ             BIT       (1)     INIT('0'B);                  
  DCL     EOF_BH4022I     BIT       (1)     INIT('0'B);                  
+                                                                        
+ /* felter hentet fra tabellen */                                       
  DCL     WS_CTYPSLUT     CHAR      (254);                               
- DCL     SQLKODE         PIC '9999';                                    
+ DCL     WS_FELT158      CHAR      (254);                               
+ DCL     WS_BEVSGL       DEC FIXED (15,2);                              
+ DCL     WS_BGLSUM1      DEC FIXED (15,2);                              
+ DCL     WS_BNETTO       DEC FIXED (15,2);                              
+ DCL     WS_CEJDTYPE     CHAR(254);                                     
+ DCL     WS_FELT759      CHAR(254);                                     
+                                                                        
+ DCL     SQLKODE         PIC       '9999';                              
  DCL     HJ_INDKOMSTAAR  CHAR      (4);                                 
+ DCL     RAEKKE_FUNDET   BIT       (1)     INIT('0'B);                  
+ DCL     HJ_ALDER        FIXED     (3);                                 
+ DCL     IX              PIC       '999';                               
+ DCL     HELP_PIC10      PIC '9999999999';                              
+ DCL     HELP_CHAR10     CHAR(10) based(addr(HELP_PIC10));              
+                                                                        
+ DCL     GEM_CPR         PIC '9999999999';                              
                                                                         
  /**********************************************************************
  * DECLARE AF ABEND RUTINE                                             *
@@ -129,23 +156,14 @@
          CALL ZS61900;                          /* UDSKRIVNING AF SSI */
                                                                         
          HJ_INDKOMSTAAR = BH65300M.INDKÅR1;                             
+         PUT SKIP LIST('START BH40200');                                
          PUT SKIP LIST('INDKOMSTÅR : '!!HJ_INDKOMSTAAR);                
                                                                         
  /********************************************************************* 
  *       HOVEDSTYRING                                                 * 
  *********************************************************************/ 
                                                                         
-         /* START PART 1 - Udtræk alle med CPTYPSLUT = 4 */             
-         /*                feltkode 86                   */             
-                                                                        
          CALL HENT_CPTYP4;                                              
-                                                                        
-         /* START PART 2 - Find ønskede felter */                       
-         /* CPENSNED1/FELT759 - feltkode 110   */                       
-         /* CSTIBLB           - feltkode  90   */                       
-         /* BPENSNED          - feltkode  41   */                       
-                                                                        
-         CALL HENT_OEVR_FELTER;                                         
                                                                         
          CALL AFSLUT;                                                   
                                                                         
@@ -154,9 +172,12 @@
  /*********************************************************************/
  HENT_CPTYP4: PROC;                                                     
                                                                         
-         ANT_UDTR_PART1 = 0;                                            
+         ANT_ENDELIGT = 0;                                              
+         ANT_CPR = 0;                                                   
+         GEM_CPR = 0;                                                   
                                                                         
          OPEN FILE (BH4021O) TITLE ('BH40201O');                        
+         OPEN FILE (BH4022O) TITLE ('BH40202O');                        
                                                                         
          CALL DECLARE_EJER_CUR;                                         
          CALL OPEN_EJER_CUR;                                            
@@ -165,8 +186,25 @@
            WHEN (0)                                                     
              DO;                                                        
                DO WHILE (SQLCA.SQLCODE = 0);                            
-                  CALL SKRIV_EJER;                                      
-                  CALL FETCH_EJER_CUR;                                  
+                 /* beregn alder på person - skriv kun hvis */          
+                 /* alderspensionist                        */          
+                 CALL ALDER (EJER_STRUK_OUT.DCPRN);                     
+                 EJER_STRUK_OUT.ALDER         = HJ_ALDER;               
+                 IF HJ_ALDER >= 65                                      
+                   THEN                                                 
+                     DO;                                                
+                       WRITE FILE (BH4021O) FROM (UDDATA_EJER);         
+                       ANT_ENDELIGT = ANT_ENDELIGT + 1;                 
+                       /* dataset kun med cprnr dannes her        */    
+                       /* med en række pr ejendom for cprnr       */    
+                       HELP_PIC10 = EJER_STRUK_OUT.DCPRN;               
+                       CPR_STRUK_OUT.DCPRN         = HELP_CHAR10;       
+                       CPR_STRUK_OUT.EKOMNR = EJER_STRUK_OUT.EKOMNR;    
+                       CPR_STRUK_OUT.EEJDNR = EJER_STRUK_OUT.EEJDNR;    
+                       WRITE FILE (BH4022O) FROM (UDDATA_CPR);          
+                       ANT_CPR = ANT_CPR + 1;                           
+                    END;                                                
+                 CALL FETCH_EJER_CUR;                                   
                END;                                                     
              END;                                                       
            WHEN (100);                                                  
@@ -179,54 +217,9 @@
          CALL CLOSE_EJER_CUR;                                           
                                                                         
          CLOSE FILE (BH4021O);                                          
+         CLOSE FILE (BH4022O);                                          
                                                                         
  END HENT_CPTYP4;                                                       
-                                                                        
- /*********************************************************************/
- /* Hent Øvrige felter til record                                     */
- /*********************************************************************/
- HENT_OEVR_FELTER: PROC;                                                
-                                                                        
-         ANT_LAEST = 0;                                                 
-         ANT_ENDELIGT = 0;                                              
-                                                                        
-         OPEN FILE (BH4022I) TITLE ('BH40202I');                        
-         OPEN FILE (BH4023O) TITLE ('BH40203O');                        
-                                                                        
-         /* indlæg hent af felter og dan dataset */                     
-                                                                        
-         ON  ENDFILE (BH4022I)                                          
-         BEGIN;                                                         
-            EOF_BH4022I  = '1'B;                                        
-         END;                                                           
-                                                                        
-         READ FILE (BH4022I) INTO  (INDDATA_EJER);                      
-                                                                        
-         DO WHILE (^EOF_BH4022I);                                       
-            ANT_LAEST = ANT_LAEST + 1;                                  
-            OEVR_STRUK_OUT.DINDKAAR      = EJER_STRUK_IN.DINDKAAR;      
-            OEVR_STRUK_OUT.DCPRN         = EJER_STRUK_IN.DCPRN;         
-            OEVR_STRUK_OUT.EKOMNR        = EJER_STRUK_IN.EKOMNR;        
-            OEVR_STRUK_OUT.EEJDNR        = EJER_STRUK_IN.EEJDNR;        
-            OEVR_STRUK_OUT.ELBNR         = EJER_STRUK_IN.ELBNR;         
-            OEVR_STRUK_OUT.EGENNR        = EJER_STRUK_IN.EGENNR;        
-            OEVR_STRUK_OUT.DFRAGLD       = EJER_STRUK_IN.DFRAGLD;       
-            OEVR_STRUK_OUT.DTILGLD       = EJER_STRUK_IN.DTILGLD;       
-            OEVR_STRUK_OUT.DBRGN_MODT    = EJER_STRUK_IN.DBRGN_MODT;    
-            OEVR_STRUK_OUT.CSCREGISTMP   = EJER_STRUK_IN.CSCREGISTMP;   
-            OEVR_STRUK_OUT.CTYPSLUT      = EJER_STRUK_IN.CTYPSLUT;      
-            OEVR_STRUK_OUT.CPENSNED1     = 'XX1XX';                     
-            OEVR_STRUK_OUT.CSTIBLB       = 'XX2XX';                     
-            OEVR_STRUK_OUT.BPENSNED      = 'XX3XX';                     
-            WRITE FILE (BH4023O) FROM (UDDATA_OEVR);                    
-            ANT_ENDELIGT = ANT_ENDELIGT + 1;                            
-            READ FILE (BH4022I) INTO  (INDDATA_EJER);                   
-         END;                                                           
-                                                                        
-         CLOSE FILE (BH4022I);                                          
-         CLOSE FILE (BH4023O);                                          
-                                                                        
- END HENT_OEVR_FELTER;                                                  
                                                                         
  /*********************************************************************/
  /* OPEN CURSOR TIL LÆS AF BQ30000T                            RUTINE */
@@ -277,24 +270,77 @@
                 T1.DTILGLD,                                             
                 T1.DBRGN_MODT,                                          
                 T1.CSCREGISTMP,                                         
-                T3.INDHOLD_C                                            
-         FROM BQ30000T T1, BQ31000T T3                                  
+                T3.INDHOLD_C,                                           
+                T4.INDHOLD_C,                                           
+                T5.INDHOLD_D,                                           
+                T6.INDHOLD_D,                                           
+                T8.INDHOLD_C,                                           
+                T9.INDHOLD_C,                                           
+                T37.INDHOLD_D                                           
+         FROM BQ30000T T1, BQ31000T T3, BQ31000T T4                     
+             ,BQ31000T T5, BQ31000T T6                                  
+             ,BQ31000T T8, BQ31000T T9                                  
+             ,BQ31000T T37                                              
          WHERE T1.DINDKAAR   = :HJ_INDKOMSTAAR                          
-           AND T1.DTILGLD    = '9999-12-31-23.59.59.999999'             
-           AND T1.EGENNR     = (SELECT MAX(T2.EGENNR)                   
-                                FROM BQ30000T T2                        
-                                WHERE T2.DINDKAAR      = T1.DINDKAAR    
-                                  AND T2.DCPRN         = T1.DCPRN       
-                                  AND T2.EKOMNR        = T1.EKOMNR      
-                                  AND T2.EEJDNR        = T1.EEJDNR      
-                                  AND T2.ELBNR         = T1.ELBNR)      
+           AND T1.EGENNR = 1                                            
            AND T3.DINDKAAR = T1.DINDKAAR                                
            AND T3.DCPRN    = T1.DCPRN                                   
            AND T3.EKOMNR   = T1.EKOMNR                                  
            AND T3.EEJDNR   = T1.EEJDNR                                  
            AND T3.ELBNR    = T1.ELBNR                                   
            AND T3.EGENNR   = T1.EGENNR                                  
-           AND (T3.FELTKODE = 86 AND T3.INDHOLD_C IN('4'))              
+           AND (T3.FELTKODE = 86 AND T3.INDHOLD_C = '4')                
+           AND T4.DINDKAAR = T1.DINDKAAR                                
+           AND T4.DCPRN    = T1.DCPRN                                   
+           AND T4.EKOMNR   = T1.EKOMNR                                  
+           AND T4.EEJDNR   = T1.EEJDNR                                  
+           AND T4.ELBNR    = T1.ELBNR                                   
+           AND T4.EGENNR   = T1.EGENNR                                  
+           AND (T4.FELTKODE = 63 AND T4.INDHOLD_C = '0')                
+           AND T5.DINDKAAR = T1.DINDKAAR                                
+           AND T5.DCPRN    = T1.DCPRN                                   
+           AND T5.EKOMNR   = T1.EKOMNR                                  
+           AND T5.EEJDNR   = T1.EEJDNR                                  
+           AND T5.ELBNR    = T1.ELBNR                                   
+           AND T5.EGENNR   = T1.EGENNR                                  
+           AND (T5.FELTKODE = 28 AND T5.INDHOLD_D > 0)                  
+           AND T6.DINDKAAR = T1.DINDKAAR                                
+           AND T6.DCPRN    = T1.DCPRN                                   
+           AND T6.EKOMNR   = T1.EKOMNR                                  
+           AND T6.EEJDNR   = T1.EEJDNR                                  
+           AND T6.ELBNR    = T1.ELBNR                                   
+           AND T6.EGENNR   = T1.EGENNR                                  
+           AND (T6.FELTKODE = 178 AND T6.INDHOLD_D > 0)                 
+           AND T8.DINDKAAR = T1.DINDKAAR                                
+           AND T8.DCPRN    = T1.DCPRN                                   
+           AND T8.EKOMNR   = T1.EKOMNR                                  
+           AND T8.EEJDNR   = T1.EEJDNR                                  
+           AND T8.ELBNR    = T1.ELBNR                                   
+           AND T8.EGENNR   = T1.EGENNR                                  
+           AND (T8.FELTKODE = 204 AND T8.INDHOLD_C = '1')               
+           AND T9.DINDKAAR = T1.DINDKAAR                                
+           AND T9.DCPRN    = T1.DCPRN                                   
+           AND T9.EKOMNR   = T1.EKOMNR                                  
+           AND T9.EEJDNR   = T1.EEJDNR                                  
+           AND T9.ELBNR    = T1.ELBNR                                   
+           AND T9.EGENNR   = T1.EGENNR                                  
+           AND (T9.FELTKODE = 110 AND T9.INDHOLD_C = '1')               
+           AND 0 = (select count(*)                                     
+                 from BQ31000T T35                                      
+                 where T35.DINDKAAR = T1.DINDKAAR                       
+                   AND T35.DCPRN    = T1.DCPRN                          
+                   AND T35.EKOMNR   = T1.EKOMNR                         
+                   AND T35.EEJDNR   = T1.EEJDNR                         
+                   AND T35.ELBNR    = T1.ELBNR                          
+                   AND T35.EGENNR   = T1.EGENNR                         
+                   AND T35.FELTKODE = 35)                               
+           AND T37.DINDKAAR = T1.DINDKAAR                               
+           AND T37.DCPRN    = T1.DCPRN                                  
+           AND T37.EKOMNR   = T1.EKOMNR                                 
+           AND T37.EEJDNR   = T1.EEJDNR                                 
+           AND T37.ELBNR    = T1.ELBNR                                  
+           AND T37.EGENNR   = T1.EGENNR                                 
+           AND (T37.FELTKODE = 37 AND T37.INDHOLD_D > 0)                
          ORDER BY T1.DCPRN,                                             
                   T1.EKOMNR,                                            
                   T1.EEJDNR,                                            
@@ -322,7 +368,13 @@
               :EJER_TABEL.DTILGLD,                                      
               :EJER_TABEL.DBRGN_MODT,                                   
               :EJER_TABEL.CSCREGISTMP,                                  
-              :WS_CTYPSLUT;                                             
+              :WS_CTYPSLUT,                                             
+              :WS_FELT158,                                              
+              :WS_BEVSGL,                                               
+              :WS_BGLSUM1,                                              
+              :WS_CEJDTYPE,                                             
+              :WS_FELT759,                                              
+              :WS_BNETTO;                                               
                                                                         
                                                                         
          SELECT(SQLCA.SQLCODE);                                         
@@ -339,6 +391,12 @@
                 EJER_STRUK_OUT.DBRGN_MODT    = EJER_TABEL.DBRGN_MODT;   
                 EJER_STRUK_OUT.CSCREGISTMP   = EJER_TABEL.CSCREGISTMP;  
                 EJER_STRUK_OUT.CTYPSLUT      = WS_CTYPSLUT;             
+                EJER_STRUK_OUT.FELT158       = WS_FELT158;              
+                EJER_STRUK_OUT.BEVSGL        = WS_BEVSGL;               
+                EJER_STRUK_OUT.BGLSUM1       = WS_BGLSUM1;              
+                EJER_STRUK_OUT.CEJDTYPE      = WS_CEJDTYPE;             
+                EJER_STRUK_OUT.FELT759       = WS_FELT759;              
+                EJER_STRUK_OUT.BNETTO        = WS_BNETTO;               
               END;                                                      
             WHEN(100)                                                   
               DO;                                                       
@@ -353,12 +411,36 @@
  END FETCH_EJER_CUR;                                                    
                                                                         
  /*********************************************************************/
- SKRIV_EJER: PROC;                                                      
+ /*      REGNER ALDEREN UD VED HJÆLP AF STANDARDRUTINEN OG ET PNR     */
+ /*********************************************************************/
+ ALDER:  PROC(DCPRN) RETURNS(FIXED(3));                                 
+ DCL     FGAMMEL      FIXED(3);                                         
+ DCL     HJDCPRN      FIXED(11);                                        
+ DCL     DCPRN        FIXED(11);                                        
+ DCL     DCPRNP       PIC'9999999999';                                  
+ DCL     DCPRNC       CHAR(10) BASED(ADDR(DCPRNP));                     
+ DCL     1 HJDCPRNP  BASED(ADDR(DCPRNP)),                               
+           2 DD     PIC'99',                                            
+           2 MM     PIC'99',                                            
+           2 ÅR     PIC'99',                                            
+           2 LBN    PIC'9999';                                          
                                                                         
-         WRITE FILE (BH4021O) FROM (UDDATA_EJER);                       
-         ANT_UDTR_PART1 = ANT_UDTR_PART1 + 1;                           
+         DCPRNP = DCPRN;                                                
                                                                         
- END SKRIV_EJER;                                                        
+         IF DCPRNP > 4020000000                                         
+         THEN                                                           
+            DCPRNP = DCPRNP - 4020000000;                               
+                                                                        
+         CPRPTR = ADDR(DCPRNC);                                         
+         CBPTR  = ADDR(ZS651CB);                                        
+         CALL ZS65100(DCPRNC,ZS651CB);                                  
+                                                                        
+         FGAMMEL = (20170000 - ZS651DAT)/10000;                         
+                                                                        
+         HJ_ALDER = FGAMMEL;                                            
+                                                                        
+         RETURN(FGAMMEL);                                               
+ END ALDER;                                                             
                                                                         
  /*********************************************************************/
  /* HER UDSKRIVES SQL FEJL                                     RUTINE */
@@ -378,10 +460,8 @@
  *********************************************************************/ 
  AFSLUT: PROC;                                                          
                                                                         
-       PUT SKIP LIST('ANTAL UDTRUKKET CPTYPSLUT4 : '!!ANT_UDTR_PART1);  
-       PUT SKIP LIST('ANTAL LÆST FRA 1.UDTRÆK    : '!!ANT_LAEST);       
-       PUT SKIP LIST('ANTAL I ENDELIGT UDTRÆK    : '!!ANT_ENDELIGT);    
+       PUT SKIP LIST('ANTAL RECORDS DANNET I UDTRÆK: ' !!ANT_ENDELIGT); 
+       PUT SKIP LIST('FORDELT PÅ ' !! ANT_CPR !! ' CPRNUMRE');          
                                                                         
  END AFSLUT;                                                            
-                                                                        
  END  BH40200;                                                          

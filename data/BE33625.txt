@@ -1,0 +1,2099 @@
+ BE33625: PROCEDURE OPTIONS (MAIN);                                     
+ /********************************************************************/ 
+ /* Projekt:     EVS Forskud / EVS Slut                              */ 
+ /* Programnavn: BE33625                                             */ 
+ /* Programtype: Batch                                               */ 
+ /* Funktion:    Forbrænder program, som forbereder opsætningen af   */ 
+ /*              lejlighedsnummer for 2-familiehuse (ejendomstype 4  */ 
+ /*              eller 5) pr indkomstår og EVS-kørsel (Slut eller    */ 
+ /*              Forskud). Dvs. rækker der mangler i tabellerne:     */ 
+ /*                 EVS-ejerboligfordelingstabel (BE80000T)          */ 
+ /*                 EVS-enhedsløbenummertabel (BE80200T)             */ 
+ /*              insertes.                                           */ 
+ /*                                                                  */ 
+ /* Input:       CN570I   - Grund- eller supplementsleverancen       */ 
+ /*                         fra ESR/VUR (CN57000)                    */ 
+ /*                                                                  */ 
+ /*              BE336P   - Parameter fil - Find EVS Kørsel type     */ 
+ /*                                                                  */ 
+ /*              BE336I   - Parameter fil - Hvad skal forberedes:    */ 
+ /*                            Hvis filen BE336I ikke findes         */ 
+ /*                               Afvikles proc BEH_FT1, BEH_FT2     */ 
+ /*                               og BEH_FT4                         */ 
+ /*                            ellers                                */ 
+ /*                               Afvikles de valgte BEH_* proc      */ 
+ /*                                                                  */ 
+ /*              DEBUGI   - Skal programmet debugge (put skip):      */ 
+ /*                            Hvis filen DEBUGI ikke findes         */ 
+ /*                               Ingen debug                        */ 
+ /*                            ellers                                */ 
+ /*                               Debug de valgte BEH_* proc         */ 
+ /*                                                                  */ 
+ /*              BE80100T - EVS-ejerboligfordelingsnummertabel (DB2) */ 
+ /*                                                                  */ 
+ /* I-O:         BE80000T - EVS-ejerboligfordelingstabel (DB2)       */ 
+ /*                                                                  */ 
+ /*              BE80200T - EVS-enhedsløbenummertabel (DB2)          */ 
+ /*                                                                  */ 
+ /*------------------------------------------------------------------*/ 
+ /*                                                                  */ 
+ /* Oprettet:    Gitte Jensen, GJN                        11-09-2018 */ 
+ /*                                                                  */ 
+ /* Rettelse #01: Gitte Jensen, GJN                       25-01-2019 */ 
+ /*               Nye felter NY_VURDERING & NY_VURDERING i BE33701M  */ 
+ /* Rettelse #02: Edward Laryea, EDL                     22-03-2019  */ 
+ /*               Nyt felt STRAKS_EVS i BE31800N                     */ 
+ /* Rettelse #03  Esben Brodersen                        17-04-2019  */ 
+ /*               defect 258 fra slut 2018                           */ 
+ /* Rettelse #04  Esben Brodersen                        25-06-2019  */ 
+ /*               defect 252 fra slut 2018                           */ 
+ /*               Sammenligning på CHAR felter som ETAGE_EJEB        */ 
+ /*               skal kunne matche ' 1' med '01'                    */ 
+ /* Rettelse #05  Esben Brodersen                        30-10-2019  */ 
+ /*               defect 2 fra Forskud 2                             */ 
+ /*               Rettet LTRIM til TRIM ved sammenligning af char    */ 
+ /*               db2 felter                                         */ 
+ /* Forskud2021   Per Brunk                              mar 2020    */ 
+ /*               Nye felter i BE31800N VURMARK og VUR2001           */ 
+ /*               Per Brunk                              aug 2020    */ 
+ /*               Ændret vedr. D245 (BEH_FT4)                        */ 
+ /* Slut 2020 : Per Brunk PBR Ny struktur BE31800N          Okt 2020 */ 
+ /* Slut 2020 : Elena Flygenring EFL                     marts 2021  */ 
+ /*             - Ny kopi af BE33600                                 */ 
+ /*             - Ny struktur BE31822N i stedet for BE31821N         */ 
+ /*             - struktur BE65300M erstattes med BE55300M           */ 
+ /*             - Brug af FILE BE337P og BE337_PARM fjernes          */ 
+ /*             - BE337_PARM.FS_MARK fjernes                         */ 
+ /*             - BE337_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes*/ 
+ /*               Erstattes med brug af BE55300M.AFVIKLINGS_ID       */ 
+ /*             - BE80300T og BE80400T: nyt felt DATA_ID tilføjet    */ 
+ /* Forskud2021   Tina Carstens, TIC                 BF17 15.05.2023 */ 
+ /*               Årsrulning                                         */ 
+ /* Forskud2025   Jan Jensen, JJJ                         18.06.2024 */ 
+ /*             - BE55600M erstatter BE55300M                        */ 
+ /********************************************************************/ 
+                                                                        
+ DCL   COPYRIGHT       CHAR(30)       INIT ('(C) KMD A/S 2018');        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT KALD AF EKSTERNE MODULER */ 
+                                                                        
+ /********************************************************************/ 
+ /* Builtin functions                                                */ 
+ /********************************************************************/ 
+ DCL   ADDR            BUILTIN;                                         
+ DCL   NULL            BUILTIN;                                         
+ DCL   PLIDUMP         BUILTIN;                                         
+                                                                        
+ /********************************************************************/ 
+ /* CN570I - Grund- eller supplementsleverancen fra ESR/VUR (CN57000)*/ 
+ /********************************************************************/ 
+ DCL   CN570I          FILE RECORD INPUT;                               
+                                                                        
+ DCL   CN570_AREA      CHAR(2000) VAR;                                  
+                                                                        
+ DCL 1 CN570           BASED(ADDR(CN570_AREA)),                         
+       4 CN570_LENGTH  FIXED BIN(15),                                   
+         %INCLUDE BE31825N;  /* RUL */                                  
+                                                                        
+ /********************************************************************/ 
+ /* BE336I - Hvad skal forberedes                                    */ 
+ /********************************************************************/ 
+ DCL   BE336I          FILE RECORD INPUT;                               
+                                                                        
+ DCL 1 BE336_REC,                                                       
+       3 BE336_FT1     CHAR(1),                                         
+       3 BE336_FT2     CHAR(1),                                         
+       3 BE336_EG3     CHAR(1),                                         
+       3 BE336_FT4     CHAR(1),                                         
+       3 BE336_EG4     CHAR(1),                                         
+       3 BE336_FILLER1 CHAR(75);                                        
+                                                                        
+ /********************************************************************/ 
+ /* DEBUGI - Skal programmet debugge (put skip)                      */ 
+ /********************************************************************/ 
+ DCL   DEBUGI          FILE RECORD INPUT;                               
+                                                                        
+ DCL 1 DEBUG_REC,                                                       
+       3 DEBUG_FT1     CHAR(1),                                         
+       3 DEBUG_FT2     CHAR(1),                                         
+       3 DEBUG_EG3     CHAR(1),                                         
+       3 DEBUG_FT4     CHAR(1),                                         
+       3 DEBUG_EG4     CHAR(1),                                         
+       3 DEBUG_FILLER1 CHAR(1),                                         
+       3 DEBUG_FROM    PIC'(7)9',                                       
+       3 DEBUG_FILLER2 CHAR(1),                                         
+       3 DEBUG_TO      PIC'(7)9',                                       
+       3 DEBUG_FILLER3 CHAR(59);                                        
+                                                                        
+ /********************************************************************/ 
+ /* Interne arbejdsfelter                                            */ 
+ /********************************************************************/ 
+ DCL JA                BIT(01)        INIT('1'B);                       
+ DCL NEJ               BIT(01)        INIT('0'B);                       
+ DCL EVS_FORSKUD       BIT(01)        INIT('0'B);                       
+ DCL EVS_SLUT          BIT(01)        INIT('0'B);                       
+ DCL EVS_SUPPL         BIT(01)        INIT('0'B);                       
+ DCL FLERE_FT1         BIT(01)        INIT('1'B);                       
+ DCL FLERE_FT2         BIT(01)        INIT('1'B);                       
+ DCL FLERE_EG3         BIT(01)        INIT('1'B);                       
+ DCL FLERE_FT4         BIT(01)        INIT('1'B);                       
+ DCL FLERE_EG4         BIT(01)        INIT('1'B);                       
+ DCL CALL_FT1          BIT(01)        INIT('1'B);                       
+ DCL CALL_FT2          BIT(01)        INIT('1'B);                       
+ DCL CALL_EG3          BIT(01)        INIT('1'B);                       
+ DCL CALL_FT4          BIT(01)        INIT('1'B);                       
+ DCL CALL_EG4          BIT(01)        INIT('1'B);                       
+ DCL EN_EJERBOLIG      BIT(01)        INIT('0'B);                       
+ DCL TO_EJERBOLIG      BIT(01)        INIT('0'B);                       
+ DCL GL_VURDERING      BIT(01)        INIT('0'B); /*#01*/               
+ DCL NY_VURDERING      BIT(01)        INIT('0'B); /*#01*/               
+ DCL BE800_NOTFND      BIT(01)        INIT('0'B);                       
+ DCL PUTSKIP_THIS      BIT(01)        INIT('0'B);                       
+                                                                        
+ DCL PARM_J            CHAR(1)        INIT('J');                        
+ DCL PARM_N            CHAR(1)        INIT('N');                        
+                                                                        
+ DCL EVS_KOERSEL       CHAR(07)       INIT(' ');                        
+ DCL EVS_KOERSEL_F     CHAR(07)       INIT('FORSKUD');                  
+ DCL EVS_KOERSEL_S     CHAR(07)       INIT('SLUT   ');                  
+ DCL EVS_KOERSEL_U     CHAR(07)       INIT('SUPPL  ');                  
+                                                                        
+ DCL INDKAAR           CHAR(04)       INIT('');                         
+ DCL AFVIKL_ID         CHAR(16)       INIT('');                         
+ DCL EJDTYPE           CHAR(01)       INIT('');                         
+ DCL ENHEDLBNR         FIXED BIN(15)  INIT(0);                          
+                                                                        
+ DCL HANDLE_FT1        CHAR(03)       INIT('FT1');                      
+ DCL HANDLE_FT2        CHAR(03)       INIT('FT2');                      
+ DCL HANDLE_EG3        CHAR(03)       INIT('EG3');                      
+ DCL HANDLE_FT4        CHAR(03)       INIT('FT4');                      
+ DCL HANDLE_EG4        CHAR(03)       INIT('EG4');                      
+                                                                        
+ DCL CONDCODE          FIXED BIN(31)  INIT(0);                          
+ DCL DISP_1            PIC'9'         INIT(0);                          
+                                                                        
+ DCL DISP_4_X          CHAR(04)       INIT('');                         
+ DCL DISP_4        BASED(ADDR(DISP_4_X))                                
+                       PIC'-(3)9';                                      
+                                                                        
+ DCL PROGRAM_TXT       CHAR(15)       INIT('Program BE33625');          
+ DCL PROC_TXT          CHAR(05)       INIT('Proc ');                    
+ DCL START_TXT         CHAR(08)       INIT(' startet');                 
+ DCL SLUT_TXT          CHAR(08)       INIT(' sluttet');                 
+ DCL DEBUG_TXT         CHAR(12)       INIT('*** DEBUG - ');             
+ DCL FOUND_TXT_1       CHAR(12)       INIT(' - FOUND(1) ');             
+ DCL FOUND_TXT_2       CHAR(12)       INIT(' - FOUND(2) ');             
+ DCL NOTFND_TXT_1      CHAR(12)       INIT(' - NOTFND(1)');             
+ DCL NOTFND_TXT_2      CHAR(12)       INIT(' - NOTFND(2)');             
+ DCL INSERT_TXT        CHAR(12)       INIT(' - INSERT   ');             
+ DCL INSERT_TXT_1      CHAR(12)       INIT(' - INSERT(1)');             
+ DCL INSERT_TXT_2      CHAR(12)       INIT(' - INSERT(2)');             
+ DCL UPDATE_TXT        CHAR(12)       INIT(' - UPDATE   ');             
+ DCL FETCH_TXT         CHAR(12)       INIT(' - FETCH    ');             
+ DCL FEJL_TXT          CHAR(12)       INIT('### FEJL  - ');             
+                                                                        
+ DCL DISP_X            CHAR(44)       INIT('');                         
+                                                                        
+ DCL 1 DISP_DATA   BASED(ADDR(DISP_X)),                                 
+       3 DISP_EJERBO   CHAR(02),                                        
+       3 DISP_FILLER1  CHAR(01),                                        
+       3 DISP_EKOMNR   PIC'(4)9',                                       
+       3 DISP_FILLER2  CHAR(01),                                        
+       3 DISP_EEJDNR   PIC'(8)9',                                       
+       3 DISP_FILLER3  CHAR(01),                                        
+       3 DISP_VEJRK    PIC'(4)9',                                       
+       3 DISP_FILLER4  CHAR(01),                                        
+       3 DISP_HUSNR    CHAR(04),                                        
+       3 DISP_FILLER5  CHAR(01),                                        
+       3 DISP_ETAGE    CHAR(02),                                        
+       3 DISP_FILLER6  CHAR(01),                                        
+       3 DISP_DØRNR    CHAR(04),                                        
+       3 FILLER7       CHAR(01),                                        
+       3 DISP_ENHED    PIC'(4)9',                                       
+       3 FILLER8       CHAR(01),                                        
+       3 DISP_STATUS   CHAR(04);                                        
+                                                                        
+ DCL COMMIT_VALUE      PIC'(7)9'      INIT(10000);                      
+ DCL COMMIT_COUNT      PIC'(7)9'      INIT(0);                          
+ DCL COMMIT_NR         PIC'(7)9'      INIT(0);                          
+                                                                        
+ DCL FT1_READ          PIC'(7)9'      INIT(0);                          
+ DCL FT1_READ_EN       PIC'(7)9'      INIT(0);                          
+ DCL FT1_READ_TO       PIC'(7)9'      INIT(0);                          
+ DCL FT1_READ_REST     PIC'(7)9'      INIT(0);                          
+ DCL FT1_SEL           PIC'(7)9'      INIT(0);                          
+ DCL FT1_SEL_EN        PIC'(7)9'      INIT(0);                          
+ DCL FT1_SEL_TO_1      PIC'(7)9'      INIT(0);                          
+ DCL FT1_SEL_TO_2      PIC'(7)9'      INIT(0);                          
+ DCL FT1_NOT_EN        PIC'(7)9'      INIT(0);                          
+ DCL FT1_NOT_TO_1      PIC'(7)9'      INIT(0);                          
+ DCL FT1_NOT_TO_2      PIC'(7)9'      INIT(0);                          
+ DCL FT1_INS           PIC'(7)9'      INIT(0);                          
+ DCL FT1_INS_EN        PIC'(7)9'      INIT(0);                          
+ DCL FT1_INS_TO_1      PIC'(7)9'      INIT(0);                          
+ DCL FT1_INS_TO_2      PIC'(7)9'      INIT(0);                          
+                                                                        
+ DCL FT2_FET           PIC'(7)9'      INIT(0);                          
+ DCL FT2_FET_1         PIC'(7)9'      INIT(0);                          
+ DCL FT2_FET_2         PIC'(7)9'      INIT(0);                          
+ DCL FT2_INS           PIC'(7)9'      INIT(0);                          
+ DCL FT2_INS_1         PIC'(7)9'      INIT(0);                          
+ DCL FT2_INS_2         PIC'(7)9'      INIT(0);                          
+ DCL FT2_INS_803      PIC'(7)9'      INIT(0);                           
+                                                                        
+ DCL EG3_FET           PIC'(7)9'      INIT(0);                          
+ DCL EG3_FET_1         PIC'(7)9'      INIT(0);                          
+ DCL EG3_FET_2         PIC'(7)9'      INIT(0);                          
+ DCL EG3_INS           PIC'(7)9'      INIT(0);                          
+ DCL EG3_INS_1         PIC'(7)9'      INIT(0);                          
+ DCL EG3_INS_2         PIC'(7)9'      INIT(0);                          
+ DCL EG3_INS_803      PIC'(7)9'      INIT(0);                           
+                                                                        
+ DCL FT4_FET           PIC'(7)9'      INIT(0);                          
+ DCL FT4_FET_1         PIC'(7)9'      INIT(0);                          
+ DCL FT4_FET_2         PIC'(7)9'      INIT(0);                          
+ DCL FT4_UPD           PIC'(7)9'      INIT(0);                          
+ DCL FT4_UPD_1         PIC'(7)9'      INIT(0);                          
+ DCL FT4_UPD_2         PIC'(7)9'      INIT(0);                          
+                                                                        
+ DCL EG4_FET           PIC'(7)9'      INIT(0);                          
+ DCL EG4_FET_1         PIC'(7)9'      INIT(0);                          
+ DCL EG4_FET_2         PIC'(7)9'      INIT(0);                          
+ DCL EG4_UPD           PIC'(7)9'      INIT(0);                          
+ DCL EG4_UPD_1         PIC'(7)9'      INIT(0);                          
+ DCL EG4_UPD_2         PIC'(7)9'      INIT(0);                          
+                                                                        
+ /********************************************************************/ 
+ /* Standard rutiner                                                 */ 
+ /********************************************************************/ 
+ DCL   ZS61900         ENTRY;          /* Udskrivning af SSI         */ 
+ DCL   ZS30101         ENTRY;          /* Abendrutine                */ 
+ DCL   ZS67000         ENTRY;          /* Hent sql tekster           */ 
+                                                                        
+ DCL 1 BE55600M,                       /* Ajourfør mini MT-fil til   */ 
+       %INCLUDE BE55600M;              /* EVS forskud eller EVS slut */ 
+                                                                        
+ DCL 1 ABEND_MEDDEL,                                                    
+       2 ABEND_MODUL   CHAR(07) INIT('BE33625'),                        
+       2 ABEND_FILL1   CHAR(01) INIT(' '),                              
+       2 ABEND_MEDNR   CHAR(02) INIT('**'),                             
+       2 ABEND_FILL2   CHAR(01) INIT(' '),                              
+       2 ABEND_FEJLNR  CHAR(03) INIT(' '),                              
+       2 ABEND_FILL3   CHAR(01) INIT(' '),                              
+       2 ABEND_TXT     CHAR(41) INIT('');                               
+                                                                        
+ DCL  SYSPRINT FILE;                                                    
+                                                                        
+ /********************************************************************/ 
+ /* Db2 tabeller                                                     */ 
+ /********************************************************************/ 
+ EXEC SQL INCLUDE BE80000T;   /* EVS-ejerboligfordelingtabel         */ 
+ EXEC SQL INCLUDE BE80100T;   /* EVS-ejerboligfordelingsnummertabel  */ 
+ EXEC SQL INCLUDE BE80200T;   /* EVS-enhedsløbenummertabel           */ 
+                                                                        
+ EXEC SQL INCLUDE SQLCA;      /* SQL kommunikationsareal             */ 
+                                                                        
+ /********************************************************************/ 
+ /* On Conditions                                                    */ 
+ /********************************************************************/ 
+ CALL ZS61900;                                                          
+                                                                        
+ ON ERROR BEGIN;                                                        
+   ON ERROR SYSTEM;                                                     
+   PUT SKIP LIST('PROGRAMFEJL');                                        
+   CALL PLIDUMP('SNHOB','PROGRAM BE33625L');                            
+ END;                                                                   
+                                                                        
+ ON ENDFILE(CN570I) BEGIN;                                              
+   FLERE_FT1 = NEJ;                                                     
+ END;                                                                   
+                                                                        
+ /********************************************************************/ 
+ /* Main proces                                                      */ 
+ /********************************************************************/ 
+ CALL HOUSEKEEPING;                                                     
+                                                                        
+ IF CALL_FT1 THEN DO;                                                   
+   CALL BEH_FT1;                                                        
+ END;                                                                   
+                                                                        
+ IF CALL_FT2 THEN DO;                                                   
+   CALL BEH_FT2;                                                        
+ END;                                                                   
+                                                                        
+ IF CALL_EG3 THEN DO;                                                   
+   CALL BEH_EG3;                                                        
+ END;                                                                   
+                                                                        
+ IF CALL_FT4 THEN DO;                                                   
+   CALL BEH_FT4;                                                        
+ END;                                                                   
+                                                                        
+ IF CALL_EG4 THEN DO;                                                   
+   CALL BEH_EG4;                                                        
+ END;                                                                   
+                                                                        
+ CALL AFSLUT;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Housekeeping                                                     */ 
+ /********************************************************************/ 
+ HOUSEKEEPING: PROC;                                                    
+                                                                        
+ DCL DEBUG_FT1_TXT   CHAR(25) INIT('   DEBUG_FT1   :         ');        
+ DCL DEBUG_FT2_TXT   CHAR(25) INIT('   DEBUG_FT2   :         ');        
+ DCL DEBUG_EG3_TXT   CHAR(25) INIT('   DEBUG_EG3   :         ');        
+ DCL DEBUG_FT4_TXT   CHAR(25) INIT('   DEBUG_FT4   :         ');        
+ DCL DEBUG_EG4_TXT   CHAR(25) INIT('   DEBUG_EG4   :         ');        
+ DCL PUTSKIP_FROM    CHAR(17) INIT('   PUTSKIP_FROM: ');                
+ DCL PUTSKIP_TO      CHAR(17) INIT('   PUTSKIP_TO  : ');                
+ DCL EVS_KOERSEL_TXT CHAR(19) INIT('   EVS_KOERSEL :   ');              
+ DCL INDKAAR_TXT     CHAR(22) INIT('   INDKOMSTÅR  :      ');           
+ DCL COMMIT_TXT      CHAR(17) INIT('   COMMIT_VALUE: ');                
+ DCL FT1_TXT         CHAR(25) INIT('   CALL_FT1    :         ');        
+ DCL FT2_TXT         CHAR(25) INIT('   CALL_FT2    :         ');        
+ DCL EG3_TXT         CHAR(25) INIT('   CALL_EG3    :         ');        
+ DCL FT4_TXT         CHAR(25) INIT('   CALL_FT4    :         ');        
+ DCL EG4_TXT         CHAR(25) INIT('   CALL_EG4    :         ');        
+                                                                        
+ DCL DISP_J          CHAR(1)  INIT('J');                                
+ DCL DISP_N          CHAR(1)  INIT('N');                                
+ DCL DISP_FROM       PIC'Z.ZZZ.ZZ9';                                    
+ DCL DISP_TO         PIC'Z.ZZZ.ZZ9';                                    
+ DCL DISP_COMMIT     PIC'Z.ZZZ.ZZ9';                                    
+                                                                        
+ PUT SKIP LIST(PROGRAM_TXT !! START_TXT);                               
+ PUT SKIP LIST('');                                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Skal programmet fortage debug (put skip)                         */ 
+ /*------------------------------------------------------------------*/ 
+ ON UNDEFINEDFILE(DEBUGI) BEGIN;                                        
+   DEBUG_REC.DEBUG_FT1 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FT2 = PARM_N;                                        
+   DEBUG_REC.DEBUG_EG3 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FT4 = PARM_N;                                        
+   DEBUG_REC.DEBUG_EG4 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FROM = 0;                                            
+   DEBUG_REC.DEBUG_TO   = 0;                                            
+   GO TO HOUSEKEEPING_PUTSKIP_FOUND;                                    
+ END;                                                                   
+                                                                        
+ OPEN FILE(DEBUGI) TITLE('DEBUG00I');                                   
+                                                                        
+ ON ENDFILE(DEBUGI) BEGIN;                                              
+   DEBUG_REC.DEBUG_FT1 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FT2 = PARM_N;                                        
+   DEBUG_REC.DEBUG_EG3 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FT4 = PARM_N;                                        
+   DEBUG_REC.DEBUG_EG4 = PARM_N;                                        
+   DEBUG_REC.DEBUG_FROM = 0;                                            
+   DEBUG_REC.DEBUG_TO   = 0;                                            
+   GO TO HOUSEKEEPING_PUTSKIP_FOUND;                                    
+ END;                                                                   
+                                                                        
+ READ FILE(DEBUGI) INTO(DEBUG_REC);                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* HOUSEKEEPING_PUTSKIP_FOUND                                       */ 
+ /*------------------------------------------------------------------*/ 
+ HOUSEKEEPING_PUTSKIP_FOUND:                                            
+                                                                        
+ PUT SKIP LIST('BE33625 parametre:');                                   
+                                                                        
+ DISP_FROM = DEBUG_REC.DEBUG_FROM;                                      
+ DISP_TO   = DEBUG_REC.DEBUG_TO;                                        
+                                                                        
+ PUT SKIP LIST(DEBUG_FT1_TXT !! DEBUG_REC.DEBUG_FT1);                   
+ PUT SKIP LIST(DEBUG_FT2_TXT !! DEBUG_REC.DEBUG_FT2);                   
+ PUT SKIP LIST(DEBUG_EG3_TXT !! DEBUG_REC.DEBUG_EG3);                   
+ PUT SKIP LIST(DEBUG_FT4_TXT !! DEBUG_REC.DEBUG_FT4);                   
+ PUT SKIP LIST(DEBUG_EG4_TXT !! DEBUG_REC.DEBUG_EG4);                   
+ PUT SKIP LIST(PUTSKIP_FROM !! DISP_FROM);                              
+ PUT SKIP LIST(PUTSKIP_TO !! DISP_TO);                                  
+                                                                        
+ CLOSE FILE(DEBUGI);                                                    
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Hvad skal forberedes                                             */ 
+ /*------------------------------------------------------------------*/ 
+ CALL_FT1 = JA;                                                         
+ CALL_FT2 = JA;                                                         
+ CALL_EG3 = NEJ;                                                        
+ CALL_FT4 = JA;                                                         
+ CALL_EG4 = NEJ;                                                        
+                                                                        
+ ON UNDEFINEDFILE(BE336I) BEGIN;                                        
+   BE336_REC.BE336_FT1 = PARM_J;                                        
+   BE336_REC.BE336_FT2 = PARM_J;                                        
+   BE336_REC.BE336_EG3 = PARM_N;                                        
+   BE336_REC.BE336_FT4 = PARM_J;                                        
+   BE336_REC.BE336_EG4 = PARM_N;                                        
+   GO TO HOUSEKEEPING_CALL_FOUND;                                       
+ END;                                                                   
+                                                                        
+ OPEN FILE(BE336I) TITLE('BE33600I');                                   
+                                                                        
+ ON ENDFILE(BE336I) BEGIN;                                              
+   BE336_REC.BE336_FT1 = PARM_J;                                        
+   BE336_REC.BE336_FT2 = PARM_J;                                        
+   BE336_REC.BE336_EG3 = PARM_N;                                        
+   BE336_REC.BE336_FT4 = PARM_J;                                        
+   BE336_REC.BE336_EG4 = PARM_N;                                        
+   GO TO HOUSEKEEPING_CALL_FOUND;                                       
+ END;                                                                   
+                                                                        
+ READ FILE(BE336I) INTO(BE336_REC);                                     
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* HOUSEKEEPING_CALL_FOUND                                          */ 
+ /*------------------------------------------------------------------*/ 
+ HOUSEKEEPING_CALL_FOUND:                                               
+                                                                        
+ IF BE336_REC.BE336_FT1 = PARM_J THEN DO;                               
+    CALL_FT1 = JA;                                                      
+    PUT SKIP LIST(FT1_TXT !! DISP_J);                                   
+ END;                                                                   
+ ELSE DO;                                                               
+    CALL_FT1 = NEJ;                                                     
+    PUT SKIP LIST(FT1_TXT !! DISP_N);                                   
+ END;                                                                   
+                                                                        
+ IF BE336_REC.BE336_FT2 = PARM_J THEN DO;                               
+    CALL_FT2 = JA;                                                      
+    PUT SKIP LIST(FT2_TXT !! DISP_J);                                   
+ END;                                                                   
+ ELSE DO;                                                               
+    CALL_FT2 = NEJ;                                                     
+    PUT SKIP LIST(FT2_TXT !! DISP_N);                                   
+ END;                                                                   
+                                                                        
+ IF BE336_REC.BE336_EG3 = PARM_J THEN DO;                               
+    CALL_EG3 = JA;                                                      
+    PUT SKIP LIST(EG3_TXT !! DISP_J);                                   
+ END;                                                                   
+ ELSE DO;                                                               
+    CALL_EG3 = NEJ;                                                     
+    PUT SKIP LIST(EG3_TXT !! DISP_N);                                   
+ END;                                                                   
+                                                                        
+ IF BE336_REC.BE336_FT4 = PARM_J THEN DO;                               
+    CALL_FT4 = JA;                                                      
+    PUT SKIP LIST(FT4_TXT !! DISP_J);                                   
+ END;                                                                   
+ ELSE DO;                                                               
+    CALL_FT4 = NEJ;                                                     
+    PUT SKIP LIST(FT4_TXT !! DISP_N);                                   
+ END;                                                                   
+                                                                        
+ IF BE336_REC.BE336_EG4 = PARM_J THEN DO;                               
+    CALL_EG4 = JA;                                                      
+    PUT SKIP LIST(EG4_TXT !! DISP_J);                                   
+ END;                                                                   
+ ELSE DO;                                                               
+    CALL_EG4 = NEJ;                                                     
+    PUT SKIP LIST(EG4_TXT !! DISP_N);                                   
+ END;                                                                   
+                                                                        
+ CLOSE FILE(BE336I);                                                    
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Find EVS Kørsel type                                             */ 
+ /*------------------------------------------------------------------*/ 
+                                                                        
+ SELECT (BE55600M.AFVIKLINGS_ID);                                       
+   WHEN ('OPRET_EVS_FORSK') DO;                                         
+     EVS_FORSKUD = JA;                                                  
+     EVS_KOERSEL = EVS_KOERSEL_F;                                       
+     AFVIKL_ID   = BE55600M.AFVIKLINGS_ID;                              
+     PUT SKIP LIST (EVS_KOERSEL_TXT !! EVS_KOERSEL                      
+                   !! ' - ' !! AFVIKL_ID);                              
+   END;                                                                 
+                                                                        
+   WHEN ('OPRET_EVS_SLUT') DO;                                          
+     EVS_SLUT    = JA;                                                  
+     EVS_KOERSEL = EVS_KOERSEL_S;                                       
+     AFVIKL_ID   = BE55600M.AFVIKLINGS_ID;                              
+     PUT SKIP LIST (EVS_KOERSEL_TXT !! EVS_KOERSEL                      
+                   !! ' - ' !! AFVIKL_ID);                              
+   END;                                                                 
+                                                                        
+   WHEN ('SUPPL_EVS_SLUT') DO;                                          
+     EVS_SUPPL   = JA;                                                  
+     EVS_KOERSEL = EVS_KOERSEL_U;                                       
+     AFVIKL_ID   = BE55600M.AFVIKLINGS_ID;                              
+     PUT SKIP LIST (EVS_KOERSEL_TXT !! EVS_KOERSEL                      
+                   !! ' - ' !! AFVIKL_ID);                              
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     ABEND_FEJLNR = '101';                                              
+     ABEND_TXT    = 'Afviklings_id skal være OPRET_EVS_FORSK, ' !!      
+                    'OPRET_EVS_SLUT eller SUPPL_EVS_SLUT';              
+     CALL PROGRAM_FEJL;                                                 
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ /*------------------------------------------------------------------*/ 
+ /* Find Indkomstår afhængig af EVS kørsel type                      */ 
+ /*------------------------------------------------------------------*/ 
+ IF EVS_KOERSEL = EVS_KOERSEL_S                                         
+  ! EVS_KOERSEL = EVS_KOERSEL_U THEN DO;                                
+    INDKAAR = BE55600M.INDKÅR1;                                         
+ END;                                                                   
+ ELSE DO;                                                               
+    INDKAAR = BE55600M.INDKÅR2;                                         
+ END;                                                                   
+                                                                        
+ DISP_COMMIT = COMMIT_VALUE;                                            
+                                                                        
+ PUT SKIP LIST(INDKAAR_TXT !! INDKAAR);                                 
+ PUT SKIP LIST(COMMIT_TXT !! DISP_COMMIT);                              
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END HOUSEKEEPING;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* FT.1 - For alle 2-familiehuse i ESR/VUR-leverancen (CN570I)      */ 
+ /*        oprettes ejerboligfordelinger, der ikke allerede er kendt */ 
+ /*        i EVS-ejerboligfordelingstabellen (BE800)                 */ 
+ /********************************************************************/ 
+ BEH_FT1: PROC;                                                         
+                                                                        
+ PUT SKIP LIST(PROC_TXT !! PROCNAME !! START_TXT);                      
+                                                                        
+ IF DEBUG_REC.DEBUG_FT1 = PARM_J THEN DO;                               
+   PUTSKIP_THIS = JA;                                                   
+ END;                                                                   
+ ELSE DO;                                                               
+   PUTSKIP_THIS = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ EN_EJERBOLIG = NEJ;                                                    
+ TO_EJERBOLIG = NEJ;                                                    
+                                                                        
+ OPEN FILE(CN570I) TITLE('CN57000I');                                   
+                                                                        
+ CALL READ_CN570I;                                                      
+                                                                        
+ DO WHILE (FLERE_FT1);                                                  
+   CALL FIND_EJERBOLIG_ANTAL;                                           
+                                                                        
+   IF EN_EJERBOLIG                                                      
+    ! TO_EJERBOLIG THEN DO;                                             
+     CALL SELECT_BE800(1);                                              
+                                                                        
+     IF BE800_NOTFND THEN DO;                                           
+        CALL INSERT_BE800(HANDLE_FT1,1);                                
+     END;                                                               
+                                                                        
+     IF TO_EJERBOLIG THEN DO;                                           
+       CALL SELECT_BE800(2);                                            
+                                                                        
+       IF BE800_NOTFND THEN DO;                                         
+          CALL INSERT_BE800(HANDLE_FT1,2);                              
+       END;                                                             
+                                                                        
+     END;                                                               
+   END;                                                                 
+                                                                        
+   CALL DB2_COMMIT;                                                     
+   CALL READ_CN570I;                                                    
+ END;                                                                   
+                                                                        
+ IF COMMIT_COUNT > 0 THEN DO;                                           
+   COMMIT_COUNT = COMMIT_COUNT + COMMIT_VALUE;                          
+   CALL DB2_COMMIT;                                                     
+ END;                                                                   
+                                                                        
+ CLOSE FILE(CN570I);                                                    
+                                                                        
+ PUT SKIP LIST(PROC_TXT !!PROCNAME !! SLUT_TXT);                        
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END BEH_FT1;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Læs næste CN570I record                                          */ 
+ /********************************************************************/ 
+ READ_CN570I: PROC;                                                     
+                                                                        
+ DCL REC_TXT          CHAR(13) INIT(' - record nr ');                   
+ DCL DCPRCIR_TXT      CHAR(11) INIT(' - DCPRCIR ');                     
+ DCL DISP_CN570I      CHAR(9);                                          
+ DCL DISP_CPRCIR      CHAR(11);                                         
+                                                                        
+ DCL DISP_9_X         CHAR(9);                                          
+ DCL DISP_9       BASED(ADDR(DISP_9_X))                                 
+                      PIC'Z.ZZZ.ZZ9';                                   
+                                                                        
+ DCL DISP_11_X        CHAR(11);                                         
+ DCL DISP_11      BASED(ADDR(DISP_11_X))                                
+                      PIC 'Z(10)9';                                     
+                                                                        
+ READ FILE(CN570I) INTO(CN570_AREA);                                    
+                                                                        
+ IF FLERE_FT1 THEN DO;                                                  
+   FT1_READ = FT1_READ + 1;                                             
+ END;                                                                   
+                                                                        
+ IF (  PUTSKIP_THIS                             )                       
+  & (  DEBUG_REC.DEBUG_TO > 0                   )                       
+  & (  FT1_READ           > DEBUG_REC.DEBUG_FROM                        
+     ! FT1_READ           = DEBUG_REC.DEBUG_FROM)                       
+  & (  FT1_READ           < DEBUG_REC.DEBUG_TO                          
+     ! FT1_READ           = DEBUG_REC.DEBUG_TO  ) THEN DO;              
+   DISP_9      = FT1_READ;                                              
+   DISP_CN570I = TRIM(DISP_9_X,' ');                                    
+   DISP_11     = CN570.DCPRCIR;                                         
+   DISP_CPRCIR = TRIM(DISP_11_X,' ');                                   
+                                                                        
+   PUT SKIP LIST(DEBUG_TXT !! PROCNAME                                  
+                !! REC_TXT !! DISP_CN570I                               
+                !! DCPRCIR_TXT !! DISP_CPRCIR);                         
+ END;                                                                   
+                                                                        
+ END READ_CN570I;                                                       
+                                                                        
+ /********************************************************************/ 
+ /* Initier felterne EN_EJERBOLIG & TO_EJERBOLIG                     */ 
+ /********************************************************************/ 
+ FIND_EJERBOLIG_ANTAL: PROC;                                            
+                                                                        
+ %INCLUDE BE33701M;      /* Kode skal ligge her før koden i proc     */ 
+                                                                        
+ EJDTYPE  = '';                                                         
+                                                                        
+ IF EN_EJERBOLIG THEN DO;                                               
+   EJDTYPE     = '5';                                                   
+   FT1_READ_EN = FT1_READ_EN + 1;                                       
+ END;                                                                   
+                                                                        
+ IF TO_EJERBOLIG THEN DO;                                               
+   EJDTYPE     = '4';                                                   
+   FT1_READ_TO = FT1_READ_TO + 1;                                       
+ END;                                                                   
+                                                                        
+ IF ^EN_EJERBOLIG                                                       
+  & ^TO_EJERBOLIG THEN DO;                                              
+   FT1_READ_REST = FT1_READ_REST + 1;                                   
+ END;                                                                   
+                                                                        
+ END FIND_EJERBOLIG_ANTAL;                                              
+                                                                        
+ /********************************************************************/ 
+ /* Find CN570 i EVS_ejerboligfordelingstabellen                     */ 
+ /********************************************************************/ 
+ SELECT_BE800: PROC(IX);                                                
+                                                                        
+ DCL IX     FIXED BIN(15);                                              
+                                                                        
+ DCL EN_TXT CHAR(02) INIT('EN');                                        
+ DCL TO_TXT CHAR(02) INIT('TO');                                        
+                                                                        
+ BE800_NOTFND = NEJ;                                                    
+                                                                        
+ DCLBE80000T               = '';                                        
+ DCLBE80000T.TIL_EVS_AAR   = INDKAAR;                                   
+ DCLBE80000T.AFVIKLINGS_ID = AFVIKL_ID;                                 
+ DCLBE80000T.DATA_ID       = BE55600M.DATA_ID;                          
+ DCLBE80000T.EKOMNR        = CN570.EKOMNR;                              
+ DCLBE80000T.EEJDNR        = CN570.EEJDNR;                              
+                                                                        
+ /* Kode ændret i forbindelse variabel vurderingsår ##EBD */            
+ IF EVS_KOERSEL = EVS_KOERSEL_S !                                       
+    EVS_KOERSEL = EVS_KOERSEL_U                                         
+  THEN                                                                  
+    DO;                                                                 
+      DCLBE80000T.VEJK_EJEB  = CN570.VURDOPLNY.VEJK_EJEB(IX);           
+      DCLBE80000T.HUSNR_EJEB = CN570.VURDOPLNY.HUSNR_EJEB(IX);          
+      DCLBE80000T.ETAGE_EJEB = CN570.VURDOPLNY.ETAGE_EJEB(IX);          
+      DCLBE80000T.DØRNR_EJEB = CN570.VURDOPLNY.SDØR_EJEB(IX);           
+    END;                                                                
+  ELSE                                                                  
+    DO;                                                                 
+      DCLBE80000T.VEJK_EJEB  = CN570.VURDOPLGL.VEJK_EJEB(IX);           
+      DCLBE80000T.HUSNR_EJEB = CN570.VURDOPLGL.HUSNR_EJEB(IX);          
+      DCLBE80000T.ETAGE_EJEB = CN570.VURDOPLGL.ETAGE_EJEB(IX);          
+      DCLBE80000T.DØRNR_EJEB = CN570.VURDOPLGL.SDØR_EJEB(IX);           
+    END;                                                                
+                                                                        
+ EXEC SQL SELECT  EKOMNR                                                
+          INTO    :DCLBE80000T.EKOMNR                                   
+          FROM    BE80000T                                              
+          WHERE   TIL_EVS_AAR   = :DCLBE80000T.TIL_EVS_AAR              
+          AND     AFVIKLINGS_ID = :DCLBE80000T.AFVIKLINGS_ID            
+          AND     DATA_ID       = :DCLBE80000T.DATA_ID                  
+          AND     EKOMNR        = :DCLBE80000T.EKOMNR                   
+          AND     EEJDNR        = :DCLBE80000T.EEJDNR                   
+          AND     VEJK_EJEB     = :DCLBE80000T.VEJK_EJEB                
+          AND     HUSNR_EJEB    = :DCLBE80000T.HUSNR_EJEB               
+          AND     ETAGE_EJEB    = :DCLBE80000T.ETAGE_EJEB               
+          AND     DØRNR_EJEB    = :DCLBE80000T.DØRNR_EJEB;              
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     BE800_NOTFND     = NEJ;                                            
+                                                                        
+     FT1_SEL = FT1_SEL + 1;                                             
+                                                                        
+     IF EN_EJERBOLIG THEN DO;                                           
+       FT1_SEL_EN = FT1_SEL_EN + 1;                                     
+     END;                                                               
+                                                                        
+     IF TO_EJERBOLIG THEN DO;                                           
+       IF IX = 1 THEN DO;                                               
+         FT1_SEL_TO_1 = FT1_SEL_TO_1 + 1;                               
+       END;                                                             
+       ELSE DO;                                                         
+         FT1_SEL_TO_2 = FT1_SEL_TO_2 + 1;                               
+       END;                                                             
+     END;                                                               
+                                                                        
+     IF (   PUTSKIP_THIS                    )                           
+      & (  FT1_READ > DEBUG_REC.DEBUG_FROM                              
+         ! FT1_READ = DEBUG_REC.DEBUG_FROM)                             
+      & (  FT1_READ < DEBUG_REC.DEBUG_TO                                
+         ! FT1_READ = DEBUG_REC.DEBUG_TO  ) THEN DO;                    
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80000T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80000T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80000T.VEJK_EJEB;                             
+       DISP_HUSNR  = DCLBE80000T.HUSNR_EJEB;                            
+       DISP_ETAGE  = DCLBE80000T.ETAGE_EJEB;                            
+       DISP_DØRNR  = DCLBE80000T.DØRNR_EJEB;                            
+                                                                        
+       IF IX = 1 THEN DO;                                               
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FOUND_TXT_1 !! DISP_X); 
+       END;                                                             
+       ELSE DO;                                                         
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FOUND_TXT_2 !! DISP_X); 
+       END;                                                             
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(100) DO;                                                        
+     BE800_NOTFND = JA;                                                 
+                                                                        
+     FT1_SEL = FT1_SEL + 1;                                             
+                                                                        
+     IF EN_EJERBOLIG THEN DO;                                           
+       FT1_NOT_EN = FT1_NOT_EN + 1;                                     
+     END;                                                               
+                                                                        
+     IF TO_EJERBOLIG THEN DO;                                           
+       IF IX = 1 THEN DO;                                               
+         FT1_NOT_TO_1 = FT1_NOT_TO_1 + 1;                               
+       END;                                                             
+       ELSE DO;                                                         
+         FT1_NOT_TO_2 = FT1_NOT_TO_2 + 1;                               
+       END;                                                             
+     END;                                                               
+                                                                        
+     IF (   PUTSKIP_THIS                    )                           
+      & (  FT1_READ > DEBUG_REC.DEBUG_FROM                              
+         ! FT1_READ = DEBUG_REC.DEBUG_FROM)                             
+      & (  FT1_READ < DEBUG_REC.DEBUG_TO                                
+         ! FT1_READ = DEBUG_REC.DEBUG_TO  ) THEN DO;                    
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80000T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80000T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80000T.VEJK_EJEB;                             
+       DISP_HUSNR  = DCLBE80000T.HUSNR_EJEB;                            
+       DISP_ETAGE  = DCLBE80000T.ETAGE_EJEB;                            
+       DISP_DØRNR  = DCLBE80000T.DØRNR_EJEB;                            
+                                                                        
+       IF IX = 1 THEN DO;                                               
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! NOTFND_TXT_1 !! DISP_X);
+       END;                                                             
+       ELSE DO;                                                         
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! NOTFND_TXT_2 !! DISP_X);
+       END;                                                             
+     END;                                                               
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     PUT SKIP DATA(DCLBE80000T);                                        
+     DISP_1       = IX;                                                 
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '102';                                              
+     ABEND_TXT    = 'Fejl i SELECT_BE800(' !! DISP_1                    
+                    !! ') - Sqlcode ' !! DISP_4;                        
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END SELECT_BE800;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* FT.2 - Evt. manglende rækker i EVS-enhedsløbenummertabellen      */ 
+ /*        (BE802) oprettes for at opfylde følgende:                 */ 
+ /*        Rækker i EVS-ejerboligfordelingstabellen (BE800) join'et  */ 
+ /*        med EVS-ejerboligfordelingsnummertabellen (BE801) skal    */ 
+ /*        også findes i EVS-enhedsløbenummertabellen (BE802)        */ 
+ /********************************************************************/ 
+ BEH_FT2: PROC;                                                         
+                                                                        
+ PUT SKIP LIST(PROC_TXT !! PROCNAME !! START_TXT);                      
+                                                                        
+ IF DEBUG_REC.DEBUG_FT2 = PARM_J THEN DO;                               
+   PUTSKIP_THIS = JA;                                                   
+ END;                                                                   
+ ELSE DO;                                                               
+   PUTSKIP_THIS = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ EN_EJERBOLIG = NEJ;                                                    
+ TO_EJERBOLIG = NEJ;                                                    
+                                                                        
+ DCLBE80000T.TIL_EVS_AAR   = INDKAAR;                                   
+ DCLBE80000T.AFVIKLINGS_ID = AFVIKL_ID;                                 
+ DCLBE80000T.DATA_ID       = BE55600M.DATA_ID;                          
+                                                                        
+ EXEC SQL DECLARE  FT2_CUR CURSOR WITH HOLD FOR                         
+          SELECT   T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+                  ,T800.DVURDÅR                                         
+                  ,T800.CEJDTYPE                                        
+                  ,T801.EJBOLFDLNR                                      
+          FROM     BE80000T T800                                        
+                  ,BE80100T T801                                        
+          WHERE    T800.TIL_EVS_AAR    = :DCLBE80000T.TIL_EVS_AAR       
+          AND      T800.AFVIKLINGS_ID  = :DCLBE80000T.AFVIKLINGS_ID     
+          AND      T800.DATA_ID        = :DCLBE80000T.DATA_ID           
+          AND      T801.EKOMNR         = T800.EKOMNR                    
+          AND      T801.EEJDNR         = T800.EEJDNR                    
+          AND      T801.VEJK_EJEB      = T800.VEJK_EJEB                 
+          AND      LPAD(TRIM(' ' FROM T801.HUSNR_EJEB), 4, '0') =       
+                   LPAD(TRIM(' ' FROM T800.HUSNR_EJEB), 4, '0')         
+          AND      LPAD(TRIM(' ' FROM T801.ETAGE_EJEB), 2, '0') =       
+                   LPAD(TRIM(' ' FROM T800.ETAGE_EJEB), 2, '0')         
+          AND      LPAD(TRIM(' ' FROM T801.DØRNR_EJEB), 4, '0') =       
+                   LPAD(TRIM(' ' FROM T800.DØRNR_EJEB), 4, '0')         
+          AND      T801.EJBOLFDLNR     > 0                              
+          AND      T801.DVURDÅR        =                                
+                    (SELECT MAX(S801.DVURDÅR)                           
+                     FROM   BE80100T S801                               
+                      WHERE  S801.EKOMNR        = T800.EKOMNR           
+                        AND    S801.EEJDNR      = T800.EEJDNR           
+                        AND    S801.VEJK_EJEB   = T800.VEJK_EJEB        
+                        AND LPAD(TRIM(' ' FROM S801.HUSNR_EJEB), 4, '0')
+                          = LPAD(TRIM(' ' FROM T800.HUSNR_EJEB), 4, '0')
+                        AND LPAD(TRIM(' ' FROM S801.ETAGE_EJEB), 2, '0')
+                          = LPAD(TRIM(' ' FROM T800.ETAGE_EJEB), 2, '0')
+                        AND LPAD(TRIM(' ' FROM S801.DØRNR_EJEB), 4, '0')
+                          = LPAD(TRIM(' ' FROM T800.DØRNR_EJEB), 4, '0')
+                        AND    S801.EJBOLFDLNR  > 0                     
+                        AND    S801.DVURDÅR    <= T800.DVURDÅR   )      
+          AND NOT  EXISTS (SELECT  1                                    
+                   FROM    BE80200T T802                                
+                   WHERE   T802.EKOMNR    = T800.EKOMNR                 
+                     AND   T802.EEJDNR    = T800.EEJDNR                 
+                     AND   T802.VEJK_ENH  = T800.VEJK_EJEB              
+                     AND LPAD(TRIM(' ' FROM T802.HUSNR_ENH),  4, '0')   
+                       = LPAD(TRIM(' ' FROM T800.HUSNR_EJEB), 4, '0')   
+                     AND LPAD(TRIM(' ' FROM T802.ETAGE_ENH),  2, '0')   
+                       = LPAD(TRIM(' ' FROM T800.ETAGE_EJEB), 2, '0')   
+                     AND LPAD(TRIM(' ' FROM T802.DØRNR_ENH),  4, '0')   
+                       = LPAD(TRIM(' ' FROM T800.DØRNR_EJEB), 4, '0')   
+                          )                                             
+          ORDER BY T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+                  ,T800.DVURDÅR                                         
+          FOR FETCH ONLY;                                               
+                                                                        
+ EXEC SQL OPEN FT2_CUR;                                                 
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '103';                                              
+     ABEND_TXT    = 'Fejl i BEH_FT2 (Open cur) - Sqlcode ' !! DISP_4;   
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ CALL FETCH_FT2;                                                        
+                                                                        
+ DO WHILE (FLERE_FT2);                                                  
+   CALL INSERT_BE802(HANDLE_FT2);                                       
+   CALL DB2_COMMIT;                                                     
+   CALL FETCH_FT2;                                                      
+ END;                                                                   
+                                                                        
+ IF COMMIT_COUNT > 0 THEN DO;                                           
+   COMMIT_COUNT = COMMIT_COUNT + COMMIT_VALUE;                          
+   CALL DB2_COMMIT;                                                     
+ END;                                                                   
+                                                                        
+ EXEC SQL CLOSE FT2_CUR;                                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '104';                                              
+     ABEND_TXT    = 'Fejl i BEH_FT2 (Close cur) - Sqlcode ' !! DISP_4;  
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ PUT SKIP LIST(PROC_TXT !!PROCNAME !! SLUT_TXT);                        
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END BEH_FT2;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Cursor FT2_CUR  - Fetch næste række                              */ 
+ /********************************************************************/ 
+ FETCH_FT2: PROC;                                                       
+                                                                        
+ DCLBE80000T = '';                                                      
+ DCLBE80100T = '';                                                      
+ DCLBE80200T = '';                                                      
+                                                                        
+ EXEC SQL FETCH FT2_CUR                                                 
+          INTO  :DCLBE80000T.EKOMNR                                     
+               ,:DCLBE80000T.EEJDNR                                     
+               ,:DCLBE80000T.VEJK_EJEB                                  
+               ,:DCLBE80000T.HUSNR_EJEB                                 
+               ,:DCLBE80000T.ETAGE_EJEB                                 
+               ,:DCLBE80000T.DØRNR_EJEB                                 
+               ,:DCLBE80000T.DVURDÅR                                    
+               ,:DCLBE80000T.CEJDTYPE                                   
+               ,:DCLBE80100T.EJBOLFDLNR;                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     FLERE_FT2 = JA;                                                    
+                                                                        
+     FT2_FET = FT2_FET + 1;                                             
+                                                                        
+     IF DCLBE80000T.CEJDTYPE = 5 THEN   /* En ejer  */                  
+       ENHEDLBNR = 1;                                                   
+     ELSE                               /* To ejere */                  
+       ENHEDLBNR = SELECT_CNT_BE802;                                    
+                                                                        
+     SELECT(ENHEDLBNR);                                                 
+       WHEN(1)   FT2_FET_1 = FT2_FET_1 + 1;                             
+       WHEN(2)   FT2_FET_2 = FT2_FET_2 + 1;                             
+       OTHERWISE ;                                                      
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80000T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80000T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80000T.VEJK_EJEB;                             
+       DISP_HUSNR  = DCLBE80000T.HUSNR_EJEB;                            
+       DISP_ETAGE  = DCLBE80000T.ETAGE_EJEB;                            
+       DISP_DØRNR  = DCLBE80000T.DØRNR_EJEB;                            
+       DISP_ENHED  = ENHEDLBNR;                                         
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FETCH_TXT !! DISP_X);     
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(100) DO;                                                        
+     FLERE_FT2 = NEJ;                                                   
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '105';                                              
+     ABEND_TXT    = 'Fejl i FETCH_FT2 - Sqlcode ' !! DISP_4;            
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END FETCH_FT2;                                                         
+                                                                        
+ /********************************************************************/ 
+ /* EG.3 - Såfremt en række i tabel BE800 ikke findes i tabel BE802, */ 
+ /*        så oprettes en række i tabel BE802 = rækken i tabel BE800 */ 
+ /*                                                                  */ 
+ /*        BE800 = EVS-ejerboligfordelingstabellen                   */ 
+ /*        BE802 = EVS-enhedsløbenummertabellen                      */ 
+ /********************************************************************/ 
+ BEH_EG3: PROC;                                                         
+                                                                        
+ PUT SKIP LIST(PROC_TXT !! PROCNAME !! START_TXT);                      
+                                                                        
+ IF DEBUG_REC.DEBUG_EG3 = PARM_J THEN DO;                               
+   PUTSKIP_THIS = JA;                                                   
+ END;                                                                   
+ ELSE DO;                                                               
+   PUTSKIP_THIS = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ EN_EJERBOLIG = NEJ;                                                    
+ TO_EJERBOLIG = NEJ;                                                    
+                                                                        
+ DCLBE80000T.TIL_EVS_AAR   = INDKAAR;                                   
+ DCLBE80000T.AFVIKLINGS_ID = AFVIKL_ID;                                 
+ DCLBE80000T.DATA_ID       = BE55600M.DATA_ID;                          
+                                                                        
+ EXEC SQL DECLARE  EG3_CUR CURSOR WITH HOLD FOR                         
+          SELECT   T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+                  ,T800.DVURDÅR                                         
+                  ,T800.CEJDTYPE                                        
+          FROM     BE80000T T800                                        
+          WHERE    T800.TIL_EVS_AAR   = :DCLBE80000T.TIL_EVS_AAR        
+          AND      T800.AFVIKLINGS_ID = :DCLBE80000T.AFVIKLINGS_ID      
+          AND      T800.DATA_ID       = :DCLBE80000T.DATA_ID            
+          AND NOT  EXISTS (SELECT  1                                    
+                   FROM    BE80200T T802                                
+                   WHERE   T802.EKOMNR    = T800.EKOMNR                 
+                     AND   T802.EEJDNR    = T800.EEJDNR                 
+                     AND   T802.VEJK_ENH  = T800.VEJK_EJEB              
+                     AND LPAD(TRIM(' ' FROM T802.HUSNR_ENH),  4, '0')   
+                       = LPAD(TRIM(' ' FROM T800.HUSNR_EJEB), 4, '0')   
+                     AND LPAD(TRIM(' ' FROM T802.ETAGE_ENH),  2, '0')   
+                       = LPAD(TRIM(' ' FROM T800.ETAGE_EJEB), 2, '0')   
+                     AND LPAD(TRIM(' ' FROM T802.DØRNR_ENH),  4, '0')   
+                       = LPAD(TRIM(' ' FROM T800.DØRNR_EJEB), 4, '0')   
+                          )                                             
+          ORDER BY T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+                  ,T800.DVURDÅR                                         
+          FOR FETCH ONLY;                                               
+                                                                        
+ EXEC SQL OPEN EG3_CUR;                                                 
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '106';                                              
+     ABEND_TXT    = 'Fejl i BEH_EG3 (Open cur) - Sqlcode ' !! DISP_4;   
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ CALL FETCH_EG3;                                                        
+                                                                        
+ DO WHILE (FLERE_EG3);                                                  
+   CALL INSERT_BE802(HANDLE_EG3);                                       
+   CALL DB2_COMMIT;                                                     
+   CALL FETCH_EG3;                                                      
+ END;                                                                   
+                                                                        
+ IF COMMIT_COUNT > 0 THEN DO;                                           
+   COMMIT_COUNT = COMMIT_COUNT + COMMIT_VALUE;                          
+   CALL DB2_COMMIT;                                                     
+ END;                                                                   
+                                                                        
+ EXEC SQL CLOSE EG3_CUR;                                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '107';                                              
+     ABEND_TXT    = 'Fejl i BEH_EG3 (Close cur) - Sqlcode ' !! DISP_4;  
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ PUT SKIP LIST(PROC_TXT !!PROCNAME !! SLUT_TXT);                        
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END BEH_EG3;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Cursor EG3_CUR  - Fetch næste række                              */ 
+ /********************************************************************/ 
+ FETCH_EG3: PROC;                                                       
+                                                                        
+ DCLBE80000T = '';                                                      
+ DCLBE80200T = '';                                                      
+                                                                        
+ EXEC SQL FETCH EG3_CUR                                                 
+          INTO  :DCLBE80000T.EKOMNR                                     
+               ,:DCLBE80000T.EEJDNR                                     
+               ,:DCLBE80000T.VEJK_EJEB                                  
+               ,:DCLBE80000T.HUSNR_EJEB                                 
+               ,:DCLBE80000T.ETAGE_EJEB                                 
+               ,:DCLBE80000T.DØRNR_EJEB                                 
+               ,:DCLBE80000T.DVURDÅR                                    
+               ,:DCLBE80000T.CEJDTYPE;                                  
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     FLERE_EG3 = JA;                                                    
+                                                                        
+     EG3_FET = EG3_FET + 1;                                             
+                                                                        
+     IF DCLBE80000T.CEJDTYPE = 5 THEN   /* En ejer  */                  
+       ENHEDLBNR = 1;                                                   
+     ELSE                               /* To ejere */                  
+       ENHEDLBNR = SELECT_CNT_BE802;                                    
+                                                                        
+     SELECT(ENHEDLBNR);                                                 
+       WHEN(1)   EG3_FET_1 = EG3_FET_1 + 1;                             
+       WHEN(2)   EG3_FET_2 = EG3_FET_2 + 1;                             
+       OTHERWISE ;                                                      
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80000T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80000T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80000T.VEJK_EJEB;                             
+       DISP_HUSNR  = DCLBE80000T.HUSNR_EJEB;                            
+       DISP_ETAGE  = DCLBE80000T.ETAGE_EJEB;                            
+       DISP_DØRNR  = DCLBE80000T.DØRNR_EJEB;                            
+       DISP_ENHED  = ENHEDLBNR;                                         
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FETCH_TXT !! DISP_X);     
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(100) DO;                                                        
+     FLERE_EG3 = NEJ;                                                   
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '108';                                              
+     ABEND_TXT    = 'Fejl i FETCH_EG3 - Sqlcode ' !! DISP_4;            
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END FETCH_EG3;                                                         
+                                                                        
+ /********************************************************************/ 
+ /* FT.4 - Såfremt adresseringsnavnet ikke er ens i tabellerne BE801 */ 
+ /*        og BE802, så sættes adresseringsnavnet i tabel BE802 lig  */ 
+ /*        med adresseringsnavnet i BE801.                           */ 
+ /*                                                                  */ 
+ /*        BE801 = EVS-ejerboligfordeingsnummertabellen              */ 
+ /*        BE802 = EVS-enhedsløbenummertabellen                      */ 
+ /********************************************************************/ 
+ BEH_FT4: PROC;                                                         
+                                                                        
+ PUT SKIP LIST(PROC_TXT !! PROCNAME !! START_TXT);                      
+                                                                        
+ IF DEBUG_REC.DEBUG_FT4 = PARM_J THEN DO;                               
+   PUTSKIP_THIS = JA;                                                   
+ END;                                                                   
+ ELSE DO;                                                               
+   PUTSKIP_THIS = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ EN_EJERBOLIG = NEJ;                                                    
+ TO_EJERBOLIG = NEJ;                                                    
+                                                                        
+ /* Tilføjet DISTINCT - Ændret EJBOLFDLNR til vejkode D245 */           
+ EXEC SQL DECLARE FT4_CUR CURSOR WITH HOLD FOR                          
+          SELECT   DISTINCT                                             
+                   T801.EKOMNR                                          
+                  ,T801.EEJDNR                                          
+                  ,T801.VEJK_EJEB                                       
+                  ,T801.ADRSNAVN_EJEB                                   
+                  ,T802.EENHEDLBNR                                      
+          FROM     BE80100T T801                                        
+                  ,BE80200T T802                                        
+          WHERE    T801.EKOMNR         = T802.EKOMNR                    
+          AND      T801.EEJDNR         = T802.EEJDNR                    
+          AND      T801.VEJK_EJEB      = T802.VEJK_ENH                  
+          AND      T801.ADRSNAVN_EJEB <> T802.ADRSNAVN_ENH              
+          ORDER BY T801.EKOMNR                                          
+                  ,T801.EEJDNR                                          
+                  ,T801.VEJK_EJEB                                       
+          FOR FETCH ONLY;                                               
+                                                                        
+ EXEC SQL OPEN FT4_CUR;                                                 
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '109';                                              
+     ABEND_TXT    = 'Fejl i BEH_FT4 (Open cur) - Sqlcode ' !! DISP_4;   
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ CALL FETCH_FT4;                                                        
+                                                                        
+ DO WHILE (FLERE_FT4);                                                  
+   CALL UPDATE_BE802(HANDLE_FT4);                                       
+   CALL DB2_COMMIT;                                                     
+   CALL FETCH_FT4;                                                      
+ END;                                                                   
+                                                                        
+ IF COMMIT_COUNT > 0 THEN DO;                                           
+   COMMIT_COUNT = COMMIT_COUNT + COMMIT_VALUE;                          
+   CALL DB2_COMMIT;                                                     
+ END;                                                                   
+                                                                        
+ EXEC SQL CLOSE FT4_CUR;                                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '110';                                              
+     ABEND_TXT    = 'Fejl i BEH_FT4 (Close cur) - Sqlcode ' !! DISP_4;  
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ PUT SKIP LIST(PROC_TXT !!PROCNAME !! SLUT_TXT);                        
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END BEH_FT4;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Cursor FT4_CUR  - Fetch næste række                              */ 
+ /********************************************************************/ 
+ FETCH_FT4: PROC;                                                       
+                                                                        
+ DCLBE80200T = '';                                                      
+                                                                        
+ EXEC SQL FETCH FT4_CUR                                                 
+          INTO  :DCLBE80200T.EKOMNR                                     
+               ,:DCLBE80200T.EEJDNR                                     
+               ,:DCLBE80200T.VEJK_ENH                                   
+               ,:DCLBE80200T.ADRSNAVN_ENH                               
+               ,:DCLBE80200T.EENHEDLBNR;                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     FLERE_FT4 = JA;                                                    
+                                                                        
+     FT4_FET = FT4_FET + 1;                                             
+                                                                        
+     SELECT(DCLBE80200T.EENHEDLBNR);                                    
+       WHEN(1)   FT4_FET_1 = FT4_FET_1 + 1;                             
+       WHEN(2)   FT4_FET_2 = FT4_FET_2 + 1;                             
+       OTHERWISE ;                                                      
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80200T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80200T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80200T.EJBOLFDLNR;                            
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FETCH_TXT !! DISP_X);     
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(100) DO;                                                        
+     FLERE_FT4 = NEJ;                                                   
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '111';                                              
+     ABEND_TXT    = 'Fejl i FETCH_FT4 - Sqlcode ' !! DISP_4;            
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END FETCH_FT4;                                                         
+                                                                        
+ /********************************************************************/ 
+ /* EG.4 - Såfremt adresseringsnavnet ikke er ens i tabellerne BE800 */ 
+ /* (E&G)  og BE802, så sættes adresseringsnavnet i tabel BE802 lig  */ 
+ /*        med adresseringsnavnet i BE800.                           */ 
+ /*                                                                  */ 
+ /*        BE800 = EVS-ejerboligfordeingstabellen                    */ 
+ /*        BE802 = EVS-enhedsløbenummertabellen                      */ 
+ /********************************************************************/ 
+ BEH_EG4: PROC;                                                         
+                                                                        
+ PUT SKIP LIST(PROC_TXT !! PROCNAME !! START_TXT);                      
+                                                                        
+ IF DEBUG_REC.DEBUG_EG4 = PARM_J THEN DO;                               
+   PUTSKIP_THIS = JA;                                                   
+ END;                                                                   
+ ELSE DO;                                                               
+   PUTSKIP_THIS = NEJ;                                                  
+ END;                                                                   
+                                                                        
+ EN_EJERBOLIG = NEJ;                                                    
+ TO_EJERBOLIG = NEJ;                                                    
+                                                                        
+ DCLBE80000T.TIL_EVS_AAR   = INDKAAR;                                   
+ DCLBE80000T.AFVIKLINGS_ID = AFVIKL_ID;                                 
+ DCLBE80000T.DATA_ID       = BE55600M.DATA_ID;                          
+                                                                        
+ EXEC SQL DECLARE EG4_CUR CURSOR WITH HOLD FOR                          
+          SELECT   T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+                  ,T800.ADRSNAVN_EJEB                                   
+                  ,T802.EENHEDLBNR                                      
+          FROM     BE80000T T800                                        
+                  ,BE80200T T802                                        
+          WHERE    T800.TIL_EVS_AAR    = :DCLBE80000T.TIL_EVS_AAR       
+          AND      T800.AFVIKLINGS_ID  = :DCLBE80000T.AFVIKLINGS_ID     
+          AND      T800.DATA_ID        = :DCLBE80000T.DATA_ID           
+          AND      T800.EKOMNR         = T802.EKOMNR                    
+          AND      T800.EEJDNR         = T802.EEJDNR                    
+          AND      T800.VEJK_EJEB      = T802.VEJK_ENH                  
+          AND      LPAD(TRIM(' ' FROM T800.HUSNR_EJEB), 4, '0') =       
+                   LPAD(TRIM(' ' FROM T802.HUSNR_ENH) , 4, '0')         
+          AND      LPAD(TRIM(' ' FROM T800.ETAGE_EJEB), 2, '0') =       
+                   LPAD(TRIM(' ' FROM T802.ETAGE_ENH) , 2, '0')         
+          AND      LPAD(TRIM(' ' FROM T800.DØRNR_EJEB), 4, '0') =       
+                   LPAD(TRIM(' ' FROM T802.DØRNR_ENH) , 4, '0')         
+          AND      T800.ADRSNAVN_EJEB <> T802.ADRSNAVN_ENH              
+          ORDER BY T800.EKOMNR                                          
+                  ,T800.EEJDNR                                          
+                  ,T800.VEJK_EJEB                                       
+                  ,T800.HUSNR_EJEB                                      
+                  ,T800.ETAGE_EJEB                                      
+                  ,T800.DØRNR_EJEB                                      
+          FOR FETCH ONLY;                                               
+                                                                        
+ EXEC SQL OPEN EG4_CUR;                                                 
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '112';                                              
+     ABEND_TXT    = 'Fejl i BEH_EG4 (Open cur) - Sqlcode ' !! DISP_4;   
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ CALL FETCH_EG4;                                                        
+                                                                        
+ DO WHILE (FLERE_EG4);                                                  
+   CALL UPDATE_BE802(HANDLE_EG4);                                       
+   CALL DB2_COMMIT;                                                     
+   CALL FETCH_EG4;                                                      
+ END;                                                                   
+                                                                        
+ IF COMMIT_COUNT > 0 THEN DO;                                           
+   COMMIT_COUNT = COMMIT_COUNT + COMMIT_VALUE;                          
+   CALL DB2_COMMIT;                                                     
+ END;                                                                   
+                                                                        
+ EXEC SQL CLOSE EG4_CUR;                                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) ;                                                            
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '113';                                              
+     ABEND_TXT    = 'Fejl i BEH_EG4 (Close cur) - Sqlcode ' !! DISP_4;  
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ PUT SKIP LIST(PROC_TXT !!PROCNAME !! SLUT_TXT);                        
+ PUT SKIP LIST('');                                                     
+                                                                        
+ END BEH_EG4;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* Cursor EG4_CUR  - Fetch næste række                              */ 
+ /********************************************************************/ 
+ FETCH_EG4: PROC;                                                       
+                                                                        
+ DCLBE80200T = '';                                                      
+                                                                        
+ EXEC SQL FETCH EG4_CUR                                                 
+          INTO  :DCLBE80200T.EKOMNR                                     
+               ,:DCLBE80200T.EEJDNR                                     
+               ,:DCLBE80200T.VEJK_ENH                                   
+               ,:DCLBE80200T.HUSNR_ENH                                  
+               ,:DCLBE80200T.ETAGE_ENH                                  
+               ,:DCLBE80200T.DØRNR_ENH                                  
+               ,:DCLBE80200T.ADRSNAVN_ENH                               
+               ,:DCLBE80200T.EENHEDLBNR;                                
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     FLERE_EG4 = JA;                                                    
+                                                                        
+     EG4_FET = EG4_FET + 1;                                             
+                                                                        
+     SELECT(DCLBE80200T.EENHEDLBNR);                                    
+       WHEN(1)   EG4_FET_1 = EG4_FET_1 + 1;                             
+       WHEN(2)   EG4_FET_2 = EG4_FET_2 + 1;                             
+       OTHERWISE ;                                                      
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80200T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80200T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80200T.VEJK_ENH;                              
+       DISP_HUSNR  = DCLBE80200T.HUSNR_ENH;                             
+       DISP_ETAGE  = DCLBE80200T.ETAGE_ENH;                             
+       DISP_DØRNR  = DCLBE80200T.DØRNR_ENH;                             
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! FETCH_TXT !! DISP_X);     
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(100) DO;                                                        
+     FLERE_EG4 = NEJ;                                                   
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '114';                                              
+     ABEND_TXT    = 'Fejl i FETCH_EG4 - Sqlcode ' !! DISP_4;            
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END FETCH_EG4;                                                         
+                                                                        
+ /********************************************************************/ 
+ /* Put skip tællere                                                 */ 
+ /********************************************************************/ 
+ AFSLUT: PROC;                                                          
+                                                                        
+ DCL DISP_CNT_1 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_2 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_3 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_4 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_5 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_6 PIC'Z.ZZZ.ZZ9';                                         
+ DCL DISP_CNT_7 PIC'Z.ZZZ.ZZ9';                                         
+                                                                        
+ IF CALL_FT1 THEN DO;                                                   
+   PUT SKIP LIST('Resultat for BE33625 - FT1 Forberedelse:');           
+                                                                        
+   DISP_CNT_1 = FT1_READ;                                               
+   DISP_CNT_2 = FT1_READ_EN;                                            
+   DISP_CNT_3 = FT1_READ_TO;                                            
+   DISP_CNT_4 = FT1_READ_REST;                                          
+                                                                        
+   PUT SKIP LIST('Read CN570   - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('               En ejerbolig   :' !! DISP_CNT_2);      
+   PUT SKIP LIST('               To ejerbolig   :' !! DISP_CNT_3);      
+   PUT SKIP LIST('               Alle andre     :' !! DISP_CNT_4);      
+                                                                        
+   DISP_CNT_1 = FT1_SEL;                                                
+   DISP_CNT_2 = FT1_SEL_EN;                                             
+   DISP_CNT_3 = FT1_SEL_TO_1;                                           
+   DISP_CNT_4 = FT1_SEL_TO_2;                                           
+   DISP_CNT_5 = FT1_NOT_EN;                                             
+   DISP_CNT_6 = FT1_NOT_TO_1;                                           
+   DISP_CNT_7 = FT1_NOT_TO_2;                                           
+                                                                        
+   PUT SKIP LIST('Select BE800 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('      En ejerbolig    - Found :' !! DISP_CNT_2);      
+   PUT SKIP LIST('      To ejerbolig(1) - Found :' !! DISP_CNT_3);      
+   PUT SKIP LIST('      To ejerbolig(2) - Found :' !! DISP_CNT_4);      
+   PUT SKIP LIST('      En ejerbolig    - Notfnd:' !! DISP_CNT_5);      
+   PUT SKIP LIST('      To ejerbolig(1) - Notfnd:' !! DISP_CNT_6);      
+   PUT SKIP LIST('      To ejerbolig(2) - Notfnd:' !! DISP_CNT_7);      
+                                                                        
+   DISP_CNT_1 = FT1_INS;                                                
+   DISP_CNT_2 = FT1_INS_EN;                                             
+   DISP_CNT_3 = FT1_INS_TO_1;                                           
+   DISP_CNT_4 = FT1_INS_TO_2;                                           
+                                                                        
+   PUT SKIP LIST('Insert BE800 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('               En ejerbolig   :' !! DISP_CNT_2);      
+   PUT SKIP LIST('               To ejerbolig(1):' !! DISP_CNT_3);      
+   PUT SKIP LIST('               To ejerbolig(2):' !! DISP_CNT_4);      
+                                                                        
+   PUT SKIP LIST('');                                                   
+ END;                                                                   
+                                                                        
+ IF CALL_FT2 THEN DO;                                                   
+   PUT SKIP LIST('Resultat for BE33625 - FT2 Forberedelse:');           
+                                                                        
+   DISP_CNT_1 = FT2_FET;                                                
+   DISP_CNT_2 = FT2_FET_1;                                              
+   DISP_CNT_3 = FT2_FET_2;                                              
+                                                                        
+   PUT SKIP LIST('Fetch BE800/BE801 - Ialt      :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   DISP_CNT_1 = FT2_INS;                                                
+   DISP_CNT_2 = FT2_INS_1;                                              
+   DISP_CNT_3 = FT2_INS_2;                                              
+   DISP_CNT_4 = FT2_INS_803;                                            
+                                                                        
+   PUT SKIP LIST('Insert BE802 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+   PUT SKIP LIST('            Sqlcode fejl -803 :' !! DISP_CNT_4);      
+                                                                        
+   PUT SKIP LIST('');                                                   
+ END;                                                                   
+                                                                        
+ IF CALL_EG3 THEN DO;                                                   
+   PUT SKIP LIST('Resultat for BE33625 - EG3 Forberedelse:');           
+                                                                        
+   DISP_CNT_1 = EG3_FET;                                                
+   DISP_CNT_2 = EG3_FET_1;                                              
+   DISP_CNT_3 = EG3_FET_2;                                              
+                                                                        
+   PUT SKIP LIST('Fetch BE800 - Ialt            :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   DISP_CNT_1 = EG3_INS;                                                
+   DISP_CNT_2 = EG3_INS_1;                                              
+   DISP_CNT_3 = EG3_INS_2;                                              
+   DISP_CNT_4 = EG3_INS_803;                                            
+                                                                        
+   PUT SKIP LIST('Insert BE802 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+   PUT SKIP LIST('            Sqlcode fejl -803 :' !! DISP_CNT_4);      
+                                                                        
+   PUT SKIP LIST('');                                                   
+ END;                                                                   
+                                                                        
+ IF CALL_FT4 THEN DO;                                                   
+   PUT SKIP LIST('Resultat for BE33625 - FT4 Forberedelse:');           
+                                                                        
+   DISP_CNT_1 = FT4_FET;                                                
+   DISP_CNT_2 = FT4_FET_1;                                              
+   DISP_CNT_3 = FT4_FET_2;                                              
+                                                                        
+   PUT SKIP LIST('Fetch BE801/BE802 - Ialt      :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   DISP_CNT_1 = FT4_UPD;                                                
+   DISP_CNT_2 = FT4_UPD_1;                                              
+   DISP_CNT_3 = FT4_UPD_2;                                              
+                                                                        
+   PUT SKIP LIST('Update BE802 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   PUT SKIP LIST('');                                                   
+ END;                                                                   
+                                                                        
+ IF CALL_EG4 THEN DO;                                                   
+   PUT SKIP LIST('Resultat for BE33625 - EG4 Forberedelse:');           
+                                                                        
+   DISP_CNT_1 = EG4_FET;                                                
+   DISP_CNT_2 = EG4_FET_1;                                              
+   DISP_CNT_3 = EG4_FET_2;                                              
+                                                                        
+   PUT SKIP LIST('Fetch BE800/BE802 - Ialt      :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   DISP_CNT_1 = EG4_UPD;                                                
+   DISP_CNT_2 = EG4_UPD_1;                                              
+   DISP_CNT_3 = EG4_UPD_2;                                              
+                                                                        
+   PUT SKIP LIST('Update BE802 - Ialt           :' !! DISP_CNT_1);      
+   PUT SKIP LIST('            Enhedsløbenummer 1:' !! DISP_CNT_2);      
+   PUT SKIP LIST('            Enhedsløbenummer 2:' !! DISP_CNT_3);      
+                                                                        
+   PUT SKIP LIST('');                                                   
+ END;                                                                   
+                                                                        
+ PUT SKIP LIST(PROGRAM_TXT !! SLUT_TXT);                                
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /********************************************************************/ 
+ /* Insert række i EVS-ejerboligfordelingstabellen med CN570 data    */ 
+ /********************************************************************/ 
+ INSERT_BE800: PROC(HANDLE_NOW,IX);                                     
+                                                                        
+ DCL HANDLE_NOW CHAR(3);                                                
+ DCL IX         FIXED BIN(15);                                          
+                                                                        
+ DCLBE80000T               = '';                                        
+ DCLBE80000T.TIL_EVS_AAR   = INDKAAR;                                   
+ DCLBE80000T.AFVIKLINGS_ID = AFVIKL_ID;                                 
+ DCLBE80000T.DATA_ID       = BE55600M.DATA_ID;                          
+ DCLBE80000T.EKOMNR        = CN570.EKOMNR;                              
+ DCLBE80000T.EEJDNR        = CN570.EEJDNR;                              
+ DCLBE80000T.ADRSNAVN_EJEB = '';                                        
+ DCLBE80000T.CEJDTYPE      = EJDTYPE;                                   
+ DCLBE80000T.INSERT_AF     = 'BE336'!!HANDLE_NOW;                       
+                                                                        
+ IF EVS_KOERSEL = EVS_KOERSEL_S                                         
+  ! EVS_KOERSEL = EVS_KOERSEL_U THEN DO;                                
+    IF NY_VURDERING THEN DO;                                    /*#01*/ 
+       DCLBE80000T.VEJK_EJEB  = CN570.VURDOPLNY.VEJK_EJEB(IX);          
+       DCLBE80000T.HUSNR_EJEB = CN570.VURDOPLNY.HUSNR_EJEB(IX);         
+       DCLBE80000T.ETAGE_EJEB = CN570.VURDOPLNY.ETAGE_EJEB(IX);         
+       DCLBE80000T.DØRNR_EJEB = CN570.VURDOPLNY.SDØR_EJEB(IX);          
+       DCLBE80000T.DVURDÅR    = CN570.VURDOPLNY.DVURDÅR;        /*#03*/ 
+    END;                                                        /*#01*/ 
+    ELSE DO;                                                    /*#01*/ 
+       DCLBE80000T.VEJK_EJEB  = CN570.VURDOPLGL.VEJK_EJEB(IX);  /*#01*/ 
+       DCLBE80000T.HUSNR_EJEB = CN570.VURDOPLGL.HUSNR_EJEB(IX); /*#01*/ 
+       DCLBE80000T.ETAGE_EJEB = CN570.VURDOPLGL.ETAGE_EJEB(IX); /*#01*/ 
+       DCLBE80000T.DØRNR_EJEB = CN570.VURDOPLGL.SDØR_EJEB(IX);  /*#01*/ 
+       DCLBE80000T.DVURDÅR    = CN570.VURDOPLGL.DVURDÅR;        /*#01*/ 
+    END;                                                        /*#01*/ 
+ END;                                                                   
+ ELSE DO;                                                               
+   DCLBE80000T.VEJK_EJEB     = CN570.VURDOPLGL.VEJK_EJEB(IX);           
+   DCLBE80000T.HUSNR_EJEB    = CN570.VURDOPLGL.HUSNR_EJEB(IX);          
+   DCLBE80000T.ETAGE_EJEB    = CN570.VURDOPLGL.ETAGE_EJEB(IX);          
+   DCLBE80000T.DØRNR_EJEB    = CN570.VURDOPLGL.SDØR_EJEB(IX);           
+   DCLBE80000T.DVURDÅR       = CN570.VURDOPLGL.DVURDÅR;                 
+ END;                                                                   
+                                                                        
+                                                                        
+ EXEC SQL INSERT                                                        
+          INTO  BE80000T                                                
+                (TIL_EVS_AAR                                            
+                ,AFVIKLINGS_ID                                          
+                ,DATA_ID                                                
+                ,EKOMNR                                                 
+                ,EEJDNR                                                 
+                ,VEJK_EJEB                                              
+                ,HUSNR_EJEB                                             
+                ,ETAGE_EJEB                                             
+                ,DØRNR_EJEB                                             
+                ,ADRSNAVN_EJEB                                          
+                ,DVURDÅR                                                
+                ,CEJDTYPE                                               
+                ,INSERT_TS                                              
+                ,INSERT_AF)                                             
+          VALUES(:DCLBE80000T.TIL_EVS_AAR                               
+                ,:DCLBE80000T.AFVIKLINGS_ID                             
+                ,:DCLBE80000T.DATA_ID                                   
+                ,:DCLBE80000T.EKOMNR                                    
+                ,:DCLBE80000T.EEJDNR                                    
+                ,:DCLBE80000T.VEJK_EJEB                                 
+                ,:DCLBE80000T.HUSNR_EJEB                                
+                ,:DCLBE80000T.ETAGE_EJEB                                
+                ,:DCLBE80000T.DØRNR_EJEB                                
+                ,:DCLBE80000T.ADRSNAVN_EJEB                             
+                ,:DCLBE80000T.DVURDÅR                                   
+                ,:DCLBE80000T.CEJDTYPE                                  
+                ,CURRENT TIMESTAMP                                      
+                ,:DCLBE80000T.INSERT_AF);                               
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     COMMIT_COUNT = COMMIT_COUNT + 1;                                   
+                                                                        
+     FT1_INS = FT1_INS + 1;                                             
+                                                                        
+     IF EN_EJERBOLIG THEN DO;                                           
+       FT1_INS_EN = FT1_INS_EN + 1;                                     
+     END;                                                               
+                                                                        
+     IF TO_EJERBOLIG THEN DO;                                           
+       IF IX = 1 THEN DO;                                               
+         FT1_INS_TO_1 = FT1_INS_TO_1 + 1;                               
+       END;                                                             
+       ELSE DO;                                                         
+         FT1_INS_TO_2 = FT1_INS_TO_2 + 1;                               
+       END;                                                             
+     END;                                                               
+                                                                        
+     IF (   PUTSKIP_THIS                    )                           
+      & (  FT1_READ > DEBUG_REC.DEBUG_FROM                              
+         ! FT1_READ = DEBUG_REC.DEBUG_FROM)                             
+      & (  FT1_READ < DEBUG_REC.DEBUG_TO                                
+         ! FT1_READ = DEBUG_REC.DEBUG_TO  ) THEN DO;                    
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80000T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80000T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80000T.VEJK_EJEB;                             
+       DISP_HUSNR  = DCLBE80000T.HUSNR_EJEB;                            
+       DISP_ETAGE  = DCLBE80000T.ETAGE_EJEB;                            
+       DISP_DØRNR  = DCLBE80000T.DØRNR_EJEB;                            
+                                                                        
+       IF IX = 1 THEN DO;                                               
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! INSERT_TXT_1 !! DISP_X);
+       END;                                                             
+       ELSE DO;                                                         
+         PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! INSERT_TXT_2 !! DISP_X);
+       END;                                                             
+     END;                                                               
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     PUT SKIP DATA(DCLBE80000T);                                        
+     DISP_1       = IX;                                                 
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '115';                                              
+     ABEND_TXT    = 'Fejl i INSERT_BE800(' !! HANDLE_NOW !! ','         
+                    !! DISP_1 !! ') - Sqlcode ' !! DISP_4;              
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END INSERT_BE800;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Insert række i EVS-enhedsløbenummertabellen (BE802)              */ 
+ /********************************************************************/ 
+ INSERT_BE802: PROC(HANDLE_NOW);                                        
+                                                                        
+ DCL HANDLE_NOW CHAR(3);                                                
+                                                                        
+ DCL EJBOLFDLNR_INDICATOR FIXED BIN(15) INIT(0);                        
+ DCL UPDATE_TS_INDICATOR  FIXED BIN(15) INIT(-1);                       
+ DCL UPDATE_AF_INDICATOR  FIXED BIN(15) INIT(-1);                       
+                                                                        
+ DCLBE80200T.EKOMNR       = DCLBE80000T.EKOMNR;                         
+ DCLBE80200T.EEJDNR       = DCLBE80000T.EEJDNR;                         
+ DCLBE80200T.EENHEDLBNR   = ENHEDLBNR;                                  
+ DCLBE80200T.VEJK_ENH     = DCLBE80000T.VEJK_EJEB;                      
+ DCLBE80200T.HUSNR_ENH    = DCLBE80000T.HUSNR_EJEB;                     
+ DCLBE80200T.ETAGE_ENH    = DCLBE80000T.ETAGE_EJEB;                     
+ DCLBE80200T.DØRNR_ENH    = DCLBE80000T.DØRNR_EJEB;                     
+ DCLBE80200T.DVURDÅR      = DCLBE80000T.DVURDÅR;                        
+ DCLBE80200T.INSERT_AF    = 'BE336'!!HANDLE_NOW;                        
+                                                                        
+ IF HANDLE_NOW = HANDLE_EG3 THEN DO;                                    
+   EJBOLFDLNR_INDICATOR   = -1;                                         
+   DCLBE80200T.EJBOLFDLNR = '';                                         
+ END;                                                                   
+ ELSE DO;                                                               
+   EJBOLFDLNR_INDICATOR   = 0;                                          
+   DCLBE80200T.EJBOLFDLNR = DCLBE80100T.EJBOLFDLNR;                     
+ END;                                                                   
+                                                                        
+ EXEC SQL INSERT                                                        
+          INTO  BE80200T                                                
+                (EKOMNR                                                 
+                ,EEJDNR                                                 
+                ,EENHEDLBNR                                             
+                ,VEJK_ENH                                               
+                ,HUSNR_ENH                                              
+                ,ETAGE_ENH                                              
+                ,DØRNR_ENH                                              
+                ,ADRSNAVN_ENH                                           
+                ,EJBOLFDLNR                                             
+                ,DVURDÅR                                                
+                ,INSERT_TS                                              
+                ,INSERT_AF                                              
+                ,UPDATE_TS                                              
+                ,UPDATE_AF)                                             
+            VALUES(:DCLBE80200T.EKOMNR                                  
+                  ,:DCLBE80200T.EEJDNR                                  
+                  ,:DCLBE80200T.EENHEDLBNR                              
+                  ,:DCLBE80200T.VEJK_ENH                                
+                  ,:DCLBE80200T.HUSNR_ENH                               
+                  ,:DCLBE80200T.ETAGE_ENH                               
+                  ,:DCLBE80200T.DØRNR_ENH                               
+                  ,:DCLBE80200T.ADRSNAVN_ENH                            
+                  ,:DCLBE80200T.EJBOLFDLNR                              
+                   :EJBOLFDLNR_INDICATOR                                
+                  ,:DCLBE80200T.DVURDÅR                                 
+                  ,CURRENT TIMESTAMP                                    
+                  ,:DCLBE80200T.INSERT_AF                               
+                  ,:DCLBE80200T.UPDATE_TS                               
+                   :UPDATE_TS_INDICATOR                                 
+                  ,:DCLBE80200T.UPDATE_AF                               
+                   :UPDATE_AF_INDICATOR);                               
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     COMMIT_COUNT  = COMMIT_COUNT + 1;                                  
+                                                                        
+     IF HANDLE_NOW = HANDLE_FT2 THEN DO;                                
+       FT2_INS = FT2_INS + 1;                                           
+                                                                        
+       SELECT(ENHEDLBNR);                                               
+         WHEN(1)   FT2_INS_1 = FT2_INS_1 + 1;                           
+         WHEN(2)   FT2_INS_2 = FT2_INS_2 + 1;                           
+         OTHERWISE ;                                                    
+       END;                                                             
+    END;                                                                
+                                                                        
+     IF HANDLE_NOW = HANDLE_EG3 THEN DO;                                
+       EG3_INS = EG3_INS + 1;                                           
+                                                                        
+       SELECT(ENHEDLBNR);                                               
+         WHEN(1)   EG3_INS_1 = EG3_INS_1 + 1;                           
+         WHEN(2)   EG3_INS_2 = EG3_INS_2 + 1;                           
+         OTHERWISE ;                                                    
+       END;                                                             
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR = DCLBE80200T.EKOMNR;                                
+       DISP_EEJDNR = DCLBE80200T.EEJDNR;                                
+       DISP_VEJRK  = DCLBE80200T.VEJK_ENH;                              
+       DISP_HUSNR  = DCLBE80200T.HUSNR_ENH;                             
+       DISP_ETAGE  = DCLBE80200T.ETAGE_ENH;                             
+       DISP_DØRNR  = DCLBE80200T.DØRNR_ENH;                             
+       DISP_ENHED  = DCLBE80200T.EENHEDLBNR;                            
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! INSERT_TXT !! DISP_X);    
+     END;                                                               
+   END;                                                                 
+                                                                        
+   WHEN(-803) DO;                                                       
+     IF HANDLE_NOW = HANDLE_FT2 THEN DO;                                
+       FT2_INS_803 = FT2_INS_803 + 1;                                   
+     END;                                                               
+                                                                        
+     IF HANDLE_NOW = HANDLE_EG3 THEN DO;                                
+       EG3_INS_803 = EG3_INS_803 + 1;                                   
+     END;                                                               
+                                                                        
+     CALL INIT_DISP_X;                                                  
+                                                                        
+     DISP_EKOMNR = DCLBE80200T.EKOMNR;                                  
+     DISP_EEJDNR = DCLBE80200T.EEJDNR;                                  
+     DISP_VEJRK  = DCLBE80200T.VEJK_ENH;                                
+     DISP_HUSNR  = DCLBE80200T.HUSNR_ENH;                               
+     DISP_ETAGE  = DCLBE80200T.ETAGE_ENH;                               
+     DISP_DØRNR  = DCLBE80200T.DØRNR_ENH;                               
+     DISP_ENHED  = DCLBE80200T.EENHEDLBNR;                              
+     DISP_4      = SQLCA.SQLCODE;                                       
+     DISP_STATUS = DISP_4_X;                                            
+                                                                        
+     PUT SKIP LIST(FEJL_TXT !! PROCNAME                                 
+                   !! '(' !! HANDLE_NOW  !! ') ' !! DISP_X);            
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     PUT SKIP DATA(DCLBE80200T);                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '116';                                              
+     ABEND_TXT    = 'Fejl i INSERT_BE802(' !! HANDLE_NOW                
+                    !! ') - Sqlcode ' !! DISP_4;                        
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END INSERT_BE802;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Opdater række i EVS-enhedsløbenummertabellen (BE802)             */ 
+ /********************************************************************/ 
+ UPDATE_BE802: PROC(HANDLE_NOW);                                        
+                                                                        
+ DCL HANDLE_NOW CHAR(3);                                                
+                                                                        
+ DCLBE80200T.UPDATE_AF = 'BE336'!!HANDLE_NOW;                           
+                                                                        
+ IF HANDLE_NOW = HANDLE_FT4 THEN DO;               /* D245  */          
+   EXEC SQL UPDATE BE80200T                                             
+            SET    ADRSNAVN_ENH = :DCLBE80200T.ADRSNAVN_ENH             
+                  ,UPDATE_TS    = CURRENT TIMESTAMP                     
+                  ,UPDATE_AF    = :DCLBE80200T.UPDATE_AF                
+            WHERE  EKOMNR       = :DCLBE80200T.EKOMNR                   
+            AND    EEJDNR       = :DCLBE80200T.EEJDNR                   
+            AND    VEJK_ENH     = :DCLBE80200T.VEJK_ENH                 
+            AND    EENHEDLBNR   = :DCLBE80200T.EENHEDLBNR               
+            AND    ADRSNAVN_ENH <> :DCLBE80200T.ADRSNAVN_ENH;           
+ END;                                                                   
+ ELSE DO;                                                               
+   EXEC SQL UPDATE BE80200T                                             
+            SET    ADRSNAVN_ENH = :DCLBE80200T.ADRSNAVN_ENH             
+                  ,UPDATE_TS    = CURRENT TIMESTAMP                     
+                  ,UPDATE_AF    = :DCLBE80200T.UPDATE_AF                
+            WHERE  EKOMNR       = :DCLBE80200T.EKOMNR                   
+            AND    EEJDNR       = :DCLBE80200T.EEJDNR                   
+            AND    VEJK_ENH     = :DCLBE80200T.VEJK_ENH                 
+            AND    LPAD(TRIM(' ' FROM BE80200T.HUSNR_ENH    ), 4, '0')  
+              =    LPAD(TRIM(' ' FROM :DCLBE80200T.HUSNR_ENH), 4, '0')  
+            AND    LPAD(TRIM(' ' FROM BE80200T.ETAGE_ENH    ), 2, '0')  
+              =    LPAD(TRIM(' ' FROM :DCLBE80200T.ETAGE_ENH), 2, '0')  
+            AND    LPAD(TRIM(' ' FROM  BE80200T.DØRNR_ENH   ), 4, '0')  
+              =    LPAD(TRIM(' ' FROM :DCLBE80200T.DØRNR_ENH), 4, '0'); 
+ END;                                                                   
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     COMMIT_COUNT  = COMMIT_COUNT + 1;                                  
+                                                                        
+     IF HANDLE_NOW = HANDLE_EG4 THEN DO;                                
+       EG4_UPD = EG4_UPD + 1;                                           
+                                                                        
+       SELECT(DCLBE80200T.EENHEDLBNR);                                  
+         WHEN(1)   EG4_UPD_1 = EG4_UPD_1 + 1;                           
+         WHEN(2)   EG4_UPD_2 = EG4_UPD_2 + 1;                           
+         OTHERWISE ;                                                    
+       END;                                                             
+     END;                                                               
+     ELSE DO;                                                           
+       FT4_UPD = FT4_UPD + 1;                                           
+                                                                        
+       SELECT(DCLBE80200T.EENHEDLBNR);                                  
+         WHEN(1)   FT4_UPD_1 = FT4_UPD_1 + 1;                           
+         WHEN(2)   FT4_UPD_2 = FT4_UPD_2 + 1;                           
+         OTHERWISE ;                                                    
+       END;                                                             
+     END;                                                               
+                                                                        
+     IF PUTSKIP_THIS THEN DO;                                           
+       CALL INIT_DISP_X;                                                
+                                                                        
+       DISP_EKOMNR   = DCLBE80200T.EKOMNR;                              
+       DISP_EEJDNR   = DCLBE80200T.EEJDNR;                              
+       DISP_VEJRK    = DCLBE80200T.EJBOLFDLNR;                          
+                                                                        
+       IF HANDLE_NOW = HANDLE_EG4 THEN DO;                              
+         DISP_HUSNR  = DCLBE80200T.HUSNR_ENH;                           
+         DISP_ETAGE  = DCLBE80200T.ETAGE_ENH;                           
+         DISP_DØRNR  = DCLBE80200T.DØRNR_ENH;                           
+       END;                                                             
+                                                                        
+       PUT SKIP LIST(DEBUG_TXT !! PROCNAME !! UPDATE_TXT !! DISP_X);    
+     END;                                                               
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     PUT SKIP DATA(DCLBE80200T);                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '117';                                              
+     ABEND_TXT    = 'Fejl i UPDATE_BE802(' !! HANDLE_NOW                
+                    !! ') - Sqlcode ' !! DISP_4;                        
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END UPDATE_BE802;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Tæl hvor mange rækker der er per EKOMNR, EEJDNR, VEJK_ENH,       */ 
+ /* HUSNR_ENH, ETAGE_ENH, DØRNR_ENH og DVURDÅR i                     */ 
+ /* EVS-enhedsløbenummertabellen (BE802)                             */ 
+ /********************************************************************/ 
+ SELECT_CNT_BE802: PROC RETURNS(FIXED BIN(15));                         
+                                                                        
+ DCL CNT_ANTAL  FIXED BIN(15) INIT(0);                                  
+                                                                        
+ EXEC SQL SELECT COUNT(*)                                               
+          INTO   :CNT_ANTAL                                             
+          FROM   BE80200T                                               
+          WHERE  EKOMNR = :DCLBE80000T.EKOMNR                           
+          AND    EEJDNR = :DCLBE80000T.EEJDNR;                          
+                                                                        
+ SELECT (SQLCA.SQLCODE);                                                
+   WHEN(0) DO;                                                          
+     CNT_ANTAL = CNT_ANTAL + 1;                                         
+                                                                        
+     RETURN(CNT_ANTAL);                                                 
+   END;                                                                 
+                                                                        
+   OTHERWISE DO;                                                        
+     PUT SKIP DATA(DCLBE80200T);                                        
+     DISP_4       = SQLCA.SQLCODE;                                      
+     ABEND_FEJLNR = '118';                                              
+     ABEND_TXT    = 'Fejl i SELECT_CNT_BE802' !! ' - Sqlcode '          
+                    !! DISP_4;                                          
+     CALL SQL_FEJL;                                                     
+   END;                                                                 
+ END;                                                                   
+                                                                        
+ END SELECT_CNT_BE802;                                                  
+                                                                        
+ /********************************************************************/ 
+ /* Init DISP_X strengen                                             */ 
+ /********************************************************************/ 
+ INIT_DISP_X: PROC;                                                     
+                                                                        
+ DCL EN_TXT CHAR(02) INIT('EN');                                        
+ DCL TO_TXT CHAR(02) INIT('TO');                                        
+ DCL OK_TXT CHAR(04) INIT('OK  ');                                      
+                                                                        
+ DISP_X = '';                                                           
+                                                                        
+ IF EN_EJERBOLIG THEN DO;                                               
+   DISP_EJERBO = EN_TXT;                                                
+ END;                                                                   
+                                                                        
+ IF TO_EJERBOLIG THEN DO;                                               
+   DISP_EJERBO = TO_TXT;                                                
+ END;                                                                   
+                                                                        
+ DISP_STATUS = OK_TXT;                                                  
+                                                                        
+ END INIT_DISP_X;                                                       
+                                                                        
+ /********************************************************************/ 
+ /* Commit og put skip                                               */ 
+ /********************************************************************/ 
+ DB2_COMMIT: PROC;                                                      
+                                                                        
+ IF COMMIT_COUNT > COMMIT_VALUE                                         
+  ! COMMIT_COUNT = COMMIT_VALUE THEN DO;                                
+   EXEC SQL COMMIT;                                                     
+                                                                        
+   COMMIT_COUNT = 0;                                                    
+   COMMIT_NR     = COMMIT_NR + 1;                                       
+                                                                        
+   PUT SKIP LIST('Commit nr ' !! COMMIT_NR);                            
+ END;                                                                   
+                                                                        
+ END DB2_COMMIT;                                                        
+                                                                        
+ /********************************************************************/ 
+ /* Udskriv sql fejl                                                 */ 
+ /********************************************************************/ 
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+ PUT SKIP LIST ('*****************************************');           
+ PUT SKIP LIST ('Der abendes med programfejl');                         
+ PUT SKIP LIST ('ABEND_TXT:                 ' !! ABEND_TXT);            
+ PUT SKIP LIST ('*****************************************');           
+ CALL ZS30101(5,ABEND_MEDDEL,2);                                        
+                                                                        
+ END PROGRAM_FEJL;                                                      
+                                                                        
+ /********************************************************************/ 
+ /* Udskriv sql fejl                                                 */ 
+ /********************************************************************/ 
+ SQL_FEJL: PROC;                                                        
+                                                                        
+ PUT SKIP LIST ('*****************************************');           
+ PUT SKIP LIST ('Der abendes med sqlcode: ' !! SQLCA.SQLCODE);          
+ PUT SKIP LIST ('ABEND_TXT:               ' !! ABEND_TXT);              
+ PUT SKIP LIST ('*****************************************');           
+                                                                        
+ CALL ZS67000(SQLCA);                                                   
+ CALL ZS30101(5,ABEND_MEDDEL,2);                                        
+                                                                        
+ CONDCODE = 99;                                                         
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ END BE33625;                                                           

@@ -1,0 +1,2318 @@
+ BH22000: /* EVS - BEHANDLING AF 2-EJERES EJERANDELSPROCENT */          
+         PROC OPTIONS (MAIN) REORDER;                                   
+ /*********************************************************************/
+ /*                                                                  */ 
+ /*      ÅRSTILRETNING VIL 'NORMALT' KUN BESTÅ AF REKOMPILERING       */
+ /*      PÅ GRUND AF ÆNDRING(ER) I INPUT-STRUKTURER.                  */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      PROGRAMMET BEHANDLER EJENDOMME MED 2 EJERE.                  */
+ /*      PROGRAMMETS FORMÅL ER AT KONTROLLERE OG EVT. OPSÆTTE         */
+ /*      OG/ELLER NULSTILLE EJERANDELS-PROCENTEN.                     */
+ /*                                                                   */
+ /*      INDDATA : B.H31811D (SORTERET UDTRÆK AF 2-EJERE)             */
+ /*                                                                   */
+ /*      UDDATA  : B.H32000D (BEHANDLET UDTRÆK AF 2-EJERE)            */
+ /*              : BH32001Y  KONTROLLISTE                             */
+ /*                                                                   */
+ /*      EXT. REF: ZS61900   (SSI-DATO)                               */
+ /*                                                                   */
+ /* PROGRAMMØR:    AAGE RASMUSSEN, LSU T&S  NOV. 2001 (P.G.A. BH90300)*/
+ /* ÅRSTILRETTET:  OLUF MØRK,      LSU T&S  JULI 2002                 */
+ /*                                                                   */
+ /* SLUT 2012    OMCOMPILERET P.G.A.            LKA OKTOBER 2012      */
+ /*              NYT FELT CEANV I STRUKTUR BH31800N                   */
+ /*              KRAV 18-01 - BENYTTELSESKODE 25                      */
+ /* FORSKUD 2014    Lars Harritshøj                   maj 2013        */
+ /*                 Omcompileret                                      */
+ /* SLUT 2013    OMCOMPILERET                   QQS OKTOBER 2013      */
+ /* FORSKUD2015  Jørgen Saugmann                      jun 2014        */
+ /*              Compileret Ingen ændringer                           */
+ /* SLUT2014     Jørgen Saugmann                      OKT 2014        */
+ /*              Compileret Ingen ændringer                           */
+ /* FORSKUD2016  Z6JNK                                   08.06.2015   */
+ /*              Compileret. Ingen ændringer                          */
+ /* OMLÆGNINGDB2 Z6QLE                                   15.02.2017   */
+ /*              mandtalsfil samt beregningsbånd omlagt til db2       */
+ /*********************************************************************/
+                                                                        
+ DCL COPYRIGHT CHAR (30) STATIC INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES                                           */
+ /*********************************************************************/
+ DCL     ZS61900   ENTRY OPTIONS (INTER ASM);          /* UDSKRIV SSI */
+ DCL     ZS38100   ENTRY OPTIONS (INTER ASM);          /* TIMESTAMP   */
+ DCL     ZS30101   ENTRY;                                               
+ DCL     ZS67000   ENTRY;                                               
+ DCL     ADDR      BUILTIN;                                             
+ /*********************************************************************/
+ /*      DECLARE AF FILER                                             */
+ /*********************************************************************/
+ DCL     BH220I          FILE RECORD INPUT;     /* PARAMETERINPUT */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ DCL     1 P1,                                                          
+         %INCLUDE BQ7500TN;                                             
+                                                                        
+ DCL     1 P2,                                                          
+         %INCLUDE BQ7500TN;                                             
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*********************************************************************/
+ DCL     1 TV,                                                          
+           2  LÆSTE1     FIXED DEC (7),      /* LÆSTE PERSON1         */
+           2  LÆSTE2     FIXED DEC (7),      /* LÆSTE PERSON2         */
+           2  OVF1       FIXED DEC (7),      /* OVERFØRTE PERSON1     */
+           2  OVF2       FIXED DEC (7),      /* OVERFØRTE PERSON2     */
+           2  DELING     FIXED DEC (7),      /* DELING AF ANDEL LAVET */
+           2 ANT_COMM    FIXED DEC (7) INIT (0),                        
+           2 ANT_SKR     FIXED DEC (7) INIT (0),                        
+           2 ANT_UPD     FIXED DEC (7) INIT (0),                        
+           2 ANT_INS     FIXED DEC (7) INIT (0);                        
+                                                                        
+ DCL     IALT            FIXED DEC (7);                                 
+ /*********************************************************************/
+ /*      DECLARE AF DIVERSE FELTER                                    */
+ /*********************************************************************/
+ DCL     EOF_BH220       BIT       (1);                                 
+                                                                        
+ DCL     JA       BIT       (1)    INIT ('1'B);                         
+ DCL     NEJ      BIT       (1)    INIT ('0'B);                         
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     SKRIVES         CHAR      (01);                                
+ DCL     1 GEM,                              /* BRUGES VED FORDELING  */
+           2 EEJDNR      FIXED     (7),      /* AF EJERANDEL FOR      */
+           2 EJER_GANE   FIXED     (5);      /* 2-EJERE UDEN MAKKER   */
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_TIL_EVS_AAR_GL              BIN FIXED (15);                 
+ DCL     WS_SLUT_AFVIKLINGS_ID          CHAR(16) INIT (' ');            
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BH22000');              
+                                                                        
+ DCL     1 BH220_PARM,                                                  
+           %INCLUDE BH54900N;                                           
+                                                                        
+ DCL     1 BH65300M,     /* EVS STD. MACRO */                           
+           %INCLUDE BH65300M; /* OPSÆT AKTUELT INDKOMSTÅR M.V. */       
+ /*********************************************************************/
+ /*                                                                   */
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*                                                                   */
+ /*********************************************************************/
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BH22000'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTE                      */
+ /*********************************************************************/
+ DCL     1 OVLIN1,                                                      
+           2 CTL         CHAR      (01),                                
+           2 TXT1        CHAR      (50) INIT ('PROGRAM: BH22000L'),     
+           2 TXT2        CHAR      (58) INIT                            
+             ('BEHANDLE TO-EJERE FØR EVS-BEREGNING   '),                
+           2 TXT3        CHAR      (14) INIT ('UDSKREVET DEN'),         
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVLIN2,                                                      
+           2 CTL         CHAR      (01),                                
+           2 F1          CHAR      (51) INIT (' '),                     
+           2 TXT1        CHAR      (91) INIT                            
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     LINIE           CHAR      (133);                               
+ DCL     1  DETAIL                           DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (44),                                
+          2  ANTAL1      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE1     CHAR      (8),                                 
+          2  ANTAL2      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE2     CHAR      (11),                                
+          2  ANTALF      PIC       'Z.ZZZ.ZZ9',                         
+          2  BLANKE3     CHAR      (11),                                
+          2  ANTALIALT   PIC       'Z.ZZZ.ZZ9';                         
+ DCL     1  DETAIL2                          DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (44),                                
+          2  BLANKE      CHAR      (37),                                
+          2  IALT        PIC       'Z.ZZZ.ZZ9';                         
+         %INCLUDE ZZ20301M;                                             
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL FEJLLISTE                         */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+                                                                        
+ /*********************************************************************/
+ /* M A C R O E R der SKAL ligge før koden grundet declare af cursors */
+ /*********************************************************************/
+ %INCLUDE BH54999M; /* CHECK OM OMKØRSEL, OG UDFØR EVT OPRYDNING */     
+                                                                        
+ /*********************************************************************/
+ /* Declare af CURSORS                                                */
+ /*********************************************************************/
+         EXEC SQL DECLARE ESRCURS CURSOR WITH HOLD FOR                  
+              SELECT                                                    
+               TIL_EVS_AAR,                                             
+               AFVIKLINGS_ID,                                           
+               DCPRCIR,                                                 
+               EKOMNR,                                                  
+               EEJDNR,                                                  
+               EGENNR,                                                  
+               PROGRAMNAVN,                                             
+               DB2_FUNKTION,                                            
+               ESR_SORTDATO,                                            
+               ESR_CCIVS,                                               
+               ESR_CSBSK,                                               
+               EJER_DCPRCIR,                                            
+               EJER_CITYP,                                              
+               EJER_CTILKØB,                                            
+               EJER_DRGNÅRFRA,                                          
+               EJER_DRGNÅRTIL,                                          
+               EJER_DOVTG,                                              
+               EJER_DOVTG_GL,                                           
+               EJER_DINDFLYT,                                           
+               EJER_DAFSTÅ,                                             
+               EJER_DFRAFLYT,                                           
+               EJER_DAFGDAT,                                            
+               EJER_DSLUTS,                                             
+               EJER_DSKØDE,                                             
+               EJER_CEJFOER0107,                                        
+               EJER_CEJFORH,                                            
+               EJER_CPENS,                                              
+               EJER_FEJER,                                              
+               EJER_GANE,                                               
+               EJER_CEJ_100,                                            
+               EJER_CHEJD,                                              
+               EJER_VEJK_EJER,                                          
+               EJER_HUSNR_EJER,                                         
+               EJER_ETAGE_EJER,                                         
+               EJER_SDØR_EJER,                                          
+               EJER_BOPÆLSKODE,                                         
+               EJER_COMPLA,                                             
+               EJER_DOMPLACPR,                                          
+               EJER_DOMPLAÅR,                                           
+               ÆGTE_DCPRCIR,                                            
+               ÆGTE_CITYP,                                              
+               ÆGTE_CTILKØB,                                            
+               ÆGTE_DRGNÅRFRA,                                          
+               ÆGTE_DRGNÅRTIL,                                          
+               ÆGTE_DOVTG,                                              
+               ÆGTE_DOVTG_GL,                                           
+               ÆGTE_DINDFLYT,                                           
+               ÆGTE_DAFSTÅ,                                             
+               ÆGTE_DFRAFLYT,                                           
+               ÆGTE_DAFGDAT,                                            
+               ÆGTE_DSLUTS,                                             
+               ÆGTE_DSKØDE,                                             
+               ÆGTE_CEJFOER0107,                                        
+               ÆGTE_CEJFORH,                                            
+               ÆGTE_CPENS,                                              
+               ÆGTE_FEJER,                                              
+               ÆGTE_GANE,                                               
+               ÆGTE_CEJ_100,                                            
+               ÆGTE_CHEJD,                                              
+               ÆGTE_VEJK_EJER,                                          
+               ÆGTE_HUSNR_EJER,                                         
+               ÆGTE_ETAGE_EJER,                                         
+               ÆGTE_SDØR_EJER,                                          
+               ÆGTE_BOPÆLSKODE,                                         
+               ÆGTE_COMPLA,                                             
+               ÆGTE_DOMPLACPR,                                          
+               ÆGTE_DOMPLAÅR,                                           
+               OPL_ABELMAT,                                             
+               OPL_SKATSTOP_DSTOPÅR,                                    
+               OPL_OMB02_1_KONSEKVENS,                                  
+               OPL_OMB02_1_STK12,                                       
+               OPL_OMB02_1_STK13,                                       
+               OPL_OMB02_1_STK14,                                       
+               OPL_OMB02_1_STK15,                                       
+               OPL_OMB02_1_CBENYT,                                      
+               OPL_OMB02_1_FLEJL,                                       
+               OPL_OMB02_1_BEJDVÆR,                                     
+               OPL_OMB02_1_EJBOL1_VEJK_EJEB,                            
+               OPL_OMB02_1_EJBOL1_HUSNR_EJEB,                           
+               OPL_OMB02_1_EJBOL1_ETAGE_EJEB,                           
+               OPL_OMB02_1_EJBOL1_SDØR_EJEB,                            
+               OPL_OMB02_1_EJBOL1_EJBOLTYP,                             
+               OPL_OMB02_1_EJBOL1_BEJEBOL,                              
+               OPL_OMB02_1_EJBOL2_VEJK_EJEB,                            
+               OPL_OMB02_1_EJBOL2_HUSNR_EJEB,                           
+               OPL_OMB02_1_EJBOL2_ETAGE_EJEB,                           
+               OPL_OMB02_1_EJBOL2_SDØR_EJEB,                            
+               OPL_OMB02_1_EJBOL2_EJBOLTYP,                             
+               OPL_OMB02_1_EJBOL2_BEJEBOL,                              
+               OPL_OMB02_1_ANT_FOR_1,                                   
+               OPL_OMB02_1_ANT_FOR_2,                                   
+               OPL_OMB02_1_ANT_FOR_4,                                   
+               OPL_OMB02_1_ANT_FOR_5,                                   
+               OPL_OMB02_1_ANT_FOR_6,                                   
+               OPL_OMB02_1_ANT_FOR_8,                                   
+               OPL_OMB02_1_ANT_FOR_9,                                   
+               OPL_OMB02_2_KONSEKVENS,                                  
+               OPL_OMB02_2_STK12,                                       
+               OPL_OMB02_2_STK13,                                       
+               OPL_OMB02_2_STK14,                                       
+               OPL_OMB02_2_STK15,                                       
+               OPL_OMB02_2_CBENYT,                                      
+               OPL_OMB02_2_FLEJL,                                       
+               OPL_OMB02_2_BEJDVÆR,                                     
+               OPL_OMB02_2_EJBOL1_VEJK_EJEB,                            
+               OPL_OMB02_2_EJBOL1_HUSNR_EJEB,                           
+               OPL_OMB02_2_EJBOL1_ETAGE_EJEB,                           
+               OPL_OMB02_2_EJBOL1_SDØR_EJEB,                            
+               OPL_OMB02_2_EJBOL1_EJBOLTYP,                             
+               OPL_OMB02_2_EJBOL1_BEJEBOL,                              
+               OPL_OMB02_2_EJBOL2_VEJK_EJEB,                            
+               OPL_OMB02_2_EJBOL2_HUSNR_EJEB,                           
+               OPL_OMB02_2_EJBOL2_ETAGE_EJEB,                           
+               OPL_OMB02_2_EJBOL2_SDØR_EJEB,                            
+               OPL_OMB02_2_EJBOL2_EJBOLTYP,                             
+               OPL_OMB02_2_EJBOL2_BEJEBOL,                              
+               OPL_OMB02_2_ANT_FOR_1,                                   
+               OPL_OMB02_2_ANT_FOR_2,                                   
+               OPL_OMB02_2_ANT_FOR_4,                                   
+               OPL_OMB02_2_ANT_FOR_5,                                   
+               OPL_OMB02_2_ANT_FOR_6,                                   
+               OPL_OMB02_2_ANT_FOR_8,                                   
+               OPL_OMB02_2_ANT_FOR_9,                                   
+               OPL_OMB01_1_KONSEKVENS,                                  
+               OPL_OMB01_1_STK12,                                       
+               OPL_OMB01_1_STK13,                                       
+               OPL_OMB01_1_STK14,                                       
+               OPL_OMB01_1_STK15,                                       
+               OPL_OMB01_1_CBENYT,                                      
+               OPL_OMB01_1_FLEJL,                                       
+               OPL_OMB01_1_BEJDVÆR,                                     
+               OPL_OMB01_1_EJBOL1_VEJK_EJEB,                            
+               OPL_OMB01_1_EJBOL1_HUSNR_EJEB,                           
+               OPL_OMB01_1_EJBOL1_ETAGE_EJEB,                           
+               OPL_OMB01_1_EJBOL1_SDØR_EJEB,                            
+               OPL_OMB01_1_EJBOL1_EJBOLTYP,                             
+               OPL_OMB01_1_EJBOL1_BEJEBOL,                              
+               OPL_OMB01_1_EJBOL2_VEJK_EJEB,                            
+               OPL_OMB01_1_EJBOL2_HUSNR_EJEB,                           
+               OPL_OMB01_1_EJBOL2_ETAGE_EJEB,                           
+               OPL_OMB01_1_EJBOL2_SDØR_EJEB,                            
+               OPL_OMB01_1_EJBOL2_EJBOLTYP,                             
+               OPL_OMB01_1_EJBOL2_BEJEBOL,                              
+               OPL_OMB01_1_ANT_FOR_1,                                   
+               OPL_OMB01_1_ANT_FOR_2,                                   
+               OPL_OMB01_1_ANT_FOR_4,                                   
+               OPL_OMB01_1_ANT_FOR_5,                                   
+               OPL_OMB01_1_ANT_FOR_6,                                   
+               OPL_OMB01_1_ANT_FOR_8,                                   
+               OPL_OMB01_1_ANT_FOR_9,                                   
+               OPL_OMB01_2_KONSEKVENS,                                  
+               OPL_OMB01_2_STK12,                                       
+               OPL_OMB01_2_STK13,                                       
+               OPL_OMB01_2_STK14,                                       
+               OPL_OMB01_2_STK15,                                       
+               OPL_OMB01_2_CBENYT,                                      
+               OPL_OMB01_2_FLEJL,                                       
+               OPL_OMB01_2_BEJDVÆR,                                     
+               OPL_OMB01_2_EJBOL1_VEJK_EJEB,                            
+               OPL_OMB01_2_EJBOL1_HUSNR_EJEB,                           
+               OPL_OMB01_2_EJBOL1_ETAGE_EJEB,                           
+               OPL_OMB01_2_EJBOL1_SDØR_EJEB,                            
+               OPL_OMB01_2_EJBOL1_EJBOLTYP,                             
+               OPL_OMB01_2_EJBOL1_BEJEBOL,                              
+               OPL_OMB01_2_EJBOL2_VEJK_EJEB,                            
+               OPL_OMB01_2_EJBOL2_HUSNR_EJEB,                           
+               OPL_OMB01_2_EJBOL2_ETAGE_EJEB,                           
+               OPL_OMB01_2_EJBOL2_SDØR_EJEB,                            
+               OPL_OMB01_2_EJBOL2_EJBOLTYP,                             
+               OPL_OMB01_2_EJBOL2_BEJEBOL,                              
+               OPL_OMB01_2_ANT_FOR_1,                                   
+               OPL_OMB01_2_ANT_FOR_2,                                   
+               OPL_OMB01_2_ANT_FOR_4,                                   
+               OPL_OMB01_2_ANT_FOR_5,                                   
+               OPL_OMB01_2_ANT_FOR_6,                                   
+               OPL_OMB01_2_ANT_FOR_8,                                   
+               OPL_OMB01_2_ANT_FOR_9,                                   
+               OPL_VURDNY_DVURDÅR,                                      
+               OPL_VURDNY_CBENYT,                                       
+               OPL_VURDNY_FLEJL,                                        
+               OPL_VURDNY_BEJDVÆR,                                      
+               OPL_VURDNY_COMVGR1,                                      
+               OPL_VURDNY_COMVGR2,                                      
+               OPL_VURDNY_BEJDVÆP4A,                                    
+               OPL_VURDNY_BSKOV,                                        
+               OPL_VURDNY_CUOP,                                         
+               OPL_VURDNY_CEJERL,                                       
+               OPL_VURDNY_CFORSKEL,                                     
+               OPL_VURDNY_CBANV,                                        
+               OPL_VURDNY_DOPFØ,                                        
+               OPL_VURDNY_DOMTIL,                                       
+               OPL_VURDNY_EJBOL1_VEJK_EJEB,                             
+               OPL_VURDNY_EJBOL1_HUSNR_EJEB,                            
+               OPL_VURDNY_EJBOL1_ETAGE_EJEB,                            
+               OPL_VURDNY_EJBOL1_SDØR_EJEB,                             
+               OPL_VURDNY_EJBOL1_EJBOLTYP,                              
+               OPL_VURDNY_EJBOL1_BEJEBOL,                               
+               OPL_VURDNY_EJBOL2_VEJK_EJEB,                             
+               OPL_VURDNY_EJBOL2_HUSNR_EJEB,                            
+               OPL_VURDNY_EJBOL2_ETAGE_EJEB,                            
+               OPL_VURDNY_EJBOL2_SDØR_EJEB,                             
+               OPL_VURDNY_EJBOL2_EJBOLTYP,                              
+               OPL_VURDNY_EJBOL2_BEJEBOL,                               
+               OPL_VURDNY_ANT_FOR_1,                                    
+               OPL_VURDNY_ANT_FOR_2,                                    
+               OPL_VURDNY_ANT_FOR_4,                                    
+               OPL_VURDNY_ANT_FOR_5,                                    
+               OPL_VURDNY_ANT_FOR_6,                                    
+               OPL_VURDNY_ANT_FOR_8,                                    
+               OPL_VURDNY_ANT_FOR_9,                                    
+               OPL_VURDNY_OMB01_1_KONSEKVENS,                           
+               OPL_VURDNY_OMB01_1_STK12,                                
+               OPL_VURDNY_OMB01_1_STK13,                                
+               OPL_VURDNY_OMB01_1_STK14,                                
+               OPL_VURDNY_OMB01_1_STK15,                                
+               OPL_VURDNY_OMB01_2_KONSEKVENS,                           
+               OPL_VURDNY_OMB01_2_STK12,                                
+               OPL_VURDNY_OMB01_2_STK13,                                
+               OPL_VURDNY_OMB01_2_STK14,                                
+               OPL_VURDNY_OMB01_2_STK15,                                
+               OPL_VURDGL_DVURDÅR,                                      
+               OPL_VURDGL_CBENYT,                                       
+               OPL_VURDGL_FLEJL,                                        
+               OPL_VURDGL_BEJDVÆR,                                      
+               OPL_VURDGL_COMVGR1,                                      
+               OPL_VURDGL_COMVGR2,                                      
+               OPL_VURDGL_BEJDVÆP4A,                                    
+               OPL_VURDGL_BSKOV,                                        
+               OPL_VURDGL_CUOP,                                         
+               OPL_VURDGL_CEJERL,                                       
+               OPL_VURDGL_CFORSKEL,                                     
+               OPL_VURDGL_CBANV,                                        
+               OPL_VURDGL_DOPFØ,                                        
+               OPL_VURDGL_DOMTIL,                                       
+               OPL_VURDGL_EJBOL1_VEJK_EJEB,                             
+               OPL_VURDGL_EJBOL1_HUSNR_EJEB,                            
+               OPL_VURDGL_EJBOL1_ETAGE_EJEB,                            
+               OPL_VURDGL_EJBOL1_SDØR_EJEB,                             
+               OPL_VURDGL_EJBOL1_EJBOLTYP,                              
+               OPL_VURDGL_EJBOL1_BEJEBOL,                               
+               OPL_VURDGL_EJBOL2_VEJK_EJEB,                             
+               OPL_VURDGL_EJBOL2_HUSNR_EJEB,                            
+               OPL_VURDGL_EJBOL2_ETAGE_EJEB,                            
+               OPL_VURDGL_EJBOL2_SDØR_EJEB,                             
+               OPL_VURDGL_EJBOL2_EJBOLTYP,                              
+               OPL_VURDGL_EJBOL2_BEJEBOL,                               
+               OPL_VURDGL_ANT_FOR_1,                                    
+               OPL_VURDGL_ANT_FOR_2,                                    
+               OPL_VURDGL_ANT_FOR_4,                                    
+               OPL_VURDGL_ANT_FOR_5,                                    
+               OPL_VURDGL_ANT_FOR_6,                                    
+               OPL_VURDGL_ANT_FOR_8,                                    
+               OPL_VURDGL_ANT_FOR_9,                                    
+               OPL_VURDGL_OMB01_1_KONSEKVENS,                           
+               OPL_VURDGL_OMB01_1_STK12,                                
+               OPL_VURDGL_OMB01_1_STK13,                                
+               OPL_VURDGL_OMB01_1_STK14,                                
+               OPL_VURDGL_OMB01_1_STK15,                                
+               OPL_VURDGL_OMB01_2_KONSEKVENS,                           
+               OPL_VURDGL_OMB01_2_STK12,                                
+               OPL_VURDGL_OMB01_2_STK13,                                
+               OPL_VURDGL_OMB01_2_STK14,                                
+               OPL_VURDGL_OMB01_2_STK15,                                
+               OPL_VURD02_DVURDÅR,                                      
+               OPL_VURD02_CBENYT,                                       
+               OPL_VURD02_FLEJL,                                        
+               OPL_VURD02_BEJDVÆR,                                      
+               OPL_VURD02_COMVGR1,                                      
+               OPL_VURD02_COMVGR2,                                      
+               OPL_VURD02_BEJDVÆP4A,                                    
+               OPL_VURD02_BSKOV,                                        
+               OPL_VURD02_CUOP,                                         
+               OPL_VURD02_CEJERL,                                       
+               OPL_VURD02_CFORSKEL,                                     
+               OPL_VURD02_CBANV,                                        
+               OPL_VURD02_DOPFØ,                                        
+               OPL_VURD02_DOMTIL,                                       
+               OPL_VURD02_EJBOL1_VEJK_EJEB,                             
+               OPL_VURD02_EJBOL1_HUSNR_EJEB,                            
+               OPL_VURD02_EJBOL1_ETAGE_EJEB,                            
+               OPL_VURD02_EJBOL1_SDØR_EJEB,                             
+               OPL_VURD02_EJBOL1_EJBOLTYP,                              
+               OPL_VURD02_EJBOL1_BEJEBOL,                               
+               OPL_VURD02_EJBOL2_VEJK_EJEB,                             
+               OPL_VURD02_EJBOL2_HUSNR_EJEB,                            
+               OPL_VURD02_EJBOL2_ETAGE_EJEB,                            
+               OPL_VURD02_EJBOL2_SDØR_EJEB,                             
+               OPL_VURD02_EJBOL2_EJBOLTYP,                              
+               OPL_VURD02_EJBOL2_BEJEBOL,                               
+               OPL_VURD02_ANT_FOR_1,                                    
+               OPL_VURD02_ANT_FOR_2,                                    
+               OPL_VURD02_ANT_FOR_4,                                    
+               OPL_VURD02_ANT_FOR_5,                                    
+               OPL_VURD02_ANT_FOR_6,                                    
+               OPL_VURD02_ANT_FOR_8,                                    
+               OPL_VURD02_ANT_FOR_9,                                    
+               OPL_VURD02_OMB01_1_KONSEKVENS,                           
+               OPL_VURD02_OMB01_1_STK12,                                
+               OPL_VURD02_OMB01_1_STK13,                                
+               OPL_VURD02_OMB01_1_STK14,                                
+               OPL_VURD02_OMB01_1_STK15,                                
+               OPL_VURD02_OMB01_2_KONSEKVENS,                           
+               OPL_VURD02_OMB01_2_STK12,                                
+               OPL_VURD02_OMB01_2_STK13,                                
+               OPL_VURD02_OMB01_2_STK14,                                
+               OPL_VURD02_OMB01_2_STK15,                                
+               OPL_VURD01_DVURDÅR,                                      
+               OPL_VURD01_CBENYT,                                       
+               OPL_VURD01_FLEJL,                                        
+               OPL_VURD01_BEJDVÆR,                                      
+               OPL_VURD01_COMVGR1,                                      
+               OPL_VURD01_COMVGR2,                                      
+               OPL_VURD01_BEJDVÆP4A,                                    
+               OPL_VURD01_BSKOV,                                        
+               OPL_VURD01_CUOP,                                         
+               OPL_VURD01_CEJERL,                                       
+               OPL_VURD01_CFORSKEL,                                     
+               OPL_VURD01_CBANV,                                        
+               OPL_VURD01_DOPFØ,                                        
+               OPL_VURD01_DOMTIL,                                       
+               OPL_VURD01_EJBOL1_VEJK_EJEB,                             
+               OPL_VURD01_EJBOL1_HUSNR_EJEB,                            
+               OPL_VURD01_EJBOL1_ETAGE_EJEB,                            
+               OPL_VURD01_EJBOL1_SDØR_EJEB,                             
+               OPL_VURD01_EJBOL1_EJBOLTYP,                              
+               OPL_VURD01_EJBOL1_BEJEBOL,                               
+               OPL_VURD01_EJBOL2_VEJK_EJEB,                             
+               OPL_VURD01_EJBOL2_HUSNR_EJEB,                            
+               OPL_VURD01_EJBOL2_ETAGE_EJEB,                            
+               OPL_VURD01_EJBOL2_SDØR_EJEB,                             
+               OPL_VURD01_EJBOL2_EJBOLTYP,                              
+               OPL_VURD01_EJBOL2_BEJEBOL,                               
+               OPL_VURD01_ANT_FOR_1,                                    
+               OPL_VURD01_ANT_FOR_2,                                    
+               OPL_VURD01_ANT_FOR_4,                                    
+               OPL_VURD01_ANT_FOR_5,                                    
+               OPL_VURD01_ANT_FOR_6,                                    
+               OPL_VURD01_ANT_FOR_8,                                    
+               OPL_VURD01_ANT_FOR_9,                                    
+               OPL_VURD01_OMB01_1_KONSEKVENS,                           
+               OPL_VURD01_OMB01_1_STK12,                                
+               OPL_VURD01_OMB01_1_STK13,                                
+               OPL_VURD01_OMB01_1_STK14,                                
+               OPL_VURD01_OMB01_1_STK15,                                
+               OPL_VURD01_OMB01_2_KONSEKVENS,                           
+               OPL_VURD01_OMB01_2_STK12,                                
+               OPL_VURD01_OMB01_2_STK13,                                
+               OPL_VURD01_OMB01_2_STK14,                                
+               OPL_VURD01_OMB01_2_STK15,                                
+               OPL_BEJDVÆP4B,                                           
+               OPL_GL_CBENYT,                                           
+               OPL_FLEJL,                                               
+               OPL_BEJDV,                                               
+               OPL_BEJEB,                                               
+               OPL_BSTUE,                                               
+               OPL_BSTUGR,                                              
+               OPL_GBOANDPCT,                                           
+               OPL_BFSKAT,                                              
+               OPL_BYDAF,                                               
+               OPL_BDAF,                                                
+               OPL_BAFPGRVKOM,                                          
+               OPL_BFKOMSKAT,                                           
+               OPL_BFKOMSKST,                                           
+               OPL_EMATNR,                                              
+               OPL_ABGSTSK,                                             
+               OPL_HEJLTX,                                              
+               OPL_EMATAR,                                              
+               OPL_CDIFF,                                               
+               OPL_CFRED,                                               
+               OPL_CEJSO,                                               
+               OPL_CEJ_100,                                             
+               OPL_CEANV,                                               
+               OPL_BBRF379,                                             
+               OPL_BBRF380,                                             
+               OPL_VEJK_EJD,                                            
+               OPL_HUSNR_EJD,                                           
+               OPL_ETAGE_EJD,                                           
+               OPL_SDØR_EJD                                             
+          FROM BQ75000T                                                 
+          WHERE TIL_EVS_AAR = :WS_TIL_EVS_AAR                           
+          AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                    
+          AND   EJER_FEJER = 2                                          
+          ORDER BY EKOMNR, EEJDNR, EJER_CITYP, DCPRCIR;                 
+                                                                        
+ /********************************************************************* 
+ *       ON CONDITIONS                                                * 
+ *********************************************************************/ 
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         CALL ZS61900;                                                  
+         CALL ZZ20390 ('*OPEN','BH22001Y');                             
+                                                                        
+         EOF_BH220 = NEJ;                                               
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BH22000L');             
+            END;                                                        
+                                                                        
+         OPEN FILE (BH220I)  TITLE ('BH22000P');                        
+         ON ENDFILE (BH220I)                                            
+         BEGIN;                                                         
+            EOF_BH220 = JA;                                             
+         END;                                                           
+                                                                        
+         TV = '';                                                       
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+ /*********************************************************************/
+ /*      H O U S E - K E E P I N G                                    */
+ /*********************************************************************/
+                                                                        
+         READ FILE (BH220I) INTO (BH220_PARM);                          
+                                                                        
+         IF EOF_BH220 = NEJ                                             
+         THEN DO;                                                       
+            SELECT (BH220_PARM.FS_MRK);                                 
+               WHEN ('F')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH220_PARM.FORSKUD_TXT;      
+                     WS_TIL_EVS_AAR = BH65300M.FORSKÅR;                 
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH220_PARM.SLUT_TXT;       
+                  END;                                                  
+               WHEN ('S')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH220_PARM.SLUT_TXT;         
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH220_PARM.SLUT_TXT;       
+                  END;                                                  
+               WHEN ('U')                                               
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BH220_PARM.SUPPL_TXT;        
+                     WS_TIL_EVS_AAR = BH65300M.SLUTÅR;                  
+                     /* N.B.  til_evs_aar_GL Tages ALTID fra SLUT */    
+                     WS_TIL_EVS_AAR_GL = BH65300M.SLUTÅR - 1;           
+                     /* afviklings-id til læs gammelt år altid SLUT */  
+                     WS_SLUT_AFVIKLINGS_ID = BH220_PARM.SLUT_TXT;       
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = '101 PARAMETERFEJL';                    
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+         END;                                                           
+                                                                        
+         /********************************************************/     
+         /*  CHECK OM FORGÆNGERE ER KØRT                         */     
+         /********************************************************/     
+         CALL CHECK_SEKVENS (BH220_PARM.FS_MRK); /* BH54997M */         
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER CHECK AF OMKØRSEL                        */     
+         /********************************************************/     
+         CALL CHECK_OM_OMKØRSEL; /* kode ligger i macro BH54999M */     
+         IF DER_SKAL_KØRES_OM                                           
+         THEN DO;                                                       
+            PUT SKIP LIST ('Omkørsel af ' !! WS_PROGRAMNAVN);           
+            CALL RYD_OP_FØR_OMKØRSEL;                                   
+         END;                                                           
+         ELSE DO;                                                       
+            PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);      
+         END;                                                           
+                                                                        
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+         CALL OPDATER_KØRSELSTABEL('START',BH220_PARM.FS_MRK);          
+                                                                        
+ /*********************************************************************/
+ /*      P R O C E S S                                                */
+ /*********************************************************************/
+                                                                        
+         CALL CLOSE_ESRCURS;                                            
+         CALL OPEN_ESRCURS;                                             
+         CALL FETCH_ESRCURS_P1; /* P1 */                                
+         CALL FETCH_ESRCURS_P2; /* P2 */                                
+                                                                        
+         TV.LÆSTE1 = 1;                                                 
+         TV.LÆSTE2 = 1;                                                 
+         GEM = '';                                                      
+         DO WHILE (SQLCA.SQLCODE = 0);                                  
+            IF P1.EEJDNR =                /* 2 PERSONER DER EJER */     
+               P2.EEJDNR                  /* SAMME EJENDOM       */     
+            THEN                                                        
+               DO;                                                      
+                  GEM = '';                                             
+                  CALL BEHANDL_SAMBO;                                   
+                  CALL FETCH_ESRCURS_P1; /* P1 */                       
+                  IF SQLCA.SQLCODE = 0                                  
+                  THEN                                                  
+                     DO;                                                
+                        TV.LÆSTE1 = TV.LÆSTE1 + 1;                      
+                        CALL FETCH_ESRCURS_P2; /* P2 */                 
+                        IF SQLCA.SQLCODE = 0                            
+                        THEN                                            
+                           TV.LÆSTE2 = TV.LÆSTE2 + 1;                   
+                        ELSE                                            
+                           CALL BEHANDL_ENLIG;                          
+                     END;                                               
+               END;                                                     
+            ELSE                /* HVIS DER IKKE FINDES NOGEN MAKKER */ 
+               DO;                                                      
+                  CALL BEHANDL_ENLIG;                                   
+                  P1 = P2, BY NAME;                                     
+                  CALL FETCH_ESRCURS_P2; /* P2 */                       
+                  IF SQLCA.SQLCODE = 0                                  
+                  THEN                                                  
+                     TV.LÆSTE2 = TV.LÆSTE2 + 1;                         
+                  ELSE                                                  
+                     CALL BEHANDL_ENLIG;                                
+               END;                                                     
+         END;     /* DO WHILE */                                        
+                                                                        
+         CALL KONTROLLISTE;                                             
+                                                                        
+         IF ANT_COMM > 0                                                
+         THEN DO;                                                       
+            EXEC SQL COMMIT;                                            
+            Put skip list ('Commit efter ' !! ANT_COMM !!               
+                           ' opdateringer.  Ialt ' !! ANT_SKR !!        
+                           ' opdateringer');                            
+            ANT_COMM = 0;                                               
+         END;                                                           
+                                                                        
+         CALL CLOSE_ESRCURS;                                            
+                                                                        
+         CALL AFSLUT;                                                   
+ /*********************************************************************/
+ /*         BEHANDL TO-EJERE                                          */
+ /*********************************************************************/
+ BEHANDL_SAMBO:                                                         
+         PROC;                                                          
+         CALL FORETAG_DELING;                                           
+                                                                        
+         DCLBQ75000T = P1, BY NAME;                                     
+         CALL UPDATE_ESR;                                               
+                                                                        
+         DCLBQ75000T = P2, BY NAME;                                     
+         CALL UPDATE_ESR;                                               
+                                                                        
+         TV.OVF1 = TV.OVF1 + 1;                                         
+         TV.OVF2 = TV.OVF2 + 1;                                         
+ END BEHANDL_SAMBO;                                                     
+ /*********************************************************************/
+ /*         BEHANDL TO-EJER, HVORTIL DER IKKE ER FUNDET EN MAKKER.    */
+ /*         DET KAN F.EKS. FOREKOMME HVIS KUN EN I ET TO-EJER FOR-    */
+ /*         HOLD SÆLGER.                                              */
+ /*********************************************************************/
+ BEHANDL_ENLIG:                                                         
+         PROC;                                                          
+         IF P1.EJER_GANE > 0  /* BEHOLD INDBERETTET ANDEL */            
+         THEN;                                                          
+         ELSE                                                           
+            IF P1.EJER_GANE = 0 & P1.EEJDNR = GEM.EEJDNR                
+            THEN                                                        
+               DO;                                                      
+                   /* MODREGN MEDEJERS ANDEL */                         
+                   P1.EJER_GANE = 10000 - GEM.EJER_GANE;                
+                   TV.DELING = TV.DELING + 1;                           
+               END;                                                     
+         IF P1.EJER_GANE = 0                                            
+         THEN                                                           
+            P1.EJER_CEJ_100 = ' '; /* UNDLAD EFTERFØLGENDE BEREGNING */ 
+                                                                        
+         DCLBQ75000T = P1, BY NAME;                                     
+         CALL UPDATE_ESR;                                               
+         TV.OVF1 = TV.OVF1 + 1;                                         
+         GEM = '';                                                      
+ END BEHANDL_ENLIG;                                                     
+ /*********************************************************************/
+ /*      FORDELING AF EJERANDELE                                      */
+ /*********************************************************************/
+ FORETAG_DELING: PROC;                                                  
+         IF P1.EJER_GANE = 0 !                                          
+            P2.EJER_GANE = 0                                            
+         THEN                                                           
+            CALL CHECK_EJET_EEN_DAG;                                    
+         IF P1.EJER_GANE = 0                 /* FORDELING AF EJER-    */
+         THEN                                /* ANDELE                */
+            IF P2.EJER_GANE = 0                                         
+            THEN                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 2;                            
+                  P1.EJER_GANE = 5000;                                  
+                  P2.EJER_GANE = 5000;                                  
+               END;                                                     
+            ELSE                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 1;                            
+                  P1.EJER_GANE = 10000 - P2.EJER_GANE;                  
+               END;                                                     
+         ELSE                                                           
+            IF P2.EJER_GANE = 0                                         
+            THEN                                                        
+               DO;                                                      
+                  TV.DELING = TV.DELING + 1;                            
+                  P2.EJER_GANE = 10000 - P1.EJER_GANE;                  
+               END;                                                     
+         IF P1.EJER_CITYP < 5 & P2.EJER_CITYP < 5                       
+         THEN                                                           
+            DO;                                                         
+               /* A.H.T. TO 'KØBERE', SOM EVT. EFTERFØLGES AF  */       
+               /* EN 'ENLIG' SÆLGER', GEMMES EJERANDELEN FOR   */       
+               /* DEN PERSON, DER EJEDE EJENDOMMEN SAMTIDIG    */       
+               /* MED SÆLGEREN, FOR AT KUNNE BEREGNE SÆLGERENS */       
+               /* EJERANDEL, NÅR DENNE ER LIG 0.               */       
+               GEM.EEJDNR = P1.EEJDNR;                                  
+               IF P1.EJER_DOVTG < P2.EJER_DOVTG                         
+               THEN                                                     
+                  GEM.EJER_GANE = P1.EJER_GANE;                         
+               ELSE                                                     
+                  GEM.EJER_GANE = P2.EJER_GANE;                         
+            END;                                                        
+ END FORETAG_DELING;                                                    
+ /*********************************************************************/
+ /*      HVIS DEN ENE EJER KUN HAR EJET EJENDOMMEN EEN DAG            */
+ /*      SKAL DER EVT. IKKE FORETAGES DELING AF EJERANDEL             */
+ /*********************************************************************/
+ CHECK_EJET_EEN_DAG:                                                    
+         PROC;                                                          
+         IF (P1.EJER_DAFSTÅ > 0 &                                       
+            (P1.EJER_DAFSTÅ = P1.EJER_DOVTG)) &                         
+            (P2.EJER_DAFSTÅ > 0 &                                       
+            (P2.EJER_DAFSTÅ = P2.EJER_DOVTG)) &                         
+            (P1.EJER_DAFSTÅ = P2.EJER_DAFSTÅ)                           
+         THEN                                                           
+            RETURN; /* NORMAL DELING HVIS EJET SAMME ENE DAG */         
+         IF (P1.EJER_DAFSTÅ > 0 &                                       
+            (P1.EJER_DAFSTÅ = P1.EJER_DOVTG)) !                         
+            (P2.EJER_DAFSTÅ > 0 &                                       
+            (P2.EJER_DAFSTÅ = P2.EJER_DOVTG))                           
+         THEN                                                           
+            DO;                                                         
+               /* LAV 'DELING' HVIS KUN DEN ENE EJER */                 
+               /* HAR EJET EJENDOMMEN NETOP EEN DAG  */                 
+               IF P1.EJER_GANE = 0 &                                    
+                  P2.EJER_GANE = 0                                      
+               THEN                                                     
+                  DO;                                                   
+                     TV.DELING = TV.DELING + 2;                         
+                     P1.EJER_GANE = 10000;                              
+                     P2.EJER_GANE = 10000;                              
+                     RETURN;                                            
+                  END;                                                  
+               IF P1.EJER_GANE = 0                                      
+               THEN                                                     
+                  DO;                                                   
+                     TV.DELING = TV.DELING + 1;                         
+                     P1.EJER_GANE = 10000;                              
+                  END;                                                  
+               ELSE                                                     
+                  IF P2.EJER_GANE = 0                                   
+                  THEN                                                  
+                     DO;                                                
+                        TV.DELING = TV.DELING + 1;                      
+                        P2.EJER_GANE = 10000;                           
+                     END;                                               
+            END;                                                        
+ END CHECK_EJET_EEN_DAG;                                                
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF MT   BQ75000T                       RUTINE */
+ /*********************************************************************/
+ OPEN_ESRCURS: PROC;                                                    
+                                                                        
+         EXEC SQL OPEN ESRCURS;                                         
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN ESRCURS';                            
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_ESRCURS;                                                      
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF ESR for PERSON 1                   RUTINE */
+ /*********************************************************************/
+ FETCH_ESRCURS_P1: PROC;                                                
+                                                                        
+         P1 = '';                                                       
+                                                                        
+         EXEC SQL FETCH ESRCURS                                         
+                                                                        
+         INTO  :P1.TIL_EVS_AAR,                                         
+               :P1.AFVIKLINGS_ID,                                       
+               :P1.DCPRCIR,                                             
+               :P1.EKOMNR,                                              
+               :P1.EEJDNR,                                              
+               :P1.EGENNR,                                              
+               :P1.PROGRAMNAVN,                                         
+               :P1.DB2_FUNKTION,                                        
+               :P1.ESR_SORTDATO,                                        
+               :P1.ESR_CCIVS,                                           
+               :P1.ESR_CSBSK,                                           
+               :P1.EJER_DCPRCIR,                                        
+               :P1.EJER_CITYP,                                          
+               :P1.EJER_CTILKØB,                                        
+               :P1.EJER_DRGNÅRFRA,                                      
+               :P1.EJER_DRGNÅRTIL,                                      
+               :P1.EJER_DOVTG,                                          
+               :P1.EJER_DOVTG_GL,                                       
+               :P1.EJER_DINDFLYT,                                       
+               :P1.EJER_DAFSTÅ,                                         
+               :P1.EJER_DFRAFLYT,                                       
+               :P1.EJER_DAFGDAT,                                        
+               :P1.EJER_DSLUTS,                                         
+               :P1.EJER_DSKØDE,                                         
+               :P1.EJER_CEJFOER0107,                                    
+               :P1.EJER_CEJFORH,                                        
+               :P1.EJER_CPENS,                                          
+               :P1.EJER_FEJER,                                          
+               :P1.EJER_GANE,                                           
+               :P1.EJER_CEJ_100,                                        
+               :P1.EJER_CHEJD,                                          
+               :P1.EJER_VEJK_EJER,                                      
+               :P1.EJER_HUSNR_EJER,                                     
+               :P1.EJER_ETAGE_EJER,                                     
+               :P1.EJER_SDØR_EJER,                                      
+               :P1.EJER_BOPÆLSKODE,                                     
+               :P1.EJER_COMPLA,                                         
+               :P1.EJER_DOMPLACPR,                                      
+               :P1.EJER_DOMPLAÅR,                                       
+               :P1.ÆGTE_DCPRCIR,                                        
+               :P1.ÆGTE_CITYP,                                          
+               :P1.ÆGTE_CTILKØB,                                        
+               :P1.ÆGTE_DRGNÅRFRA,                                      
+               :P1.ÆGTE_DRGNÅRTIL,                                      
+               :P1.ÆGTE_DOVTG,                                          
+               :P1.ÆGTE_DOVTG_GL,                                       
+               :P1.ÆGTE_DINDFLYT,                                       
+               :P1.ÆGTE_DAFSTÅ,                                         
+               :P1.ÆGTE_DFRAFLYT,                                       
+               :P1.ÆGTE_DAFGDAT,                                        
+               :P1.ÆGTE_DSLUTS,                                         
+               :P1.ÆGTE_DSKØDE,                                         
+               :P1.ÆGTE_CEJFOER0107,                                    
+               :P1.ÆGTE_CEJFORH,                                        
+               :P1.ÆGTE_CPENS,                                          
+               :P1.ÆGTE_FEJER,                                          
+               :P1.ÆGTE_GANE,                                           
+               :P1.ÆGTE_CEJ_100,                                        
+               :P1.ÆGTE_CHEJD,                                          
+               :P1.ÆGTE_VEJK_EJER,                                      
+               :P1.ÆGTE_HUSNR_EJER,                                     
+               :P1.ÆGTE_ETAGE_EJER,                                     
+               :P1.ÆGTE_SDØR_EJER,                                      
+               :P1.ÆGTE_BOPÆLSKODE,                                     
+               :P1.ÆGTE_COMPLA,                                         
+               :P1.ÆGTE_DOMPLACPR,                                      
+               :P1.ÆGTE_DOMPLAÅR,                                       
+               :P1.OPL_ABELMAT,                                         
+               :P1.OPL_SKATSTOP_DSTOPÅR,                                
+               :P1.OPL_OMB02_1_KONSEKVENS,                              
+               :P1.OPL_OMB02_1_STK12,                                   
+               :P1.OPL_OMB02_1_STK13,                                   
+               :P1.OPL_OMB02_1_STK14,                                   
+               :P1.OPL_OMB02_1_STK15,                                   
+               :P1.OPL_OMB02_1_CBENYT,                                  
+               :P1.OPL_OMB02_1_FLEJL,                                   
+               :P1.OPL_OMB02_1_BEJDVÆR,                                 
+               :P1.OPL_OMB02_1_EJBOL1_VEJK_EJEB,                        
+               :P1.OPL_OMB02_1_EJBOL1_HUSNR_EJEB,                       
+               :P1.OPL_OMB02_1_EJBOL1_ETAGE_EJEB,                       
+               :P1.OPL_OMB02_1_EJBOL1_SDØR_EJEB,                        
+               :P1.OPL_OMB02_1_EJBOL1_EJBOLTYP,                         
+               :P1.OPL_OMB02_1_EJBOL1_BEJEBOL,                          
+               :P1.OPL_OMB02_1_EJBOL2_VEJK_EJEB,                        
+               :P1.OPL_OMB02_1_EJBOL2_HUSNR_EJEB,                       
+               :P1.OPL_OMB02_1_EJBOL2_ETAGE_EJEB,                       
+               :P1.OPL_OMB02_1_EJBOL2_SDØR_EJEB,                        
+               :P1.OPL_OMB02_1_EJBOL2_EJBOLTYP,                         
+               :P1.OPL_OMB02_1_EJBOL2_BEJEBOL,                          
+               :P1.OPL_OMB02_1_ANT_FOR_1,                               
+               :P1.OPL_OMB02_1_ANT_FOR_2,                               
+               :P1.OPL_OMB02_1_ANT_FOR_4,                               
+               :P1.OPL_OMB02_1_ANT_FOR_5,                               
+               :P1.OPL_OMB02_1_ANT_FOR_6,                               
+               :P1.OPL_OMB02_1_ANT_FOR_8,                               
+               :P1.OPL_OMB02_1_ANT_FOR_9,                               
+               :P1.OPL_OMB02_2_KONSEKVENS,                              
+               :P1.OPL_OMB02_2_STK12,                                   
+               :P1.OPL_OMB02_2_STK13,                                   
+               :P1.OPL_OMB02_2_STK14,                                   
+               :P1.OPL_OMB02_2_STK15,                                   
+               :P1.OPL_OMB02_2_CBENYT,                                  
+               :P1.OPL_OMB02_2_FLEJL,                                   
+               :P1.OPL_OMB02_2_BEJDVÆR,                                 
+               :P1.OPL_OMB02_2_EJBOL1_VEJK_EJEB,                        
+               :P1.OPL_OMB02_2_EJBOL1_HUSNR_EJEB,                       
+               :P1.OPL_OMB02_2_EJBOL1_ETAGE_EJEB,                       
+               :P1.OPL_OMB02_2_EJBOL1_SDØR_EJEB,                        
+               :P1.OPL_OMB02_2_EJBOL1_EJBOLTYP,                         
+               :P1.OPL_OMB02_2_EJBOL1_BEJEBOL,                          
+               :P1.OPL_OMB02_2_EJBOL2_VEJK_EJEB,                        
+               :P1.OPL_OMB02_2_EJBOL2_HUSNR_EJEB,                       
+               :P1.OPL_OMB02_2_EJBOL2_ETAGE_EJEB,                       
+               :P1.OPL_OMB02_2_EJBOL2_SDØR_EJEB,                        
+               :P1.OPL_OMB02_2_EJBOL2_EJBOLTYP,                         
+               :P1.OPL_OMB02_2_EJBOL2_BEJEBOL,                          
+               :P1.OPL_OMB02_2_ANT_FOR_1,                               
+               :P1.OPL_OMB02_2_ANT_FOR_2,                               
+               :P1.OPL_OMB02_2_ANT_FOR_4,                               
+               :P1.OPL_OMB02_2_ANT_FOR_5,                               
+               :P1.OPL_OMB02_2_ANT_FOR_6,                               
+               :P1.OPL_OMB02_2_ANT_FOR_8,                               
+               :P1.OPL_OMB02_2_ANT_FOR_9,                               
+               :P1.OPL_OMB01_1_KONSEKVENS,                              
+               :P1.OPL_OMB01_1_STK12,                                   
+               :P1.OPL_OMB01_1_STK13,                                   
+               :P1.OPL_OMB01_1_STK14,                                   
+               :P1.OPL_OMB01_1_STK15,                                   
+               :P1.OPL_OMB01_1_CBENYT,                                  
+               :P1.OPL_OMB01_1_FLEJL,                                   
+               :P1.OPL_OMB01_1_BEJDVÆR,                                 
+               :P1.OPL_OMB01_1_EJBOL1_VEJK_EJEB,                        
+               :P1.OPL_OMB01_1_EJBOL1_HUSNR_EJEB,                       
+               :P1.OPL_OMB01_1_EJBOL1_ETAGE_EJEB,                       
+               :P1.OPL_OMB01_1_EJBOL1_SDØR_EJEB,                        
+               :P1.OPL_OMB01_1_EJBOL1_EJBOLTYP,                         
+               :P1.OPL_OMB01_1_EJBOL1_BEJEBOL,                          
+               :P1.OPL_OMB01_1_EJBOL2_VEJK_EJEB,                        
+               :P1.OPL_OMB01_1_EJBOL2_HUSNR_EJEB,                       
+               :P1.OPL_OMB01_1_EJBOL2_ETAGE_EJEB,                       
+               :P1.OPL_OMB01_1_EJBOL2_SDØR_EJEB,                        
+               :P1.OPL_OMB01_1_EJBOL2_EJBOLTYP,                         
+               :P1.OPL_OMB01_1_EJBOL2_BEJEBOL,                          
+               :P1.OPL_OMB01_1_ANT_FOR_1,                               
+               :P1.OPL_OMB01_1_ANT_FOR_2,                               
+               :P1.OPL_OMB01_1_ANT_FOR_4,                               
+               :P1.OPL_OMB01_1_ANT_FOR_5,                               
+               :P1.OPL_OMB01_1_ANT_FOR_6,                               
+               :P1.OPL_OMB01_1_ANT_FOR_8,                               
+               :P1.OPL_OMB01_1_ANT_FOR_9,                               
+               :P1.OPL_OMB01_2_KONSEKVENS,                              
+               :P1.OPL_OMB01_2_STK12,                                   
+               :P1.OPL_OMB01_2_STK13,                                   
+               :P1.OPL_OMB01_2_STK14,                                   
+               :P1.OPL_OMB01_2_STK15,                                   
+               :P1.OPL_OMB01_2_CBENYT,                                  
+               :P1.OPL_OMB01_2_FLEJL,                                   
+               :P1.OPL_OMB01_2_BEJDVÆR,                                 
+               :P1.OPL_OMB01_2_EJBOL1_VEJK_EJEB,                        
+               :P1.OPL_OMB01_2_EJBOL1_HUSNR_EJEB,                       
+               :P1.OPL_OMB01_2_EJBOL1_ETAGE_EJEB,                       
+               :P1.OPL_OMB01_2_EJBOL1_SDØR_EJEB,                        
+               :P1.OPL_OMB01_2_EJBOL1_EJBOLTYP,                         
+               :P1.OPL_OMB01_2_EJBOL1_BEJEBOL,                          
+               :P1.OPL_OMB01_2_EJBOL2_VEJK_EJEB,                        
+               :P1.OPL_OMB01_2_EJBOL2_HUSNR_EJEB,                       
+               :P1.OPL_OMB01_2_EJBOL2_ETAGE_EJEB,                       
+               :P1.OPL_OMB01_2_EJBOL2_SDØR_EJEB,                        
+               :P1.OPL_OMB01_2_EJBOL2_EJBOLTYP,                         
+               :P1.OPL_OMB01_2_EJBOL2_BEJEBOL,                          
+               :P1.OPL_OMB01_2_ANT_FOR_1,                               
+               :P1.OPL_OMB01_2_ANT_FOR_2,                               
+               :P1.OPL_OMB01_2_ANT_FOR_4,                               
+               :P1.OPL_OMB01_2_ANT_FOR_5,                               
+               :P1.OPL_OMB01_2_ANT_FOR_6,                               
+               :P1.OPL_OMB01_2_ANT_FOR_8,                               
+               :P1.OPL_OMB01_2_ANT_FOR_9,                               
+               :P1.OPL_VURDNY_DVURDÅR,                                  
+               :P1.OPL_VURDNY_CBENYT,                                   
+               :P1.OPL_VURDNY_FLEJL,                                    
+               :P1.OPL_VURDNY_BEJDVÆR,                                  
+               :P1.OPL_VURDNY_COMVGR1,                                  
+               :P1.OPL_VURDNY_COMVGR2,                                  
+               :P1.OPL_VURDNY_BEJDVÆP4A,                                
+               :P1.OPL_VURDNY_BSKOV,                                    
+               :P1.OPL_VURDNY_CUOP,                                     
+               :P1.OPL_VURDNY_CEJERL,                                   
+               :P1.OPL_VURDNY_CFORSKEL,                                 
+               :P1.OPL_VURDNY_CBANV,                                    
+               :P1.OPL_VURDNY_DOPFØ,                                    
+               :P1.OPL_VURDNY_DOMTIL,                                   
+               :P1.OPL_VURDNY_EJBOL1_VEJK_EJEB,                         
+               :P1.OPL_VURDNY_EJBOL1_HUSNR_EJEB,                        
+               :P1.OPL_VURDNY_EJBOL1_ETAGE_EJEB,                        
+               :P1.OPL_VURDNY_EJBOL1_SDØR_EJEB,                         
+               :P1.OPL_VURDNY_EJBOL1_EJBOLTYP,                          
+               :P1.OPL_VURDNY_EJBOL1_BEJEBOL,                           
+               :P1.OPL_VURDNY_EJBOL2_VEJK_EJEB,                         
+               :P1.OPL_VURDNY_EJBOL2_HUSNR_EJEB,                        
+               :P1.OPL_VURDNY_EJBOL2_ETAGE_EJEB,                        
+               :P1.OPL_VURDNY_EJBOL2_SDØR_EJEB,                         
+               :P1.OPL_VURDNY_EJBOL2_EJBOLTYP,                          
+               :P1.OPL_VURDNY_EJBOL2_BEJEBOL,                           
+               :P1.OPL_VURDNY_ANT_FOR_1,                                
+               :P1.OPL_VURDNY_ANT_FOR_2,                                
+               :P1.OPL_VURDNY_ANT_FOR_4,                                
+               :P1.OPL_VURDNY_ANT_FOR_5,                                
+               :P1.OPL_VURDNY_ANT_FOR_6,                                
+               :P1.OPL_VURDNY_ANT_FOR_8,                                
+               :P1.OPL_VURDNY_ANT_FOR_9,                                
+               :P1.OPL_VURDNY_OMB01_1_KONSEKVENS,                       
+               :P1.OPL_VURDNY_OMB01_1_STK12,                            
+               :P1.OPL_VURDNY_OMB01_1_STK13,                            
+               :P1.OPL_VURDNY_OMB01_1_STK14,                            
+               :P1.OPL_VURDNY_OMB01_1_STK15,                            
+               :P1.OPL_VURDNY_OMB01_2_KONSEKVENS,                       
+               :P1.OPL_VURDNY_OMB01_2_STK12,                            
+               :P1.OPL_VURDNY_OMB01_2_STK13,                            
+               :P1.OPL_VURDNY_OMB01_2_STK14,                            
+               :P1.OPL_VURDNY_OMB01_2_STK15,                            
+               :P1.OPL_VURDGL_DVURDÅR,                                  
+               :P1.OPL_VURDGL_CBENYT,                                   
+               :P1.OPL_VURDGL_FLEJL,                                    
+               :P1.OPL_VURDGL_BEJDVÆR,                                  
+               :P1.OPL_VURDGL_COMVGR1,                                  
+               :P1.OPL_VURDGL_COMVGR2,                                  
+               :P1.OPL_VURDGL_BEJDVÆP4A,                                
+               :P1.OPL_VURDGL_BSKOV,                                    
+               :P1.OPL_VURDGL_CUOP,                                     
+               :P1.OPL_VURDGL_CEJERL,                                   
+               :P1.OPL_VURDGL_CFORSKEL,                                 
+               :P1.OPL_VURDGL_CBANV,                                    
+               :P1.OPL_VURDGL_DOPFØ,                                    
+               :P1.OPL_VURDGL_DOMTIL,                                   
+               :P1.OPL_VURDGL_EJBOL1_VEJK_EJEB,                         
+               :P1.OPL_VURDGL_EJBOL1_HUSNR_EJEB,                        
+               :P1.OPL_VURDGL_EJBOL1_ETAGE_EJEB,                        
+               :P1.OPL_VURDGL_EJBOL1_SDØR_EJEB,                         
+               :P1.OPL_VURDGL_EJBOL1_EJBOLTYP,                          
+               :P1.OPL_VURDGL_EJBOL1_BEJEBOL,                           
+               :P1.OPL_VURDGL_EJBOL2_VEJK_EJEB,                         
+               :P1.OPL_VURDGL_EJBOL2_HUSNR_EJEB,                        
+               :P1.OPL_VURDGL_EJBOL2_ETAGE_EJEB,                        
+               :P1.OPL_VURDGL_EJBOL2_SDØR_EJEB,                         
+               :P1.OPL_VURDGL_EJBOL2_EJBOLTYP,                          
+               :P1.OPL_VURDGL_EJBOL2_BEJEBOL,                           
+               :P1.OPL_VURDGL_ANT_FOR_1,                                
+               :P1.OPL_VURDGL_ANT_FOR_2,                                
+               :P1.OPL_VURDGL_ANT_FOR_4,                                
+               :P1.OPL_VURDGL_ANT_FOR_5,                                
+               :P1.OPL_VURDGL_ANT_FOR_6,                                
+               :P1.OPL_VURDGL_ANT_FOR_8,                                
+               :P1.OPL_VURDGL_ANT_FOR_9,                                
+               :P1.OPL_VURDGL_OMB01_1_KONSEKVENS,                       
+               :P1.OPL_VURDGL_OMB01_1_STK12,                            
+               :P1.OPL_VURDGL_OMB01_1_STK13,                            
+               :P1.OPL_VURDGL_OMB01_1_STK14,                            
+               :P1.OPL_VURDGL_OMB01_1_STK15,                            
+               :P1.OPL_VURDGL_OMB01_2_KONSEKVENS,                       
+               :P1.OPL_VURDGL_OMB01_2_STK12,                            
+               :P1.OPL_VURDGL_OMB01_2_STK13,                            
+               :P1.OPL_VURDGL_OMB01_2_STK14,                            
+               :P1.OPL_VURDGL_OMB01_2_STK15,                            
+               :P1.OPL_VURD02_DVURDÅR,                                  
+               :P1.OPL_VURD02_CBENYT,                                   
+               :P1.OPL_VURD02_FLEJL,                                    
+               :P1.OPL_VURD02_BEJDVÆR,                                  
+               :P1.OPL_VURD02_COMVGR1,                                  
+               :P1.OPL_VURD02_COMVGR2,                                  
+               :P1.OPL_VURD02_BEJDVÆP4A,                                
+               :P1.OPL_VURD02_BSKOV,                                    
+               :P1.OPL_VURD02_CUOP,                                     
+               :P1.OPL_VURD02_CEJERL,                                   
+               :P1.OPL_VURD02_CFORSKEL,                                 
+               :P1.OPL_VURD02_CBANV,                                    
+               :P1.OPL_VURD02_DOPFØ,                                    
+               :P1.OPL_VURD02_DOMTIL,                                   
+               :P1.OPL_VURD02_EJBOL1_VEJK_EJEB,                         
+               :P1.OPL_VURD02_EJBOL1_HUSNR_EJEB,                        
+               :P1.OPL_VURD02_EJBOL1_ETAGE_EJEB,                        
+               :P1.OPL_VURD02_EJBOL1_SDØR_EJEB,                         
+               :P1.OPL_VURD02_EJBOL1_EJBOLTYP,                          
+               :P1.OPL_VURD02_EJBOL1_BEJEBOL,                           
+               :P1.OPL_VURD02_EJBOL2_VEJK_EJEB,                         
+               :P1.OPL_VURD02_EJBOL2_HUSNR_EJEB,                        
+               :P1.OPL_VURD02_EJBOL2_ETAGE_EJEB,                        
+               :P1.OPL_VURD02_EJBOL2_SDØR_EJEB,                         
+               :P1.OPL_VURD02_EJBOL2_EJBOLTYP,                          
+               :P1.OPL_VURD02_EJBOL2_BEJEBOL,                           
+               :P1.OPL_VURD02_ANT_FOR_1,                                
+               :P1.OPL_VURD02_ANT_FOR_2,                                
+               :P1.OPL_VURD02_ANT_FOR_4,                                
+               :P1.OPL_VURD02_ANT_FOR_5,                                
+               :P1.OPL_VURD02_ANT_FOR_6,                                
+               :P1.OPL_VURD02_ANT_FOR_8,                                
+               :P1.OPL_VURD02_ANT_FOR_9,                                
+               :P1.OPL_VURD02_OMB01_1_KONSEKVENS,                       
+               :P1.OPL_VURD02_OMB01_1_STK12,                            
+               :P1.OPL_VURD02_OMB01_1_STK13,                            
+               :P1.OPL_VURD02_OMB01_1_STK14,                            
+               :P1.OPL_VURD02_OMB01_1_STK15,                            
+               :P1.OPL_VURD02_OMB01_2_KONSEKVENS,                       
+               :P1.OPL_VURD02_OMB01_2_STK12,                            
+               :P1.OPL_VURD02_OMB01_2_STK13,                            
+               :P1.OPL_VURD02_OMB01_2_STK14,                            
+               :P1.OPL_VURD02_OMB01_2_STK15,                            
+               :P1.OPL_VURD01_DVURDÅR,                                  
+               :P1.OPL_VURD01_CBENYT,                                   
+               :P1.OPL_VURD01_FLEJL,                                    
+               :P1.OPL_VURD01_BEJDVÆR,                                  
+               :P1.OPL_VURD01_COMVGR1,                                  
+               :P1.OPL_VURD01_COMVGR2,                                  
+               :P1.OPL_VURD01_BEJDVÆP4A,                                
+               :P1.OPL_VURD01_BSKOV,                                    
+               :P1.OPL_VURD01_CUOP,                                     
+               :P1.OPL_VURD01_CEJERL,                                   
+               :P1.OPL_VURD01_CFORSKEL,                                 
+               :P1.OPL_VURD01_CBANV,                                    
+               :P1.OPL_VURD01_DOPFØ,                                    
+               :P1.OPL_VURD01_DOMTIL,                                   
+               :P1.OPL_VURD01_EJBOL1_VEJK_EJEB,                         
+               :P1.OPL_VURD01_EJBOL1_HUSNR_EJEB,                        
+               :P1.OPL_VURD01_EJBOL1_ETAGE_EJEB,                        
+               :P1.OPL_VURD01_EJBOL1_SDØR_EJEB,                         
+               :P1.OPL_VURD01_EJBOL1_EJBOLTYP,                          
+               :P1.OPL_VURD01_EJBOL1_BEJEBOL,                           
+               :P1.OPL_VURD01_EJBOL2_VEJK_EJEB,                         
+               :P1.OPL_VURD01_EJBOL2_HUSNR_EJEB,                        
+               :P1.OPL_VURD01_EJBOL2_ETAGE_EJEB,                        
+               :P1.OPL_VURD01_EJBOL2_SDØR_EJEB,                         
+               :P1.OPL_VURD01_EJBOL2_EJBOLTYP,                          
+               :P1.OPL_VURD01_EJBOL2_BEJEBOL,                           
+               :P1.OPL_VURD01_ANT_FOR_1,                                
+               :P1.OPL_VURD01_ANT_FOR_2,                                
+               :P1.OPL_VURD01_ANT_FOR_4,                                
+               :P1.OPL_VURD01_ANT_FOR_5,                                
+               :P1.OPL_VURD01_ANT_FOR_6,                                
+               :P1.OPL_VURD01_ANT_FOR_8,                                
+               :P1.OPL_VURD01_ANT_FOR_9,                                
+               :P1.OPL_VURD01_OMB01_1_KONSEKVENS,                       
+               :P1.OPL_VURD01_OMB01_1_STK12,                            
+               :P1.OPL_VURD01_OMB01_1_STK13,                            
+               :P1.OPL_VURD01_OMB01_1_STK14,                            
+               :P1.OPL_VURD01_OMB01_1_STK15,                            
+               :P1.OPL_VURD01_OMB01_2_KONSEKVENS,                       
+               :P1.OPL_VURD01_OMB01_2_STK12,                            
+               :P1.OPL_VURD01_OMB01_2_STK13,                            
+               :P1.OPL_VURD01_OMB01_2_STK14,                            
+               :P1.OPL_VURD01_OMB01_2_STK15,                            
+               :P1.OPL_BEJDVÆP4B,                                       
+               :P1.OPL_GL_CBENYT,                                       
+               :P1.OPL_FLEJL,                                           
+               :P1.OPL_BEJDV,                                           
+               :P1.OPL_BEJEB,                                           
+               :P1.OPL_BSTUE,                                           
+               :P1.OPL_BSTUGR,                                          
+               :P1.OPL_GBOANDPCT,                                       
+               :P1.OPL_BFSKAT,                                          
+               :P1.OPL_BYDAF,                                           
+               :P1.OPL_BDAF,                                            
+               :P1.OPL_BAFPGRVKOM,                                      
+               :P1.OPL_BFKOMSKAT,                                       
+               :P1.OPL_BFKOMSKST,                                       
+               :P1.OPL_EMATNR,                                          
+               :P1.OPL_ABGSTSK,                                         
+               :P1.OPL_HEJLTX,                                          
+               :P1.OPL_EMATAR,                                          
+               :P1.OPL_CDIFF,                                           
+               :P1.OPL_CFRED,                                           
+               :P1.OPL_CEJSO,                                           
+               :P1.OPL_CEJ_100,                                         
+               :P1.OPL_CEANV,                                           
+               :P1.OPL_BBRF379,                                         
+               :P1.OPL_BBRF380,                                         
+               :P1.OPL_VEJK_EJD,                                        
+               :P1.OPL_HUSNR_EJD,                                       
+               :P1.OPL_ETAGE_EJD,                                       
+               :P1.OPL_SDØR_EJD                                         
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH ESRCURS_P1';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_ESRCURS_P1;                                                  
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF ESR for PERSON 2                   RUTINE */
+ /*********************************************************************/
+ FETCH_ESRCURS_P2: PROC;                                                
+                                                                        
+         P2 = '';                                                       
+                                                                        
+         EXEC SQL FETCH ESRCURS                                         
+                                                                        
+         INTO  :P2.TIL_EVS_AAR,                                         
+               :P2.AFVIKLINGS_ID,                                       
+               :P2.DCPRCIR,                                             
+               :P2.EKOMNR,                                              
+               :P2.EEJDNR,                                              
+               :P2.EGENNR,                                              
+               :P2.PROGRAMNAVN,                                         
+               :P2.DB2_FUNKTION,                                        
+               :P2.ESR_SORTDATO,                                        
+               :P2.ESR_CCIVS,                                           
+               :P2.ESR_CSBSK,                                           
+               :P2.EJER_DCPRCIR,                                        
+               :P2.EJER_CITYP,                                          
+               :P2.EJER_CTILKØB,                                        
+               :P2.EJER_DRGNÅRFRA,                                      
+               :P2.EJER_DRGNÅRTIL,                                      
+               :P2.EJER_DOVTG,                                          
+               :P2.EJER_DOVTG_GL,                                       
+               :P2.EJER_DINDFLYT,                                       
+               :P2.EJER_DAFSTÅ,                                         
+               :P2.EJER_DFRAFLYT,                                       
+               :P2.EJER_DAFGDAT,                                        
+               :P2.EJER_DSLUTS,                                         
+               :P2.EJER_DSKØDE,                                         
+               :P2.EJER_CEJFOER0107,                                    
+               :P2.EJER_CEJFORH,                                        
+               :P2.EJER_CPENS,                                          
+               :P2.EJER_FEJER,                                          
+               :P2.EJER_GANE,                                           
+               :P2.EJER_CEJ_100,                                        
+               :P2.EJER_CHEJD,                                          
+               :P2.EJER_VEJK_EJER,                                      
+               :P2.EJER_HUSNR_EJER,                                     
+               :P2.EJER_ETAGE_EJER,                                     
+               :P2.EJER_SDØR_EJER,                                      
+               :P2.EJER_BOPÆLSKODE,                                     
+               :P2.EJER_COMPLA,                                         
+               :P2.EJER_DOMPLACPR,                                      
+               :P2.EJER_DOMPLAÅR,                                       
+               :P2.ÆGTE_DCPRCIR,                                        
+               :P2.ÆGTE_CITYP,                                          
+               :P2.ÆGTE_CTILKØB,                                        
+               :P2.ÆGTE_DRGNÅRFRA,                                      
+               :P2.ÆGTE_DRGNÅRTIL,                                      
+               :P2.ÆGTE_DOVTG,                                          
+               :P2.ÆGTE_DOVTG_GL,                                       
+               :P2.ÆGTE_DINDFLYT,                                       
+               :P2.ÆGTE_DAFSTÅ,                                         
+               :P2.ÆGTE_DFRAFLYT,                                       
+               :P2.ÆGTE_DAFGDAT,                                        
+               :P2.ÆGTE_DSLUTS,                                         
+               :P2.ÆGTE_DSKØDE,                                         
+               :P2.ÆGTE_CEJFOER0107,                                    
+               :P2.ÆGTE_CEJFORH,                                        
+               :P2.ÆGTE_CPENS,                                          
+               :P2.ÆGTE_FEJER,                                          
+               :P2.ÆGTE_GANE,                                           
+               :P2.ÆGTE_CEJ_100,                                        
+               :P2.ÆGTE_CHEJD,                                          
+               :P2.ÆGTE_VEJK_EJER,                                      
+               :P2.ÆGTE_HUSNR_EJER,                                     
+               :P2.ÆGTE_ETAGE_EJER,                                     
+               :P2.ÆGTE_SDØR_EJER,                                      
+               :P2.ÆGTE_BOPÆLSKODE,                                     
+               :P2.ÆGTE_COMPLA,                                         
+               :P2.ÆGTE_DOMPLACPR,                                      
+               :P2.ÆGTE_DOMPLAÅR,                                       
+               :P2.OPL_ABELMAT,                                         
+               :P2.OPL_SKATSTOP_DSTOPÅR,                                
+               :P2.OPL_OMB02_1_KONSEKVENS,                              
+               :P2.OPL_OMB02_1_STK12,                                   
+               :P2.OPL_OMB02_1_STK13,                                   
+               :P2.OPL_OMB02_1_STK14,                                   
+               :P2.OPL_OMB02_1_STK15,                                   
+               :P2.OPL_OMB02_1_CBENYT,                                  
+               :P2.OPL_OMB02_1_FLEJL,                                   
+               :P2.OPL_OMB02_1_BEJDVÆR,                                 
+               :P2.OPL_OMB02_1_EJBOL1_VEJK_EJEB,                        
+               :P2.OPL_OMB02_1_EJBOL1_HUSNR_EJEB,                       
+               :P2.OPL_OMB02_1_EJBOL1_ETAGE_EJEB,                       
+               :P2.OPL_OMB02_1_EJBOL1_SDØR_EJEB,                        
+               :P2.OPL_OMB02_1_EJBOL1_EJBOLTYP,                         
+               :P2.OPL_OMB02_1_EJBOL1_BEJEBOL,                          
+               :P2.OPL_OMB02_1_EJBOL2_VEJK_EJEB,                        
+               :P2.OPL_OMB02_1_EJBOL2_HUSNR_EJEB,                       
+               :P2.OPL_OMB02_1_EJBOL2_ETAGE_EJEB,                       
+               :P2.OPL_OMB02_1_EJBOL2_SDØR_EJEB,                        
+               :P2.OPL_OMB02_1_EJBOL2_EJBOLTYP,                         
+               :P2.OPL_OMB02_1_EJBOL2_BEJEBOL,                          
+               :P2.OPL_OMB02_1_ANT_FOR_1,                               
+               :P2.OPL_OMB02_1_ANT_FOR_2,                               
+               :P2.OPL_OMB02_1_ANT_FOR_4,                               
+               :P2.OPL_OMB02_1_ANT_FOR_5,                               
+               :P2.OPL_OMB02_1_ANT_FOR_6,                               
+               :P2.OPL_OMB02_1_ANT_FOR_8,                               
+               :P2.OPL_OMB02_1_ANT_FOR_9,                               
+               :P2.OPL_OMB02_2_KONSEKVENS,                              
+               :P2.OPL_OMB02_2_STK12,                                   
+               :P2.OPL_OMB02_2_STK13,                                   
+               :P2.OPL_OMB02_2_STK14,                                   
+               :P2.OPL_OMB02_2_STK15,                                   
+               :P2.OPL_OMB02_2_CBENYT,                                  
+               :P2.OPL_OMB02_2_FLEJL,                                   
+               :P2.OPL_OMB02_2_BEJDVÆR,                                 
+               :P2.OPL_OMB02_2_EJBOL1_VEJK_EJEB,                        
+               :P2.OPL_OMB02_2_EJBOL1_HUSNR_EJEB,                       
+               :P2.OPL_OMB02_2_EJBOL1_ETAGE_EJEB,                       
+               :P2.OPL_OMB02_2_EJBOL1_SDØR_EJEB,                        
+               :P2.OPL_OMB02_2_EJBOL1_EJBOLTYP,                         
+               :P2.OPL_OMB02_2_EJBOL1_BEJEBOL,                          
+               :P2.OPL_OMB02_2_EJBOL2_VEJK_EJEB,                        
+               :P2.OPL_OMB02_2_EJBOL2_HUSNR_EJEB,                       
+               :P2.OPL_OMB02_2_EJBOL2_ETAGE_EJEB,                       
+               :P2.OPL_OMB02_2_EJBOL2_SDØR_EJEB,                        
+               :P2.OPL_OMB02_2_EJBOL2_EJBOLTYP,                         
+               :P2.OPL_OMB02_2_EJBOL2_BEJEBOL,                          
+               :P2.OPL_OMB02_2_ANT_FOR_1,                               
+               :P2.OPL_OMB02_2_ANT_FOR_2,                               
+               :P2.OPL_OMB02_2_ANT_FOR_4,                               
+               :P2.OPL_OMB02_2_ANT_FOR_5,                               
+               :P2.OPL_OMB02_2_ANT_FOR_6,                               
+               :P2.OPL_OMB02_2_ANT_FOR_8,                               
+               :P2.OPL_OMB02_2_ANT_FOR_9,                               
+               :P2.OPL_OMB01_1_KONSEKVENS,                              
+               :P2.OPL_OMB01_1_STK12,                                   
+               :P2.OPL_OMB01_1_STK13,                                   
+               :P2.OPL_OMB01_1_STK14,                                   
+               :P2.OPL_OMB01_1_STK15,                                   
+               :P2.OPL_OMB01_1_CBENYT,                                  
+               :P2.OPL_OMB01_1_FLEJL,                                   
+               :P2.OPL_OMB01_1_BEJDVÆR,                                 
+               :P2.OPL_OMB01_1_EJBOL1_VEJK_EJEB,                        
+               :P2.OPL_OMB01_1_EJBOL1_HUSNR_EJEB,                       
+               :P2.OPL_OMB01_1_EJBOL1_ETAGE_EJEB,                       
+               :P2.OPL_OMB01_1_EJBOL1_SDØR_EJEB,                        
+               :P2.OPL_OMB01_1_EJBOL1_EJBOLTYP,                         
+               :P2.OPL_OMB01_1_EJBOL1_BEJEBOL,                          
+               :P2.OPL_OMB01_1_EJBOL2_VEJK_EJEB,                        
+               :P2.OPL_OMB01_1_EJBOL2_HUSNR_EJEB,                       
+               :P2.OPL_OMB01_1_EJBOL2_ETAGE_EJEB,                       
+               :P2.OPL_OMB01_1_EJBOL2_SDØR_EJEB,                        
+               :P2.OPL_OMB01_1_EJBOL2_EJBOLTYP,                         
+               :P2.OPL_OMB01_1_EJBOL2_BEJEBOL,                          
+               :P2.OPL_OMB01_1_ANT_FOR_1,                               
+               :P2.OPL_OMB01_1_ANT_FOR_2,                               
+               :P2.OPL_OMB01_1_ANT_FOR_4,                               
+               :P2.OPL_OMB01_1_ANT_FOR_5,                               
+               :P2.OPL_OMB01_1_ANT_FOR_6,                               
+               :P2.OPL_OMB01_1_ANT_FOR_8,                               
+               :P2.OPL_OMB01_1_ANT_FOR_9,                               
+               :P2.OPL_OMB01_2_KONSEKVENS,                              
+               :P2.OPL_OMB01_2_STK12,                                   
+               :P2.OPL_OMB01_2_STK13,                                   
+               :P2.OPL_OMB01_2_STK14,                                   
+               :P2.OPL_OMB01_2_STK15,                                   
+               :P2.OPL_OMB01_2_CBENYT,                                  
+               :P2.OPL_OMB01_2_FLEJL,                                   
+               :P2.OPL_OMB01_2_BEJDVÆR,                                 
+               :P2.OPL_OMB01_2_EJBOL1_VEJK_EJEB,                        
+               :P2.OPL_OMB01_2_EJBOL1_HUSNR_EJEB,                       
+               :P2.OPL_OMB01_2_EJBOL1_ETAGE_EJEB,                       
+               :P2.OPL_OMB01_2_EJBOL1_SDØR_EJEB,                        
+               :P2.OPL_OMB01_2_EJBOL1_EJBOLTYP,                         
+               :P2.OPL_OMB01_2_EJBOL1_BEJEBOL,                          
+               :P2.OPL_OMB01_2_EJBOL2_VEJK_EJEB,                        
+               :P2.OPL_OMB01_2_EJBOL2_HUSNR_EJEB,                       
+               :P2.OPL_OMB01_2_EJBOL2_ETAGE_EJEB,                       
+               :P2.OPL_OMB01_2_EJBOL2_SDØR_EJEB,                        
+               :P2.OPL_OMB01_2_EJBOL2_EJBOLTYP,                         
+               :P2.OPL_OMB01_2_EJBOL2_BEJEBOL,                          
+               :P2.OPL_OMB01_2_ANT_FOR_1,                               
+               :P2.OPL_OMB01_2_ANT_FOR_2,                               
+               :P2.OPL_OMB01_2_ANT_FOR_4,                               
+               :P2.OPL_OMB01_2_ANT_FOR_5,                               
+               :P2.OPL_OMB01_2_ANT_FOR_6,                               
+               :P2.OPL_OMB01_2_ANT_FOR_8,                               
+               :P2.OPL_OMB01_2_ANT_FOR_9,                               
+               :P2.OPL_VURDNY_DVURDÅR,                                  
+               :P2.OPL_VURDNY_CBENYT,                                   
+               :P2.OPL_VURDNY_FLEJL,                                    
+               :P2.OPL_VURDNY_BEJDVÆR,                                  
+               :P2.OPL_VURDNY_COMVGR1,                                  
+               :P2.OPL_VURDNY_COMVGR2,                                  
+               :P2.OPL_VURDNY_BEJDVÆP4A,                                
+               :P2.OPL_VURDNY_BSKOV,                                    
+               :P2.OPL_VURDNY_CUOP,                                     
+               :P2.OPL_VURDNY_CEJERL,                                   
+               :P2.OPL_VURDNY_CFORSKEL,                                 
+               :P2.OPL_VURDNY_CBANV,                                    
+               :P2.OPL_VURDNY_DOPFØ,                                    
+               :P2.OPL_VURDNY_DOMTIL,                                   
+               :P2.OPL_VURDNY_EJBOL1_VEJK_EJEB,                         
+               :P2.OPL_VURDNY_EJBOL1_HUSNR_EJEB,                        
+               :P2.OPL_VURDNY_EJBOL1_ETAGE_EJEB,                        
+               :P2.OPL_VURDNY_EJBOL1_SDØR_EJEB,                         
+               :P2.OPL_VURDNY_EJBOL1_EJBOLTYP,                          
+               :P2.OPL_VURDNY_EJBOL1_BEJEBOL,                           
+               :P2.OPL_VURDNY_EJBOL2_VEJK_EJEB,                         
+               :P2.OPL_VURDNY_EJBOL2_HUSNR_EJEB,                        
+               :P2.OPL_VURDNY_EJBOL2_ETAGE_EJEB,                        
+               :P2.OPL_VURDNY_EJBOL2_SDØR_EJEB,                         
+               :P2.OPL_VURDNY_EJBOL2_EJBOLTYP,                          
+               :P2.OPL_VURDNY_EJBOL2_BEJEBOL,                           
+               :P2.OPL_VURDNY_ANT_FOR_1,                                
+               :P2.OPL_VURDNY_ANT_FOR_2,                                
+               :P2.OPL_VURDNY_ANT_FOR_4,                                
+               :P2.OPL_VURDNY_ANT_FOR_5,                                
+               :P2.OPL_VURDNY_ANT_FOR_6,                                
+               :P2.OPL_VURDNY_ANT_FOR_8,                                
+               :P2.OPL_VURDNY_ANT_FOR_9,                                
+               :P2.OPL_VURDNY_OMB01_1_KONSEKVENS,                       
+               :P2.OPL_VURDNY_OMB01_1_STK12,                            
+               :P2.OPL_VURDNY_OMB01_1_STK13,                            
+               :P2.OPL_VURDNY_OMB01_1_STK14,                            
+               :P2.OPL_VURDNY_OMB01_1_STK15,                            
+               :P2.OPL_VURDNY_OMB01_2_KONSEKVENS,                       
+               :P2.OPL_VURDNY_OMB01_2_STK12,                            
+               :P2.OPL_VURDNY_OMB01_2_STK13,                            
+               :P2.OPL_VURDNY_OMB01_2_STK14,                            
+               :P2.OPL_VURDNY_OMB01_2_STK15,                            
+               :P2.OPL_VURDGL_DVURDÅR,                                  
+               :P2.OPL_VURDGL_CBENYT,                                   
+               :P2.OPL_VURDGL_FLEJL,                                    
+               :P2.OPL_VURDGL_BEJDVÆR,                                  
+               :P2.OPL_VURDGL_COMVGR1,                                  
+               :P2.OPL_VURDGL_COMVGR2,                                  
+               :P2.OPL_VURDGL_BEJDVÆP4A,                                
+               :P2.OPL_VURDGL_BSKOV,                                    
+               :P2.OPL_VURDGL_CUOP,                                     
+               :P2.OPL_VURDGL_CEJERL,                                   
+               :P2.OPL_VURDGL_CFORSKEL,                                 
+               :P2.OPL_VURDGL_CBANV,                                    
+               :P2.OPL_VURDGL_DOPFØ,                                    
+               :P2.OPL_VURDGL_DOMTIL,                                   
+               :P2.OPL_VURDGL_EJBOL1_VEJK_EJEB,                         
+               :P2.OPL_VURDGL_EJBOL1_HUSNR_EJEB,                        
+               :P2.OPL_VURDGL_EJBOL1_ETAGE_EJEB,                        
+               :P2.OPL_VURDGL_EJBOL1_SDØR_EJEB,                         
+               :P2.OPL_VURDGL_EJBOL1_EJBOLTYP,                          
+               :P2.OPL_VURDGL_EJBOL1_BEJEBOL,                           
+               :P2.OPL_VURDGL_EJBOL2_VEJK_EJEB,                         
+               :P2.OPL_VURDGL_EJBOL2_HUSNR_EJEB,                        
+               :P2.OPL_VURDGL_EJBOL2_ETAGE_EJEB,                        
+               :P2.OPL_VURDGL_EJBOL2_SDØR_EJEB,                         
+               :P2.OPL_VURDGL_EJBOL2_EJBOLTYP,                          
+               :P2.OPL_VURDGL_EJBOL2_BEJEBOL,                           
+               :P2.OPL_VURDGL_ANT_FOR_1,                                
+               :P2.OPL_VURDGL_ANT_FOR_2,                                
+               :P2.OPL_VURDGL_ANT_FOR_4,                                
+               :P2.OPL_VURDGL_ANT_FOR_5,                                
+               :P2.OPL_VURDGL_ANT_FOR_6,                                
+               :P2.OPL_VURDGL_ANT_FOR_8,                                
+               :P2.OPL_VURDGL_ANT_FOR_9,                                
+               :P2.OPL_VURDGL_OMB01_1_KONSEKVENS,                       
+               :P2.OPL_VURDGL_OMB01_1_STK12,                            
+               :P2.OPL_VURDGL_OMB01_1_STK13,                            
+               :P2.OPL_VURDGL_OMB01_1_STK14,                            
+               :P2.OPL_VURDGL_OMB01_1_STK15,                            
+               :P2.OPL_VURDGL_OMB01_2_KONSEKVENS,                       
+               :P2.OPL_VURDGL_OMB01_2_STK12,                            
+               :P2.OPL_VURDGL_OMB01_2_STK13,                            
+               :P2.OPL_VURDGL_OMB01_2_STK14,                            
+               :P2.OPL_VURDGL_OMB01_2_STK15,                            
+               :P2.OPL_VURD02_DVURDÅR,                                  
+               :P2.OPL_VURD02_CBENYT,                                   
+               :P2.OPL_VURD02_FLEJL,                                    
+               :P2.OPL_VURD02_BEJDVÆR,                                  
+               :P2.OPL_VURD02_COMVGR1,                                  
+               :P2.OPL_VURD02_COMVGR2,                                  
+               :P2.OPL_VURD02_BEJDVÆP4A,                                
+               :P2.OPL_VURD02_BSKOV,                                    
+               :P2.OPL_VURD02_CUOP,                                     
+               :P2.OPL_VURD02_CEJERL,                                   
+               :P2.OPL_VURD02_CFORSKEL,                                 
+               :P2.OPL_VURD02_CBANV,                                    
+               :P2.OPL_VURD02_DOPFØ,                                    
+               :P2.OPL_VURD02_DOMTIL,                                   
+               :P2.OPL_VURD02_EJBOL1_VEJK_EJEB,                         
+               :P2.OPL_VURD02_EJBOL1_HUSNR_EJEB,                        
+               :P2.OPL_VURD02_EJBOL1_ETAGE_EJEB,                        
+               :P2.OPL_VURD02_EJBOL1_SDØR_EJEB,                         
+               :P2.OPL_VURD02_EJBOL1_EJBOLTYP,                          
+               :P2.OPL_VURD02_EJBOL1_BEJEBOL,                           
+               :P2.OPL_VURD02_EJBOL2_VEJK_EJEB,                         
+               :P2.OPL_VURD02_EJBOL2_HUSNR_EJEB,                        
+               :P2.OPL_VURD02_EJBOL2_ETAGE_EJEB,                        
+               :P2.OPL_VURD02_EJBOL2_SDØR_EJEB,                         
+               :P2.OPL_VURD02_EJBOL2_EJBOLTYP,                          
+               :P2.OPL_VURD02_EJBOL2_BEJEBOL,                           
+               :P2.OPL_VURD02_ANT_FOR_1,                                
+               :P2.OPL_VURD02_ANT_FOR_2,                                
+               :P2.OPL_VURD02_ANT_FOR_4,                                
+               :P2.OPL_VURD02_ANT_FOR_5,                                
+               :P2.OPL_VURD02_ANT_FOR_6,                                
+               :P2.OPL_VURD02_ANT_FOR_8,                                
+               :P2.OPL_VURD02_ANT_FOR_9,                                
+               :P2.OPL_VURD02_OMB01_1_KONSEKVENS,                       
+               :P2.OPL_VURD02_OMB01_1_STK12,                            
+               :P2.OPL_VURD02_OMB01_1_STK13,                            
+               :P2.OPL_VURD02_OMB01_1_STK14,                            
+               :P2.OPL_VURD02_OMB01_1_STK15,                            
+               :P2.OPL_VURD02_OMB01_2_KONSEKVENS,                       
+               :P2.OPL_VURD02_OMB01_2_STK12,                            
+               :P2.OPL_VURD02_OMB01_2_STK13,                            
+               :P2.OPL_VURD02_OMB01_2_STK14,                            
+               :P2.OPL_VURD02_OMB01_2_STK15,                            
+               :P2.OPL_VURD01_DVURDÅR,                                  
+               :P2.OPL_VURD01_CBENYT,                                   
+               :P2.OPL_VURD01_FLEJL,                                    
+               :P2.OPL_VURD01_BEJDVÆR,                                  
+               :P2.OPL_VURD01_COMVGR1,                                  
+               :P2.OPL_VURD01_COMVGR2,                                  
+               :P2.OPL_VURD01_BEJDVÆP4A,                                
+               :P2.OPL_VURD01_BSKOV,                                    
+               :P2.OPL_VURD01_CUOP,                                     
+               :P2.OPL_VURD01_CEJERL,                                   
+               :P2.OPL_VURD01_CFORSKEL,                                 
+               :P2.OPL_VURD01_CBANV,                                    
+               :P2.OPL_VURD01_DOPFØ,                                    
+               :P2.OPL_VURD01_DOMTIL,                                   
+               :P2.OPL_VURD01_EJBOL1_VEJK_EJEB,                         
+               :P2.OPL_VURD01_EJBOL1_HUSNR_EJEB,                        
+               :P2.OPL_VURD01_EJBOL1_ETAGE_EJEB,                        
+               :P2.OPL_VURD01_EJBOL1_SDØR_EJEB,                         
+               :P2.OPL_VURD01_EJBOL1_EJBOLTYP,                          
+               :P2.OPL_VURD01_EJBOL1_BEJEBOL,                           
+               :P2.OPL_VURD01_EJBOL2_VEJK_EJEB,                         
+               :P2.OPL_VURD01_EJBOL2_HUSNR_EJEB,                        
+               :P2.OPL_VURD01_EJBOL2_ETAGE_EJEB,                        
+               :P2.OPL_VURD01_EJBOL2_SDØR_EJEB,                         
+               :P2.OPL_VURD01_EJBOL2_EJBOLTYP,                          
+               :P2.OPL_VURD01_EJBOL2_BEJEBOL,                           
+               :P2.OPL_VURD01_ANT_FOR_1,                                
+               :P2.OPL_VURD01_ANT_FOR_2,                                
+               :P2.OPL_VURD01_ANT_FOR_4,                                
+               :P2.OPL_VURD01_ANT_FOR_5,                                
+               :P2.OPL_VURD01_ANT_FOR_6,                                
+               :P2.OPL_VURD01_ANT_FOR_8,                                
+               :P2.OPL_VURD01_ANT_FOR_9,                                
+               :P2.OPL_VURD01_OMB01_1_KONSEKVENS,                       
+               :P2.OPL_VURD01_OMB01_1_STK12,                            
+               :P2.OPL_VURD01_OMB01_1_STK13,                            
+               :P2.OPL_VURD01_OMB01_1_STK14,                            
+               :P2.OPL_VURD01_OMB01_1_STK15,                            
+               :P2.OPL_VURD01_OMB01_2_KONSEKVENS,                       
+               :P2.OPL_VURD01_OMB01_2_STK12,                            
+               :P2.OPL_VURD01_OMB01_2_STK13,                            
+               :P2.OPL_VURD01_OMB01_2_STK14,                            
+               :P2.OPL_VURD01_OMB01_2_STK15,                            
+               :P2.OPL_BEJDVÆP4B,                                       
+               :P2.OPL_GL_CBENYT,                                       
+               :P2.OPL_FLEJL,                                           
+               :P2.OPL_BEJDV,                                           
+               :P2.OPL_BEJEB,                                           
+               :P2.OPL_BSTUE,                                           
+               :P2.OPL_BSTUGR,                                          
+               :P2.OPL_GBOANDPCT,                                       
+               :P2.OPL_BFSKAT,                                          
+               :P2.OPL_BYDAF,                                           
+               :P2.OPL_BDAF,                                            
+               :P2.OPL_BAFPGRVKOM,                                      
+               :P2.OPL_BFKOMSKAT,                                       
+               :P2.OPL_BFKOMSKST,                                       
+               :P2.OPL_EMATNR,                                          
+               :P2.OPL_ABGSTSK,                                         
+               :P2.OPL_HEJLTX,                                          
+               :P2.OPL_EMATAR,                                          
+               :P2.OPL_CDIFF,                                           
+               :P2.OPL_CFRED,                                           
+               :P2.OPL_CEJSO,                                           
+               :P2.OPL_CEJ_100,                                         
+               :P2.OPL_CEANV,                                           
+               :P2.OPL_BBRF379,                                         
+               :P2.OPL_BBRF380,                                         
+               :P2.OPL_VEJK_EJD,                                        
+               :P2.OPL_HUSNR_EJD,                                       
+               :P2.OPL_ETAGE_EJD,                                       
+               :P2.OPL_SDØR_EJD                                         
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+             END;                                                       
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH ESRCURS_P2';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_ESRCURS_P2;                                                  
+ /*********************************************************************/
+ /* UPDATE række på EVS UDTRÆK                                 RUTINE */
+ /*********************************************************************/
+ UPDATE_ESR: PROC;                                                      
+                                                                        
+      DCLBQ75000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                      
+      DCLBQ75000T.DB2_FUNKTION    = 'U';                                
+      DCLBQ75000T.TIL_EVS_AAR    = WS_TIL_EVS_AAR;                      
+      DCLBQ75000T.AFVIKLINGS_ID  = WS_FORSKUD_SLUT_TXT;                 
+                                                                        
+         EXEC SQL                                                       
+           UPDATE BQ75000T                                              
+           SET                                                          
+           TIL_EVS_AAR = :DCLBQ75000T.TIL_EVS_AAR,                      
+           AFVIKLINGS_ID = :DCLBQ75000T.AFVIKLINGS_ID,                  
+           DCPRCIR = :DCLBQ75000T.DCPRCIR,                              
+           EKOMNR = :DCLBQ75000T.EKOMNR,                                
+           EEJDNR = :DCLBQ75000T.EEJDNR,                                
+           EGENNR = :DCLBQ75000T.EGENNR,                                
+           PROGRAMNAVN = :DCLBQ75000T.PROGRAMNAVN,                      
+           DB2_FUNKTION = :DCLBQ75000T.DB2_FUNKTION,                    
+           ESR_SORTDATO = :DCLBQ75000T.ESR_SORTDATO,                    
+           ESR_CCIVS = :DCLBQ75000T.ESR_CCIVS,                          
+           ESR_CSBSK = :DCLBQ75000T.ESR_CSBSK,                          
+           EJER_DCPRCIR = :DCLBQ75000T.EJER_DCPRCIR,                    
+           EJER_CITYP = :DCLBQ75000T.EJER_CITYP,                        
+           EJER_CTILKØB = :DCLBQ75000T.EJER_CTILKØB,                    
+           EJER_DRGNÅRFRA = :DCLBQ75000T.EJER_DRGNÅRFRA,                
+           EJER_DRGNÅRTIL = :DCLBQ75000T.EJER_DRGNÅRTIL,                
+           EJER_DOVTG = :DCLBQ75000T.EJER_DOVTG,                        
+           EJER_DOVTG_GL = :DCLBQ75000T.EJER_DOVTG_GL,                  
+           EJER_DINDFLYT = :DCLBQ75000T.EJER_DINDFLYT,                  
+           EJER_DAFSTÅ = :DCLBQ75000T.EJER_DAFSTÅ,                      
+           EJER_DFRAFLYT = :DCLBQ75000T.EJER_DFRAFLYT,                  
+           EJER_DAFGDAT = :DCLBQ75000T.EJER_DAFGDAT,                    
+           EJER_DSLUTS = :DCLBQ75000T.EJER_DSLUTS,                      
+           EJER_DSKØDE = :DCLBQ75000T.EJER_DSKØDE,                      
+           EJER_CEJFOER0107 = :DCLBQ75000T.EJER_CEJFOER0107,            
+           EJER_CEJFORH = :DCLBQ75000T.EJER_CEJFORH,                    
+           EJER_CPENS = :DCLBQ75000T.EJER_CPENS,                        
+           EJER_FEJER = :DCLBQ75000T.EJER_FEJER,                        
+           EJER_GANE = :DCLBQ75000T.EJER_GANE,                          
+           EJER_CEJ_100 = :DCLBQ75000T.EJER_CEJ_100,                    
+           EJER_CHEJD = :DCLBQ75000T.EJER_CHEJD,                        
+           EJER_VEJK_EJER = :DCLBQ75000T.EJER_VEJK_EJER,                
+           EJER_HUSNR_EJER = :DCLBQ75000T.EJER_HUSNR_EJER,              
+           EJER_ETAGE_EJER = :DCLBQ75000T.EJER_ETAGE_EJER,              
+           EJER_SDØR_EJER = :DCLBQ75000T.EJER_SDØR_EJER,                
+           EJER_BOPÆLSKODE = :DCLBQ75000T.EJER_BOPÆLSKODE,              
+           EJER_COMPLA = :DCLBQ75000T.EJER_COMPLA,                      
+           EJER_DOMPLACPR = :DCLBQ75000T.EJER_DOMPLACPR,                
+           EJER_DOMPLAÅR = :DCLBQ75000T.EJER_DOMPLAÅR,                  
+           ÆGTE_DCPRCIR = :DCLBQ75000T.ÆGTE_DCPRCIR,                    
+           ÆGTE_CITYP = :DCLBQ75000T.ÆGTE_CITYP,                        
+           ÆGTE_CTILKØB = :DCLBQ75000T.ÆGTE_CTILKØB,                    
+           ÆGTE_DRGNÅRFRA = :DCLBQ75000T.ÆGTE_DRGNÅRFRA,                
+           ÆGTE_DRGNÅRTIL = :DCLBQ75000T.ÆGTE_DRGNÅRTIL,                
+           ÆGTE_DOVTG = :DCLBQ75000T.ÆGTE_DOVTG,                        
+           ÆGTE_DOVTG_GL = :DCLBQ75000T.ÆGTE_DOVTG_GL,                  
+           ÆGTE_DINDFLYT = :DCLBQ75000T.ÆGTE_DINDFLYT,                  
+           ÆGTE_DAFSTÅ = :DCLBQ75000T.ÆGTE_DAFSTÅ,                      
+           ÆGTE_DFRAFLYT = :DCLBQ75000T.ÆGTE_DFRAFLYT,                  
+           ÆGTE_DAFGDAT = :DCLBQ75000T.ÆGTE_DAFGDAT,                    
+           ÆGTE_DSLUTS = :DCLBQ75000T.ÆGTE_DSLUTS,                      
+           ÆGTE_DSKØDE = :DCLBQ75000T.ÆGTE_DSKØDE,                      
+           ÆGTE_CEJFOER0107 = :DCLBQ75000T.ÆGTE_CEJFOER0107,            
+           ÆGTE_CEJFORH = :DCLBQ75000T.ÆGTE_CEJFORH,                    
+           ÆGTE_CPENS = :DCLBQ75000T.ÆGTE_CPENS,                        
+           ÆGTE_FEJER = :DCLBQ75000T.ÆGTE_FEJER,                        
+           ÆGTE_GANE = :DCLBQ75000T.ÆGTE_GANE,                          
+           ÆGTE_CEJ_100 = :DCLBQ75000T.ÆGTE_CEJ_100,                    
+           ÆGTE_CHEJD = :DCLBQ75000T.ÆGTE_CHEJD,                        
+           ÆGTE_VEJK_EJER = :DCLBQ75000T.ÆGTE_VEJK_EJER,                
+           ÆGTE_HUSNR_EJER = :DCLBQ75000T.ÆGTE_HUSNR_EJER,              
+           ÆGTE_ETAGE_EJER = :DCLBQ75000T.ÆGTE_ETAGE_EJER,              
+           ÆGTE_SDØR_EJER = :DCLBQ75000T.ÆGTE_SDØR_EJER,                
+           ÆGTE_BOPÆLSKODE = :DCLBQ75000T.ÆGTE_BOPÆLSKODE,              
+           ÆGTE_COMPLA = :DCLBQ75000T.ÆGTE_COMPLA,                      
+           ÆGTE_DOMPLACPR = :DCLBQ75000T.ÆGTE_DOMPLACPR,                
+           ÆGTE_DOMPLAÅR = :DCLBQ75000T.ÆGTE_DOMPLAÅR,                  
+           OPL_ABELMAT = :DCLBQ75000T.OPL_ABELMAT,                      
+           OPL_SKATSTOP_DSTOPÅR = :DCLBQ75000T.OPL_SKATSTOP_DSTOPÅR,    
+           OPL_OMB02_1_KONSEKVENS = :DCLBQ75000T.OPL_OMB02_1_KONSEKVENS,
+           OPL_OMB02_1_STK12 = :DCLBQ75000T.OPL_OMB02_1_STK12,          
+           OPL_OMB02_1_STK13 = :DCLBQ75000T.OPL_OMB02_1_STK13,          
+           OPL_OMB02_1_STK14 = :DCLBQ75000T.OPL_OMB02_1_STK14,          
+           OPL_OMB02_1_STK15 = :DCLBQ75000T.OPL_OMB02_1_STK15,          
+           OPL_OMB02_1_CBENYT = :DCLBQ75000T.OPL_OMB02_1_CBENYT,        
+           OPL_OMB02_1_FLEJL = :DCLBQ75000T.OPL_OMB02_1_FLEJL,          
+           OPL_OMB02_1_BEJDVÆR = :DCLBQ75000T.OPL_OMB02_1_BEJDVÆR,      
+           OPL_OMB02_1_EJBOL1_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_VEJK_EJEB,       
+           OPL_OMB02_1_EJBOL1_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_HUSNR_EJEB,      
+           OPL_OMB02_1_EJBOL1_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_ETAGE_EJEB,      
+           OPL_OMB02_1_EJBOL1_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_SDØR_EJEB,       
+           OPL_OMB02_1_EJBOL1_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_EJBOLTYP,        
+           OPL_OMB02_1_EJBOL1_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL1_BEJEBOL,         
+           OPL_OMB02_1_EJBOL2_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_VEJK_EJEB,       
+           OPL_OMB02_1_EJBOL2_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_HUSNR_EJEB,      
+           OPL_OMB02_1_EJBOL2_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_ETAGE_EJEB,      
+           OPL_OMB02_1_EJBOL2_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_SDØR_EJEB,       
+           OPL_OMB02_1_EJBOL2_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_EJBOLTYP,        
+           OPL_OMB02_1_EJBOL2_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB02_1_EJBOL2_BEJEBOL,         
+           OPL_OMB02_1_ANT_FOR_1 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_1,  
+           OPL_OMB02_1_ANT_FOR_2 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_2,  
+           OPL_OMB02_1_ANT_FOR_4 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_4,  
+           OPL_OMB02_1_ANT_FOR_5 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_5,  
+           OPL_OMB02_1_ANT_FOR_6 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_6,  
+           OPL_OMB02_1_ANT_FOR_8 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_8,  
+           OPL_OMB02_1_ANT_FOR_9 = :DCLBQ75000T.OPL_OMB02_1_ANT_FOR_9,  
+           OPL_OMB02_2_KONSEKVENS = :DCLBQ75000T.OPL_OMB02_2_KONSEKVENS,
+           OPL_OMB02_2_STK12 = :DCLBQ75000T.OPL_OMB02_2_STK12,          
+           OPL_OMB02_2_STK13 = :DCLBQ75000T.OPL_OMB02_2_STK13,          
+           OPL_OMB02_2_STK14 = :DCLBQ75000T.OPL_OMB02_2_STK14,          
+           OPL_OMB02_2_STK15 = :DCLBQ75000T.OPL_OMB02_2_STK15,          
+           OPL_OMB02_2_CBENYT = :DCLBQ75000T.OPL_OMB02_2_CBENYT,        
+           OPL_OMB02_2_FLEJL = :DCLBQ75000T.OPL_OMB02_2_FLEJL,          
+           OPL_OMB02_2_BEJDVÆR = :DCLBQ75000T.OPL_OMB02_2_BEJDVÆR,      
+           OPL_OMB02_2_EJBOL1_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_VEJK_EJEB,       
+           OPL_OMB02_2_EJBOL1_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_HUSNR_EJEB,      
+           OPL_OMB02_2_EJBOL1_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_ETAGE_EJEB,      
+           OPL_OMB02_2_EJBOL1_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_SDØR_EJEB,       
+           OPL_OMB02_2_EJBOL1_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_EJBOLTYP,        
+           OPL_OMB02_2_EJBOL1_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL1_BEJEBOL,         
+           OPL_OMB02_2_EJBOL2_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_VEJK_EJEB,       
+           OPL_OMB02_2_EJBOL2_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_HUSNR_EJEB,      
+           OPL_OMB02_2_EJBOL2_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_ETAGE_EJEB,      
+           OPL_OMB02_2_EJBOL2_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_SDØR_EJEB,       
+           OPL_OMB02_2_EJBOL2_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_EJBOLTYP,        
+           OPL_OMB02_2_EJBOL2_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB02_2_EJBOL2_BEJEBOL,         
+           OPL_OMB02_2_ANT_FOR_1 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_1,  
+           OPL_OMB02_2_ANT_FOR_2 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_2,  
+           OPL_OMB02_2_ANT_FOR_4 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_4,  
+           OPL_OMB02_2_ANT_FOR_5 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_5,  
+           OPL_OMB02_2_ANT_FOR_6 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_6,  
+           OPL_OMB02_2_ANT_FOR_8 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_8,  
+           OPL_OMB02_2_ANT_FOR_9 = :DCLBQ75000T.OPL_OMB02_2_ANT_FOR_9,  
+           OPL_OMB01_1_KONSEKVENS = :DCLBQ75000T.OPL_OMB01_1_KONSEKVENS,
+           OPL_OMB01_1_STK12 = :DCLBQ75000T.OPL_OMB01_1_STK12,          
+           OPL_OMB01_1_STK13 = :DCLBQ75000T.OPL_OMB01_1_STK13,          
+           OPL_OMB01_1_STK14 = :DCLBQ75000T.OPL_OMB01_1_STK14,          
+           OPL_OMB01_1_STK15 = :DCLBQ75000T.OPL_OMB01_1_STK15,          
+           OPL_OMB01_1_CBENYT = :DCLBQ75000T.OPL_OMB01_1_CBENYT,        
+           OPL_OMB01_1_FLEJL = :DCLBQ75000T.OPL_OMB01_1_FLEJL,          
+           OPL_OMB01_1_BEJDVÆR = :DCLBQ75000T.OPL_OMB01_1_BEJDVÆR,      
+           OPL_OMB01_1_EJBOL1_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_VEJK_EJEB,       
+           OPL_OMB01_1_EJBOL1_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_HUSNR_EJEB,      
+           OPL_OMB01_1_EJBOL1_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_ETAGE_EJEB,      
+           OPL_OMB01_1_EJBOL1_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_SDØR_EJEB,       
+           OPL_OMB01_1_EJBOL1_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_EJBOLTYP,        
+           OPL_OMB01_1_EJBOL1_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL1_BEJEBOL,         
+           OPL_OMB01_1_EJBOL2_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_VEJK_EJEB,       
+           OPL_OMB01_1_EJBOL2_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_HUSNR_EJEB,      
+           OPL_OMB01_1_EJBOL2_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_ETAGE_EJEB,      
+           OPL_OMB01_1_EJBOL2_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_SDØR_EJEB,       
+           OPL_OMB01_1_EJBOL2_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_EJBOLTYP,        
+           OPL_OMB01_1_EJBOL2_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB01_1_EJBOL2_BEJEBOL,         
+           OPL_OMB01_1_ANT_FOR_1 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_1,  
+           OPL_OMB01_1_ANT_FOR_2 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_2,  
+           OPL_OMB01_1_ANT_FOR_4 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_4,  
+           OPL_OMB01_1_ANT_FOR_5 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_5,  
+           OPL_OMB01_1_ANT_FOR_6 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_6,  
+           OPL_OMB01_1_ANT_FOR_8 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_8,  
+           OPL_OMB01_1_ANT_FOR_9 = :DCLBQ75000T.OPL_OMB01_1_ANT_FOR_9,  
+           OPL_OMB01_2_KONSEKVENS = :DCLBQ75000T.OPL_OMB01_2_KONSEKVENS,
+           OPL_OMB01_2_STK12 = :DCLBQ75000T.OPL_OMB01_2_STK12,          
+           OPL_OMB01_2_STK13 = :DCLBQ75000T.OPL_OMB01_2_STK13,          
+           OPL_OMB01_2_STK14 = :DCLBQ75000T.OPL_OMB01_2_STK14,          
+           OPL_OMB01_2_STK15 = :DCLBQ75000T.OPL_OMB01_2_STK15,          
+           OPL_OMB01_2_CBENYT = :DCLBQ75000T.OPL_OMB01_2_CBENYT,        
+           OPL_OMB01_2_FLEJL = :DCLBQ75000T.OPL_OMB01_2_FLEJL,          
+           OPL_OMB01_2_BEJDVÆR = :DCLBQ75000T.OPL_OMB01_2_BEJDVÆR,      
+           OPL_OMB01_2_EJBOL1_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_VEJK_EJEB,       
+           OPL_OMB01_2_EJBOL1_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_HUSNR_EJEB,      
+           OPL_OMB01_2_EJBOL1_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_ETAGE_EJEB,      
+           OPL_OMB01_2_EJBOL1_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_SDØR_EJEB,       
+           OPL_OMB01_2_EJBOL1_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_EJBOLTYP,        
+           OPL_OMB01_2_EJBOL1_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL1_BEJEBOL,         
+           OPL_OMB01_2_EJBOL2_VEJK_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_VEJK_EJEB,       
+           OPL_OMB01_2_EJBOL2_HUSNR_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_HUSNR_EJEB,      
+           OPL_OMB01_2_EJBOL2_ETAGE_EJEB =                              
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_ETAGE_EJEB,      
+           OPL_OMB01_2_EJBOL2_SDØR_EJEB =                               
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_SDØR_EJEB,       
+           OPL_OMB01_2_EJBOL2_EJBOLTYP =                                
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_EJBOLTYP,        
+           OPL_OMB01_2_EJBOL2_BEJEBOL =                                 
+                       :DCLBQ75000T.OPL_OMB01_2_EJBOL2_BEJEBOL,         
+           OPL_OMB01_2_ANT_FOR_1 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_1,  
+           OPL_OMB01_2_ANT_FOR_2 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_2,  
+           OPL_OMB01_2_ANT_FOR_4 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_4,  
+           OPL_OMB01_2_ANT_FOR_5 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_5,  
+           OPL_OMB01_2_ANT_FOR_6 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_6,  
+           OPL_OMB01_2_ANT_FOR_8 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_8,  
+           OPL_OMB01_2_ANT_FOR_9 = :DCLBQ75000T.OPL_OMB01_2_ANT_FOR_9,  
+           OPL_VURDNY_DVURDÅR = :DCLBQ75000T.OPL_VURDNY_DVURDÅR,        
+           OPL_VURDNY_CBENYT = :DCLBQ75000T.OPL_VURDNY_CBENYT,          
+           OPL_VURDNY_FLEJL = :DCLBQ75000T.OPL_VURDNY_FLEJL,            
+           OPL_VURDNY_BEJDVÆR = :DCLBQ75000T.OPL_VURDNY_BEJDVÆR,        
+           OPL_VURDNY_COMVGR1 = :DCLBQ75000T.OPL_VURDNY_COMVGR1,        
+           OPL_VURDNY_COMVGR2 = :DCLBQ75000T.OPL_VURDNY_COMVGR2,        
+           OPL_VURDNY_BEJDVÆP4A = :DCLBQ75000T.OPL_VURDNY_BEJDVÆP4A,    
+           OPL_VURDNY_BSKOV = :DCLBQ75000T.OPL_VURDNY_BSKOV,            
+           OPL_VURDNY_CUOP = :DCLBQ75000T.OPL_VURDNY_CUOP,              
+           OPL_VURDNY_CEJERL = :DCLBQ75000T.OPL_VURDNY_CEJERL,          
+           OPL_VURDNY_CFORSKEL = :DCLBQ75000T.OPL_VURDNY_CFORSKEL,      
+           OPL_VURDNY_CBANV = :DCLBQ75000T.OPL_VURDNY_CBANV,            
+           OPL_VURDNY_DOPFØ = :DCLBQ75000T.OPL_VURDNY_DOPFØ,            
+           OPL_VURDNY_DOMTIL = :DCLBQ75000T.OPL_VURDNY_DOMTIL,          
+           OPL_VURDNY_EJBOL1_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_VEJK_EJEB,        
+           OPL_VURDNY_EJBOL1_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_HUSNR_EJEB,       
+           OPL_VURDNY_EJBOL1_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_ETAGE_EJEB,       
+           OPL_VURDNY_EJBOL1_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_SDØR_EJEB,        
+           OPL_VURDNY_EJBOL1_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_EJBOLTYP,         
+           OPL_VURDNY_EJBOL1_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL1_BEJEBOL,          
+           OPL_VURDNY_EJBOL2_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_VEJK_EJEB,        
+           OPL_VURDNY_EJBOL2_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_HUSNR_EJEB,       
+           OPL_VURDNY_EJBOL2_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_ETAGE_EJEB,       
+           OPL_VURDNY_EJBOL2_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_SDØR_EJEB,        
+           OPL_VURDNY_EJBOL2_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_EJBOLTYP,         
+           OPL_VURDNY_EJBOL2_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURDNY_EJBOL2_BEJEBOL,          
+           OPL_VURDNY_ANT_FOR_1 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_1,    
+           OPL_VURDNY_ANT_FOR_2 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_2,    
+           OPL_VURDNY_ANT_FOR_4 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_4,    
+           OPL_VURDNY_ANT_FOR_5 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_5,    
+           OPL_VURDNY_ANT_FOR_6 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_6,    
+           OPL_VURDNY_ANT_FOR_8 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_8,    
+           OPL_VURDNY_ANT_FOR_9 = :DCLBQ75000T.OPL_VURDNY_ANT_FOR_9,    
+           OPL_VURDNY_OMB01_1_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_1_KONSEKVENS,      
+           OPL_VURDNY_OMB01_1_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_1_STK12,           
+           OPL_VURDNY_OMB01_1_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_1_STK13,           
+           OPL_VURDNY_OMB01_1_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_1_STK14,           
+           OPL_VURDNY_OMB01_1_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_1_STK15,           
+           OPL_VURDNY_OMB01_2_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_2_KONSEKVENS,      
+           OPL_VURDNY_OMB01_2_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_2_STK12,           
+           OPL_VURDNY_OMB01_2_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_2_STK13,           
+           OPL_VURDNY_OMB01_2_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_2_STK14,           
+           OPL_VURDNY_OMB01_2_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURDNY_OMB01_2_STK15,           
+           OPL_VURDGL_DVURDÅR = :DCLBQ75000T.OPL_VURDGL_DVURDÅR,        
+           OPL_VURDGL_CBENYT = :DCLBQ75000T.OPL_VURDGL_CBENYT,          
+           OPL_VURDGL_FLEJL = :DCLBQ75000T.OPL_VURDGL_FLEJL,            
+           OPL_VURDGL_BEJDVÆR = :DCLBQ75000T.OPL_VURDGL_BEJDVÆR,        
+           OPL_VURDGL_COMVGR1 = :DCLBQ75000T.OPL_VURDGL_COMVGR1,        
+           OPL_VURDGL_COMVGR2 = :DCLBQ75000T.OPL_VURDGL_COMVGR2,        
+           OPL_VURDGL_BEJDVÆP4A = :DCLBQ75000T.OPL_VURDGL_BEJDVÆP4A,    
+           OPL_VURDGL_BSKOV = :DCLBQ75000T.OPL_VURDGL_BSKOV,            
+           OPL_VURDGL_CUOP = :DCLBQ75000T.OPL_VURDGL_CUOP,              
+           OPL_VURDGL_CEJERL = :DCLBQ75000T.OPL_VURDGL_CEJERL,          
+           OPL_VURDGL_CFORSKEL = :DCLBQ75000T.OPL_VURDGL_CFORSKEL,      
+           OPL_VURDGL_CBANV = :DCLBQ75000T.OPL_VURDGL_CBANV,            
+           OPL_VURDGL_DOPFØ = :DCLBQ75000T.OPL_VURDGL_DOPFØ,            
+           OPL_VURDGL_DOMTIL = :DCLBQ75000T.OPL_VURDGL_DOMTIL,          
+           OPL_VURDGL_EJBOL1_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_VEJK_EJEB,        
+           OPL_VURDGL_EJBOL1_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_HUSNR_EJEB,       
+           OPL_VURDGL_EJBOL1_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_ETAGE_EJEB,       
+           OPL_VURDGL_EJBOL1_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_SDØR_EJEB,        
+           OPL_VURDGL_EJBOL1_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_EJBOLTYP,         
+           OPL_VURDGL_EJBOL1_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL1_BEJEBOL,          
+           OPL_VURDGL_EJBOL2_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_VEJK_EJEB,        
+           OPL_VURDGL_EJBOL2_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_HUSNR_EJEB,       
+           OPL_VURDGL_EJBOL2_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_ETAGE_EJEB,       
+           OPL_VURDGL_EJBOL2_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_SDØR_EJEB,        
+           OPL_VURDGL_EJBOL2_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_EJBOLTYP,         
+           OPL_VURDGL_EJBOL2_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURDGL_EJBOL2_BEJEBOL,          
+           OPL_VURDGL_ANT_FOR_1 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_1,    
+           OPL_VURDGL_ANT_FOR_2 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_2,    
+           OPL_VURDGL_ANT_FOR_4 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_4,    
+           OPL_VURDGL_ANT_FOR_5 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_5,    
+           OPL_VURDGL_ANT_FOR_6 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_6,    
+           OPL_VURDGL_ANT_FOR_8 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_8,    
+           OPL_VURDGL_ANT_FOR_9 = :DCLBQ75000T.OPL_VURDGL_ANT_FOR_9,    
+           OPL_VURDGL_OMB01_1_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_1_KONSEKVENS,      
+           OPL_VURDGL_OMB01_1_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_1_STK12,           
+           OPL_VURDGL_OMB01_1_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_1_STK13,           
+           OPL_VURDGL_OMB01_1_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_1_STK14,           
+           OPL_VURDGL_OMB01_1_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_1_STK15,           
+           OPL_VURDGL_OMB01_2_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_2_KONSEKVENS,      
+           OPL_VURDGL_OMB01_2_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_2_STK12,           
+           OPL_VURDGL_OMB01_2_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_2_STK13,           
+           OPL_VURDGL_OMB01_2_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_2_STK14,           
+           OPL_VURDGL_OMB01_2_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURDGL_OMB01_2_STK15,           
+           OPL_VURD02_DVURDÅR = :DCLBQ75000T.OPL_VURD02_DVURDÅR,        
+           OPL_VURD02_CBENYT = :DCLBQ75000T.OPL_VURD02_CBENYT,          
+           OPL_VURD02_FLEJL = :DCLBQ75000T.OPL_VURD02_FLEJL,            
+           OPL_VURD02_BEJDVÆR = :DCLBQ75000T.OPL_VURD02_BEJDVÆR,        
+           OPL_VURD02_COMVGR1 = :DCLBQ75000T.OPL_VURD02_COMVGR1,        
+           OPL_VURD02_COMVGR2 = :DCLBQ75000T.OPL_VURD02_COMVGR2,        
+           OPL_VURD02_BEJDVÆP4A = :DCLBQ75000T.OPL_VURD02_BEJDVÆP4A,    
+           OPL_VURD02_BSKOV = :DCLBQ75000T.OPL_VURD02_BSKOV,            
+           OPL_VURD02_CUOP = :DCLBQ75000T.OPL_VURD02_CUOP,              
+           OPL_VURD02_CEJERL = :DCLBQ75000T.OPL_VURD02_CEJERL,          
+           OPL_VURD02_CFORSKEL = :DCLBQ75000T.OPL_VURD02_CFORSKEL,      
+           OPL_VURD02_CBANV = :DCLBQ75000T.OPL_VURD02_CBANV,            
+           OPL_VURD02_DOPFØ = :DCLBQ75000T.OPL_VURD02_DOPFØ,            
+           OPL_VURD02_DOMTIL = :DCLBQ75000T.OPL_VURD02_DOMTIL,          
+           OPL_VURD02_EJBOL1_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_VEJK_EJEB,        
+           OPL_VURD02_EJBOL1_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_HUSNR_EJEB,       
+           OPL_VURD02_EJBOL1_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_ETAGE_EJEB,       
+           OPL_VURD02_EJBOL1_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_SDØR_EJEB,        
+           OPL_VURD02_EJBOL1_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_EJBOLTYP,         
+           OPL_VURD02_EJBOL1_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURD02_EJBOL1_BEJEBOL,          
+           OPL_VURD02_EJBOL2_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_VEJK_EJEB,        
+           OPL_VURD02_EJBOL2_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_HUSNR_EJEB,       
+           OPL_VURD02_EJBOL2_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_ETAGE_EJEB,       
+           OPL_VURD02_EJBOL2_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_SDØR_EJEB,        
+           OPL_VURD02_EJBOL2_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_EJBOLTYP,         
+           OPL_VURD02_EJBOL2_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURD02_EJBOL2_BEJEBOL,          
+           OPL_VURD02_ANT_FOR_1 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_1,    
+           OPL_VURD02_ANT_FOR_2 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_2,    
+           OPL_VURD02_ANT_FOR_4 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_4,    
+           OPL_VURD02_ANT_FOR_5 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_5,    
+           OPL_VURD02_ANT_FOR_6 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_6,    
+           OPL_VURD02_ANT_FOR_8 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_8,    
+           OPL_VURD02_ANT_FOR_9 = :DCLBQ75000T.OPL_VURD02_ANT_FOR_9,    
+           OPL_VURD02_OMB01_1_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURD02_OMB01_1_KONSEKVENS,      
+           OPL_VURD02_OMB01_1_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_1_STK12,           
+           OPL_VURD02_OMB01_1_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_1_STK13,           
+           OPL_VURD02_OMB01_1_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_1_STK14,           
+           OPL_VURD02_OMB01_1_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_1_STK15,           
+           OPL_VURD02_OMB01_2_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURD02_OMB01_2_KONSEKVENS,      
+           OPL_VURD02_OMB01_2_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_2_STK12,           
+           OPL_VURD02_OMB01_2_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_2_STK13,           
+           OPL_VURD02_OMB01_2_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_2_STK14,           
+           OPL_VURD02_OMB01_2_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURD02_OMB01_2_STK15,           
+           OPL_VURD01_DVURDÅR = :DCLBQ75000T.OPL_VURD01_DVURDÅR,        
+           OPL_VURD01_CBENYT = :DCLBQ75000T.OPL_VURD01_CBENYT,          
+           OPL_VURD01_FLEJL = :DCLBQ75000T.OPL_VURD01_FLEJL,            
+           OPL_VURD01_BEJDVÆR = :DCLBQ75000T.OPL_VURD01_BEJDVÆR,        
+           OPL_VURD01_COMVGR1 = :DCLBQ75000T.OPL_VURD01_COMVGR1,        
+           OPL_VURD01_COMVGR2 = :DCLBQ75000T.OPL_VURD01_COMVGR2,        
+           OPL_VURD01_BEJDVÆP4A = :DCLBQ75000T.OPL_VURD01_BEJDVÆP4A,    
+           OPL_VURD01_BSKOV = :DCLBQ75000T.OPL_VURD01_BSKOV,            
+           OPL_VURD01_CUOP = :DCLBQ75000T.OPL_VURD01_CUOP,              
+           OPL_VURD01_CEJERL = :DCLBQ75000T.OPL_VURD01_CEJERL,          
+           OPL_VURD01_CFORSKEL = :DCLBQ75000T.OPL_VURD01_CFORSKEL,      
+           OPL_VURD01_CBANV = :DCLBQ75000T.OPL_VURD01_CBANV,            
+           OPL_VURD01_DOPFØ = :DCLBQ75000T.OPL_VURD01_DOPFØ,            
+           OPL_VURD01_DOMTIL = :DCLBQ75000T.OPL_VURD01_DOMTIL,          
+           OPL_VURD01_EJBOL1_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_VEJK_EJEB,        
+           OPL_VURD01_EJBOL1_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_HUSNR_EJEB,       
+           OPL_VURD01_EJBOL1_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_ETAGE_EJEB,       
+           OPL_VURD01_EJBOL1_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_SDØR_EJEB,        
+           OPL_VURD01_EJBOL1_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_EJBOLTYP,         
+           OPL_VURD01_EJBOL1_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURD01_EJBOL1_BEJEBOL,          
+           OPL_VURD01_EJBOL2_VEJK_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_VEJK_EJEB,        
+           OPL_VURD01_EJBOL2_HUSNR_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_HUSNR_EJEB,       
+           OPL_VURD01_EJBOL2_ETAGE_EJEB =                               
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_ETAGE_EJEB,       
+           OPL_VURD01_EJBOL2_SDØR_EJEB =                                
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_SDØR_EJEB,        
+           OPL_VURD01_EJBOL2_EJBOLTYP =                                 
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_EJBOLTYP,         
+           OPL_VURD01_EJBOL2_BEJEBOL =                                  
+                       :DCLBQ75000T.OPL_VURD01_EJBOL2_BEJEBOL,          
+           OPL_VURD01_ANT_FOR_1 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_1,    
+           OPL_VURD01_ANT_FOR_2 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_2,    
+           OPL_VURD01_ANT_FOR_4 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_4,    
+           OPL_VURD01_ANT_FOR_5 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_5,    
+           OPL_VURD01_ANT_FOR_6 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_6,    
+           OPL_VURD01_ANT_FOR_8 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_8,    
+           OPL_VURD01_ANT_FOR_9 = :DCLBQ75000T.OPL_VURD01_ANT_FOR_9,    
+           OPL_VURD01_OMB01_1_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURD01_OMB01_1_KONSEKVENS,      
+           OPL_VURD01_OMB01_1_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_1_STK12,           
+           OPL_VURD01_OMB01_1_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_1_STK13,           
+           OPL_VURD01_OMB01_1_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_1_STK14,           
+           OPL_VURD01_OMB01_1_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_1_STK15,           
+           OPL_VURD01_OMB01_2_KONSEKVENS =                              
+                       :DCLBQ75000T.OPL_VURD01_OMB01_2_KONSEKVENS,      
+           OPL_VURD01_OMB01_2_STK12 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_2_STK12,           
+           OPL_VURD01_OMB01_2_STK13 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_2_STK13,           
+           OPL_VURD01_OMB01_2_STK14 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_2_STK14,           
+           OPL_VURD01_OMB01_2_STK15 =                                   
+                       :DCLBQ75000T.OPL_VURD01_OMB01_2_STK15,           
+           OPL_BEJDVÆP4B = :DCLBQ75000T.OPL_BEJDVÆP4B,                  
+           OPL_GL_CBENYT = :DCLBQ75000T.OPL_GL_CBENYT,                  
+           OPL_FLEJL = :DCLBQ75000T.OPL_FLEJL,                          
+           OPL_BEJDV = :DCLBQ75000T.OPL_BEJDV,                          
+           OPL_BEJEB = :DCLBQ75000T.OPL_BEJEB,                          
+           OPL_BSTUE = :DCLBQ75000T.OPL_BSTUE,                          
+           OPL_BSTUGR = :DCLBQ75000T.OPL_BSTUGR,                        
+           OPL_GBOANDPCT = :DCLBQ75000T.OPL_GBOANDPCT,                  
+           OPL_BFSKAT = :DCLBQ75000T.OPL_BFSKAT,                        
+           OPL_BYDAF = :DCLBQ75000T.OPL_BYDAF,                          
+           OPL_BDAF = :DCLBQ75000T.OPL_BDAF,                            
+           OPL_BAFPGRVKOM = :DCLBQ75000T.OPL_BAFPGRVKOM,                
+           OPL_BFKOMSKAT = :DCLBQ75000T.OPL_BFKOMSKAT,                  
+           OPL_BFKOMSKST = :DCLBQ75000T.OPL_BFKOMSKST,                  
+           OPL_EMATNR = :DCLBQ75000T.OPL_EMATNR,                        
+           OPL_ABGSTSK = :DCLBQ75000T.OPL_ABGSTSK,                      
+           OPL_HEJLTX = :DCLBQ75000T.OPL_HEJLTX,                        
+           OPL_EMATAR = :DCLBQ75000T.OPL_EMATAR,                        
+           OPL_CDIFF = :DCLBQ75000T.OPL_CDIFF,                          
+           OPL_CFRED = :DCLBQ75000T.OPL_CFRED,                          
+           OPL_CEJSO = :DCLBQ75000T.OPL_CEJSO,                          
+           OPL_CEJ_100 = :DCLBQ75000T.OPL_CEJ_100,                      
+           OPL_CEANV = :DCLBQ75000T.OPL_CEANV,                          
+           OPL_BBRF379 = :DCLBQ75000T.OPL_BBRF379,                      
+           OPL_BBRF380 = :DCLBQ75000T.OPL_BBRF380,                      
+           OPL_VEJK_EJD = :DCLBQ75000T.OPL_VEJK_EJD,                    
+           OPL_HUSNR_EJD = :DCLBQ75000T.OPL_HUSNR_EJD,                  
+           OPL_ETAGE_EJD = :DCLBQ75000T.OPL_ETAGE_EJD,                  
+           OPL_SDØR_EJD = :DCLBQ75000T.OPL_SDØR_EJD                     
+                                                                        
+            WHERE TIL_EVS_AAR   = :DCLBQ75000T.TIL_EVS_AAR              
+            AND   DCPRCIR         = :DCLBQ75000T.DCPRCIR                
+            AND   EKOMNR          = :DCLBQ75000T.EKOMNR                 
+            AND   EEJDNR          = :DCLBQ75000T.EEJDNR                 
+            AND   EGENNR          = :DCLBQ75000T.EGENNR                 
+            AND   AFVIKLINGS_ID = :DCLBQ75000T.AFVIKLINGS_ID;           
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_SKR = ANT_SKR + 1;                                   
+               ANT_UPD = ANT_UPD + 1;                                   
+               ANT_COMM = ANT_COMM + 1;                                 
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 UPDATE BQ75000T';                        
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END UPDATE_ESR;                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF MT   BQ75000T                      RUTINE */
+ /*********************************************************************/
+ CLOSE_ESRCURS: PROC;                                                   
+                                                                        
+         EXEC SQL CLOSE ESRCURS;                                        
+                                                                        
+ END CLOSE_ESRCURS;                                                     
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+         PROC;                                                          
+         LINIE = ZZIK1;                                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+         OVLIN1.CTL= ZZWS1;                                             
+         OVLIN1.DATO = UDDATO;                                          
+         CALL ZZ20300 (OVLIN1,'01');                                    
+         OVLIN2.CTL= ZZWS2;                                             
+         CALL ZZ20300 (OVLIN2,'01');                                    
+         LINIE = ZZWS2 !! (40)' ' !! 'PERSON 1            PERSON 2  ' !!
+                 '    DELING FORETAGET' !!                              
+                 (16)' ' !! 'IALT';                                     
+         CALL ZZ20300 (LINIE,'01');                                     
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL LÆSTE TO-EJERE';                         
+         DETAIL.ANTAL1 = TV.LÆSTE1;                                     
+         DETAIL.ANTAL2 = TV.LÆSTE2;                                     
+         IALT = TV.LÆSTE1 + TV.LÆSTE2;                                  
+         ANTALIALT = IALT;                                              
+         CALL ZZ20300 (LINIE,'01');                                     
+         DETAIL.TEKST = 'ANTAL OVERFØRTE ';                             
+         DETAIL.ANTAL1 = TV.OVF1;                                       
+         DETAIL.ANTAL2 = TV.OVF2;                                       
+         DETAIL.ANTALF = TV.DELING;                                     
+         IALT = TV.OVF1 + TV.OVF2;                                      
+         ANTALIALT = IALT;                                              
+         DETAIL.STYR = ZZWS3;                                           
+         CALL ZZ20300 (LINIE,'01');                                     
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /*********************************************************************/
+ /*      AFSLUTNING                                                   */
+ /*********************************************************************/
+ AFSLUT:                                                                
+         PROC;                                                          
+         CALL ZZ20300(' ','99');                                        
+         CLOSE FILE (BH220I);                                           
+                                                                        
+         CALL OPDATER_KØRSELSTABEL('SLUT',BH220_PARM.FS_MRK);           
+                                                                        
+ END AFSLUT;                                                            
+ %INCLUDE BH54997M;     /* ER FORGÆNGERE KØRT. STOP HVIS IKKE */        
+ %INCLUDE BH54998M; /* OPDATER KØRSELSTABEL */                          
+ END BH22000;                                                           

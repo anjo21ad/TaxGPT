@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, RefObject } from "react";
-import { Outlet, NavLink, Link } from "react-router-dom";
+import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import styles from "./Layout.module.css";
 
@@ -12,6 +12,7 @@ const Layout = () => {
     const { t } = useTranslation();
     const [menuOpen, setMenuOpen] = useState(false);
     const menuRef: RefObject<HTMLDivElement> = useRef(null);
+    const navigate = useNavigate();
 
     const toggleMenu = () => {
         setMenuOpen(!menuOpen);
@@ -21,6 +22,13 @@ const Layout = () => {
         if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
             setMenuOpen(false);
         }
+    };
+
+    const handleTitleClick = (e: React.MouseEvent) => {
+        e.preventDefault();
+        
+        // Naviger til forsiden med force refresh for at starte en helt ny chat
+        window.location.href = "/";
     };
 
     useEffect(() => {
@@ -38,9 +46,9 @@ const Layout = () => {
         <div className={styles.layout}>
             <header className={styles.header} role={"banner"}>
                 <div className={styles.headerContainer} ref={menuRef}>
-                    <Link to="/" className={styles.headerTitleContainer}>
+                    <a href="/" className={styles.headerTitleContainer} onClick={handleTitleClick}>
                         <h3 className={styles.headerTitle}>{t("headerTitle")}</h3>
-                    </Link>
+                    </a>
                     <nav>
                         <ul className={`${styles.headerNavList} ${menuOpen ? styles.show : ""}`}>
                             <li>

@@ -1,0 +1,682 @@
+ PROCESS OPT(TIME);                                                     
+ BE84825:/* Opdatering af samtlige ejendomme for personer             */
+         /* med CENKE 5                                               */
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /*********************************************************************/
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KOMMUNEDATA A/S 2004');       
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : personer med CENKE 5 gennemløbes, og samtlige af          * 
+ *          personens ejendomme, opdateret med 5. Dog opdateres       * 
+ *          kun hvis ejerskabet IKKE er slettet (COPR_CENKE)          * 
+ *          Samtidig sættes oprindelseskode til 'S'                   * 
+ *          Alle øvrige records røres ikke                            * 
+ *          Oprettet som en del af KS30-01 til Forskud 2017           * 
+ *          Programmet skal anvendes både til Slut og Forskuds        * 
+ *          oprettelsen af EVS.                                       * 
+ ********************************************************************** 
+ *                                                                    * 
+ * INPUT  : BE77000T og BE78000T                                      * 
+ *                                                                    * 
+ * OUTPUT : BE78000T                                                  * 
+ *                                                                    * 
+ ********************************************************************** 
+ *                                                                    * 
+ * NYT PROGRAM : Lene Maj Jensen QLE                      29.06.2016  * 
+ *                                                                    * 
+ ********************************************************************** 
+ *                                                                    * 
+ * RETTELSESLOG:                                                      * 
+ * Esben Brodersen      QEB                               06.07.2016  * 
+ * CPTYPSLUT og CPTYPFOR skal rettes når CENKE ændres, så de er       * 
+ * hænger sammen. Der opdeles i sommerhuse og øvrige ejendomme ved    * 
+ * ved skrivning. Ændret BE944 -> BE943 da programmet er flyttet      * 
+ * indsat optællings individ da det er forventet i BE94200L           * 
+ * indsat print liste                                                 * 
+ *                                                                    * 
+ * Lene Maj Jensen      QLE                               21.09.2016  * 
+ * Struktur BN90100N ændret til BN90000N til SLUT16                   * 
+ * Søg efter 'RUL' da rettelsen ligger flere steder                   * 
+ *                                                                    * 
+ * Lene Maj Jensen      QLE                               07.03.2017  * 
+ * Omlægning til db2.                                                 * 
+ * BE94700 og BE94800 er sammenlagt i dette modul                     * 
+ * BE94201M Taget ud QEB.                                             * 
+ *                                                                    * 
+ * SLUT18        Esben Brodersen EBD                       SEP        * 
+ *               2-Familie KS02-23                                    * 
+ *               Feltet EENHEDLBNR er tilføjet som en del af nøgle    * 
+ *               efter ejendomnummeret. Der er tilføjet et teknisk    * 
+ *               fejlnummer for ESR data til 2 familie huse           * 
+ * FORSKUD22     Per Brunk PBR                            01.02.2021  * 
+ *               Nye felter BE77000T                                  * 
+ * Slut 2020:    Elena Flygenring EFL                     marts 2021  * 
+ *              - ny kopi af BE84800                                  * 
+ *              - struktur BE65300M erstattes med BE55300M            * 
+ *              - Brug af FILE BE848I og BE848_PARM fjernes           * 
+ *              - BE848_PARM.FS_MARK fjernes                          * 
+ *              - BE848_PARM.FORSKUD_TXT, SLUT_TXT, SUPPL_TXT fjernes * 
+ *                erstattes med brug af BE55300M.AFVIKLINGS_ID        * 
+ *              - WS_TIL_EVS_AAR_GL og WS_SLUT_AFVIKLINGS_ID          * 
+ *                bruges ikke mere og kan derfor slettes              * 
+ *              - Parameter 2 fjernes i kald til OPDATER_KØRSELSTABEL * 
+ *              - Brug af include BE54999M fjernes                    * 
+ *              - BE76000T / BE77000T / BQ78000T:                     * 
+ *                nyt felt DATA_ID tilføjet                           * 
+ * FORSKUD25     Tina Carstens, TIC                   BF1715.05.2023  * 
+ * FORSKUD25     Jan Jensen, JJJ                     BF17 19.06.2024  * 
+ *              - BE55600M erstatter BE55300M                         * 
+ *                                                                    * 
+ * Navn:                Init:                             Dato:       * 
+ * xxxxxxxxxxxxxx       xxx                               99.99.9999  * 
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+                                                                        
+ DCL     SYSPRINT EXTERNAL FILE PRINT;                                  
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. FÆLLESMACROER                        * 
+ *********************************************************************/ 
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ /*********************************************************************/
+ /*     DECLARE AF DB2-variabler                                      */
+ /*********************************************************************/
+  EXEC SQL INCLUDE SQLCA;                                               
+  EXEC SQL INCLUDE BE76000T;  /* MANDTAL (FORSKUD)             */       
+  EXEC SQL INCLUDE BE77000T;  /* EVS_UDTRÆK (FORSKUD)          */       
+  EXEC SQL INCLUDE BE78000T;  /* EVS_RESULTAT (FORSKUD)        */       
+                                                                        
+ DCL    SQLKODE         FIXED     (5);                                  
+ DCL    SQLCODE_CH      CHAR      (5);                                  
+ DCL    SQLCODE_PIC     PIC       'SSSS9' DEF SQLCODE_CH;               
+                                                                        
+ /***************************************************************       
+ /*      DECLARE AF ABEND-RUTINE                                        
+ /**************************************************************/       
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE84825'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /*      DECLARE TIL LISTE PRINT                                      */
+ /*********************************************************************/
+         % INCLUDE ZZ20301M;                                            
+                                                                        
+ DCL    1 LINIE,                                                        
+          2 CCA          CHAR      (01),                                
+          2 INDHOLD      CHAR      (132)     INIT      (' ');           
+                                                                        
+ DCL    HJ_PIC9          PIC       '(8)Z9';                             
+ DCL    UDDATO          CHAR       (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (4),                                 
+           2 F1          CHAR      (1),                                 
+           2 MD          CHAR      (2),                                 
+           2 F2          CHAR      (1),                                 
+           2 DG          CHAR      (2);                                 
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PUTSKIP                BIT(1)   INIT ('0'B);                   
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT    CHAR(16) INIT (' ');                    
+                                                                        
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+                                                                        
+ DCL     WS_PROGRAMNAVN         CHAR(8)  INIT ('BE84825');              
+                                                                        
+ DCL     ESR_FUNDET       BIT       (1);                                
+                                                                        
+ DCL     SPEC_PUTSKIP        BIT       (1)     INIT('0'B);              
+ DCL     ANTAL_LÆST_BE943    BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_LÆST_BE947    BIN FIXED (31)    INIT(0);                 
+ DCL     ANT_SKR       BIN FIXED (31)    INIT(0);                       
+ DCL     ANT_UPD     BIN FIXED (31)    INIT(0);                         
+ DCL     ANTAL_EJ_OPDATERET  BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_SOMMERHUSE    BIN FIXED (31)    INIT(0);                 
+ DCL     ANTAL_ØVRIGE        BIN FIXED (31)    INIT(0);                 
+ DCL     WS_DCPRN            FIXED     (11);   /* Personnr */           
+ DCL     JA                  BIT       (1)     INIT ('1'B);             
+ DCL     NEJ                 BIT       (1)     INIT ('0'B);             
+ DCL     HJBEGRÆNSET_TP      CHAR      (1);                             
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     SUBSTR          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /*TIMESTAMP    */ 
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+                                                                        
+ /*********************************************************************/
+ /* Declare af CURSORS                                                */
+ /*********************************************************************/
+                                                                        
+         /* finder alle cprnr med cenke 5 og mindst 1 levende ejendom */
+         EXEC SQL DECLARE CENKECURS CURSOR WITH HOLD FOR                
+                                                                        
+             SELECT DISTINCT (T78.DCPRN)                                
+                                                                        
+          FROM BE78000T T78                                             
+          WHERE T78.TIL_EVS_AAR   = :WS_TIL_EVS_AAR                     
+          AND   T78.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          AND   T78.DATA_ID       = :BE55600M.DATA_ID                   
+          AND   T78.TILEVS_CENKE  = '5'                                 
+          AND   '1' > (SELECT (T77.EVSSEJ_SID_CSLET)                    
+                       FROM BE77000T T77                                
+                       WHERE T77.TIL_EVS_AAR = T78.TIL_EVS_AAR          
+                       AND   T77.AFVIKLINGS_ID = T78.AFVIKLINGS_ID      
+                       AND   T77.DATA_ID       = T78.DATA_ID            
+                       AND   T77.EKOMNR = T78.EKOMNR                    
+                       AND   T77.EEJDNR = T78.EEJDNR                    
+                       AND   T77.EENHEDLBNR = T78.EENHEDLBNR            
+                       AND   T77.EGENNR = T78.EGENNR                    
+                       AND   T77.DCPRN  = T78.DCPRN)                    
+          ORDER BY T78.DCPRN;                                           
+                                                                        
+          /* finder oplysninger for personer fundet via CENKECURS */    
+          EXEC SQL DECLARE DETAILCURS CURSOR WITH HOLD FOR              
+                                                                        
+              SELECT T76.HIST_OPD_DETTE_CSKPLOM,                        
+                     T77.EVSSEJ_SID_CSKPLOMF,                           
+                     T77.EVSSEJ_SID_CSLET,                              
+                     T78.DCPRN,                                         
+                     T78.TILEVS_CENKE,                                  
+                     T78.TILFORSK_COPR_CENKE,                           
+                     T78.EKOMNR,                                        
+                     T78.EEJDNR,                                        
+                     T78.EENHEDLBNR,                                    
+                     T78.EGENNR,                                        
+                     T78.TILEVS_CPTYPSLUT,                              
+                     T78.TILEVS_CPTYPFOR                                
+          FROM BE78000T T78, BE77000T T77, BQ76000T T76                 
+          WHERE T78.TIL_EVS_AAR = :WS_TIL_EVS_AAR                       
+          AND   T78.AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                
+          AND   T78.DATA_ID       = :BE55600M.DATA_ID                   
+          AND   T78.DCPRN = :WS_DCPRN                                   
+          AND   T77.TIL_EVS_AAR = T78.TIL_EVS_AAR                       
+          AND   T77.AFVIKLINGS_ID = T78.AFVIKLINGS_ID                   
+          AND   T77.DATA_ID       = T78.DATA_ID                         
+          AND   T77.DCPRN  = T78.DCPRN                                  
+          AND   T77.EKOMNR = T78.EKOMNR                                 
+          AND   T77.EEJDNR = T78.EEJDNR                                 
+          AND   T77.EENHEDLBNR = T78.EENHEDLBNR                         
+          AND   T77.EGENNR = T78.EGENNR                                 
+          AND   T76.TIL_EVS_AAR = T78.TIL_EVS_AAR                       
+          AND   T76.AFVIKLINGS_ID = T78.AFVIKLINGS_ID                   
+          AND   T76.DATA_ID       = T78.DATA_ID                         
+          AND   T76.DCPRN  = T78.DCPRN                                  
+          AND   T76.EKOMNR = T78.EKOMNR                                 
+          AND   T76.EEJDNR = T78.EEJDNR                                 
+          AND   T76.EENHEDLBNR = T78.EENHEDLBNR                         
+          AND   T76.EGENNR = T78.EGENNR                                 
+                                                                        
+          ORDER BY T78.DCPRN;                                           
+ /********************************************************************* 
+ *       ON CONDITIONS                                                * 
+ *********************************************************************/ 
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE84825L');             
+            END;                                                        
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE84801Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                 /* Skaf timestamp */      
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+            SELECT (BE55600M.AFVIKLINGS_ID);                            
+               WHEN ('OPRET_EVS_FORSK')                                 
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.FORSKÅR;            
+                  END;                                                  
+               WHEN ('OPRET_EVS_SLUT ')                                 
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.SLUTÅR;             
+                  END;                                                  
+               WHEN ('SUPPL_EVS_SLUT')                                  
+                  DO;                                                   
+                     WS_FORSKUD_SLUT_TXT = BE55600M.AFVIKLINGS_ID;      
+                     WS_TIL_EVS_AAR      = BE55600M.SLUTÅR;             
+                  END;                                                  
+               OTHERWISE                                                
+                  DO;                                                   
+                     ABENDTXT = 'Afviklings_id skal være '           !! 
+                                'OPRET_EVS_FORSK, OPRET_EVS_SLUT ' !!   
+                                'eller SUPPL_EVS_SLUT';                 
+                     CALL PROGRAM_FEJL;                                 
+                  END;                                                  
+            END; /* select */                                           
+                                                                        
+            PUT SKIP LIST ('Normal kørsel af ' !! WS_PROGRAMNAVN);      
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+                                                                        
+         CALL OPEN_CENKECURS;                                           
+         CALL FETCH_CENKECURS;                                          
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               DO WHILE (SQLCA.SQLCODE = 0); /* cenke 5 cpr fundet */   
+                  DCLBE76000T = '';                                     
+                  DCLBE77000T = '';                                     
+                  DCLBE78000T = '';                                     
+                  CALL CLOSE_DETAILCURS;                                
+                  CALL OPEN_DETAILCURS;                                 
+                  CALL FETCH_DETAILCURS;                                
+                                                                        
+                  SELECT (SQLCA.SQLCODE);                               
+                                                                        
+                    WHEN (0)                                            
+                      DO;                                               
+                        DO WHILE (SQLCA.SQLCODE = 0); /* detailopl */   
+                           CALL BEHANDL;                                
+                           CALL FETCH_DETAILCURS;                       
+                        END;                                            
+                      END;                                              
+                                                                        
+                    WHEN (100)                                          
+                      DO;                                               
+                      END;                                              
+                    OTHERWISE                                           
+                      DO;                                               
+                        ABENDTXT = '101 FETCH DETAILCURS';              
+                        CALL SQL_FEJL;                                  
+                      END;                                              
+                                                                        
+                  END; /* SELECT*/                                      
+                  CALL FETCH_CENKECURS;                                 
+               END;                                                     
+             END;                                                       
+                                                                        
+           WHEN (100)                                                   
+             DO;                                                        
+             END;                                                       
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH CENKECURS';                        
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         IF ANT_SKR < 0                                                 
+         THEN DO;                                                       
+             EXEC SQL COMMIT;                                           
+             Put skip list ('Commit efter ' !! ANT_SKR !!               
+                            ' opdateringer.  Ialt ' !! ANT_UPD !!       
+                            ' opdateringer');                           
+         END;                                                           
+                                                                        
+         CALL CLOSE_CENKECURS;                                          
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       Behandling af Personer med cenke 5 på mindst en ejendom      * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+         IF DCLBE77000T.EVSSEJ_SID_CSLET < '1' &                        
+            DCLBE78000T.TILEVS_CENKE ^= '5'                             
+            /* ejendom/ejerskab er IKKE slettet      */                 
+            /* og CENKE er ikke allerede opsat til 5 */                 
+         THEN DO;                                                       
+            /* opdater og skriv, læs næste 944 */                       
+            DCLBE78000T.TILEVS_CENKE = '5';                             
+            IF BE55600M.AFVIKLINGS_ID = 'OPRET_EVS_SLUT'                
+            THEN DO;                                                    
+               DCLBE78000T.TILFORSK_COPR_CENKE = 'S';                   
+            END;                                                        
+            ELSE DO;                                                    
+               DCLBE78000T.TILFORSK_COPR_CENKE = 'F';                   
+            END;                                                        
+            /* Justering af persontype felt 756/758  */                 
+            /* Svarer til ALDERSRET_SLUT=JA i BE94300L*/                
+            IF ER_BEGRÆNSET_SKATTEPLIGTIG                               
+            THEN DO;                                                    
+               IF DCLBE78000T.EKOMNR = 999                              
+               THEN DO;                                                 
+                  IF HJBEGRÆNSET_TP = '1' !                             
+                     HJBEGRÆNSET_TP = '3'                               
+                  THEN DO;                                              
+                      DCLBE78000T.TILEVS_CPTYPSLUT = '1';               
+                      DCLBE78000T.TILEVS_CPTYPFOR = '1';                
+                  END;                                                  
+                  ELSE DO;  /* type 8 - domicileret */                  
+                     DCLBE78000T.TILEVS_CPTYPSLUT = '4';                
+                     DCLBE78000T.TILEVS_CPTYPFOR = '4';                 
+                  END;                                                  
+               END;                                                     
+               ELSE DO;                                                 
+                  DCLBE78000T.TILEVS_CPTYPSLUT = '4';                   
+                  DCLBE78000T.TILEVS_CPTYPFOR  = '4';                   
+               END;                                                     
+            END;                                                        
+            ELSE DO;                                                    
+               DCLBE78000T.TILEVS_CPTYPSLUT = '3';                      
+               DCLBE78000T.TILEVS_CPTYPFOR  = '3';                      
+            END;                                                        
+            CALL UPDATE_RESULT;                                         
+         END;                                                           
+         ELSE DO;                                                       
+            /* ejendommen er slettet, så der overføres */               
+            /* uden opdatering eller CENKE er allerede */               
+            /* sat til 5 */                                             
+            ANTAL_EJ_OPDATERET = ANTAL_EJ_OPDATERET + 1;                
+            /* CALL UPDATE_RESULT; QEB */                               
+         END;                                                           
+                                                                        
+ END BEHANDL;                                                           
+                                                                        
+ /********************************************************************/ 
+ /* UNDERSØG OM EN BORGER ER BEGRÆNSET SKATTEPLIGTIG. FINDES MT DATA */ 
+ /* ANVENDES DE ELLERS UNDERSØGES SIDSTE EVS SLUT ÅR                 */ 
+ /********************************************************************/ 
+ ER_BEGRÆNSET_SKATTEPLIGTIG:PROC RETURNS(BIT(1));                       
+                                                                        
+   DCL HJBEGRÆNSET_BIT BIT(1);                                          
+                                                                        
+   HJBEGRÆNSET_BIT = NEJ;                                               
+   HJBEGRÆNSET_TP = '0';                                                
+                                                                        
+   IF DCLBE76000T.HIST_OPD_DETTE_CSKPLOM >= '0'                         
+   THEN                                                                 
+     DO;                                                                
+       IF DCLBE76000T.HIST_OPD_DETTE_CSKPLOM = '1' !                    
+          DCLBE76000T.HIST_OPD_DETTE_CSKPLOM = '3' !                    
+          DCLBE76000T.HIST_OPD_DETTE_CSKPLOM = '8'                      
+       THEN                                                             
+         DO;                                                            
+           HJBEGRÆNSET_BIT = JA;                                        
+           HJBEGRÆNSET_TP = DCLBE76000T.HIST_OPD_DETTE_CSKPLOM;         
+         END;                                                           
+     END;                                                               
+   ELSE                                                                 
+     DO;                                                                
+       IF DCLBE77000T.EVSSEJ_SID_CSKPLOMF = '1' !                       
+          DCLBE77000T.EVSSEJ_SID_CSKPLOMF = '3' !                       
+          DCLBE77000T.EVSSEJ_SID_CSKPLOMF = '8'                         
+       THEN                                                             
+         DO;                                                            
+           HJBEGRÆNSET_BIT = JA;                                        
+           HJBEGRÆNSET_TP =                                             
+                DCLBE77000T.EVSSEJ_SID_CSKPLOMF;                        
+         END;                                                           
+     END;                                                               
+                                                                        
+   RETURN(HJBEGRÆNSET_BIT);                                             
+                                                                        
+ END ER_BEGRÆNSET_SKATTEPLIGTIG;                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF CENKE5 personer                     RUTINE */
+ /*********************************************************************/
+ OPEN_CENKECURS: PROC;                                                  
+                                                                        
+         EXEC SQL OPEN CENKECURS;                                       
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN CENKECURS';                          
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_CENKECURS;                                                    
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF COR-TABEL BG40400T                 RUTINE */
+ /*********************************************************************/
+ FETCH_CENKECURS: PROC;                                                 
+                                                                        
+         EXEC SQL FETCH CENKECURS                                       
+                                                                        
+         INTO :WS_DCPRN                                                 
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+                ANTAL_LÆST_BE947 = ANTAL_LÆST_BE947 + 1;                
+             END;                                                       
+                                                                        
+           WHEN (100);                                                  
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH CENKECURS';                        
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+         /* PUT SKIP LIST('FETCH CENKECURS WS_DCPRN=', WS_DCPRN); */    
+                                                                        
+ END FETCH_CENKECURS;                                                   
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF cenke5 personer                    RUTINE */
+ /*********************************************************************/
+ CLOSE_CENKECURS: PROC;                                                 
+                                                                        
+         EXEC SQL CLOSE CENKECURS;                                      
+                                                                        
+ END CLOSE_CENKECURS;                                                   
+ /*********************************************************************/
+ /* UPDATE CENKE = 5 samt oprindelseskode                      RUTINE */
+ /*********************************************************************/
+ UPDATE_RESULT: PROC;                                                   
+                                                                        
+         DCLBE78000T.PROGRAMNAVN    = WS_PROGRAMNAVN;                   
+         DCLBE78000T.DB2FUNKTION    = 'U';                              
+                                                                        
+         EXEC SQL                                                       
+            UPDATE BE78000T                                             
+            SET                                                         
+             PROGRAMNAVN          = :WS_PROGRAMNAVN,                    
+             DB2FUNKTION          = 'U',                                
+             TILEVS_CENKE         = :DCLBE78000T.TILEVS_CENKE,          
+             TILFORSK_COPR_CENKE  = :DCLBE78000T.TILFORSK_COPR_CENKE,   
+             TILEVS_CPTYPSLUT     = :DCLBE78000T.TILEVS_CPTYPSLUT,      
+             TILEVS_CPTYPFOR      = :DCLBE78000T.TILEVS_CPTYPFOR        
+                                                                        
+            WHERE TIL_EVS_AAR   = :WS_TIL_EVS_AAR                       
+            AND   AFVIKLINGS_ID = :WS_FORSKUD_SLUT_TXT                  
+            AND   DATA_ID       = :BE55600M.DATA_ID                     
+            AND   DCPRN         = :WS_DCPRN                             
+            AND   EKOMNR        = :DCLBE78000T.EKOMNR                   
+            AND   EEJDNR        = :DCLBE78000T.EEJDNR                   
+            AND   EENHEDLBNR    = :DCLBE78000T.EENHEDLBNR               
+            AND   EGENNR        = :DCLBE78000T.EGENNR;                  
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0) DO;                                                 
+               ANT_SKR = ANT_SKR + 1;                                   
+               ANT_UPD = ANT_UPD + 1;                                   
+            END;                                                        
+            OTHERWISE DO;                                               
+               ABENDTXT = '101 UPDATE RESULT';                          
+               CALL SQL_FEJL;                                           
+            END;                                                        
+         END;                                                           
+                                                                        
+ END UPDATE_RESULT;                                                     
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF OPLYSNINGER FRA MT, SLUT OG RESULTAT       */
+ /*********************************************************************/
+ OPEN_DETAILCURS: PROC;                                                 
+                                                                        
+         EXEC SQL OPEN DETAILCURS;                                      
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              ABENDTXT = '101 OPEN DETAILCURS';                         
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_DETAILCURS;                                                   
+                                                                        
+ /*********************************************************************/
+ /* FETCH CURSOR TIL LÆS AF OPLYSNINGER FRA MT, SLUT OG RESULTAT      */
+ /*********************************************************************/
+ FETCH_DETAILCURS: PROC;                                                
+                                                                        
+         /* nulstil areal ?*/                                           
+                                                                        
+         EXEC SQL FETCH DETAILCURS                                      
+                                                                        
+         INTO :DCLBE76000T.HIST_OPD_DETTE_CSKPLOM,                      
+              :DCLBE77000T.EVSSEJ_SID_CSKPLOMF,                         
+              :DCLBE77000T.EVSSEJ_SID_CSLET,                            
+              :DCLBE78000T.DCPRN,                                       
+              :DCLBE78000T.TILEVS_CENKE,                                
+              :DCLBE78000T.TILFORSK_COPR_CENKE,                         
+              :DCLBE78000T.EKOMNR,                                      
+              :DCLBE78000T.EEJDNR,                                      
+              :DCLBE78000T.EENHEDLBNR,                                  
+              :DCLBE78000T.EGENNR,                                      
+              :DCLBE78000T.TILEVS_CPTYPSLUT,                            
+              :DCLBE78000T.TILEVS_CPTYPFOR                              
+         ;                                                              
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0);                                                    
+                                                                        
+           WHEN (100);                                                  
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               ABENDTXT = '101 FETCH DETAILCURS';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT*/                                               
+                                                                        
+ END FETCH_DETAILCURS;                                                  
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF OPLYSNINGER FRA MT, SLUT OG RESULTAT      */
+ /*********************************************************************/
+ CLOSE_DETAILCURS: PROC;                                                
+                                                                        
+         EXEC SQL CLOSE DETAILCURS;                                     
+                                                                        
+ END CLOSE_DETAILCURS;                                                  
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:PROC;                                                           
+                                                                        
+      /*sideskift*/                                                     
+      LINIE.CCA     = ZZIK1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*overskrift*/                                                    
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'KØRSELS TOTALER FOR BE84825 AFVIKLET DEN ' !!    
+                      UDDATO;                                           
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*mellemrum*/                                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_LÆST_BE947;                                 
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL LÆSTE RECORDS CENKE5 BE78000T: ' !!        
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANT_UPD;                                          
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL OPDATERET RECORDS BE78000T: ' !!           
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANTAL_EJ_OPDATERET;                               
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL EJ OPDATERET BE78000T: ' !!                
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      /*mellemrum*/                                                     
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = '';                                               
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      HJ_PIC9       = ANT_SKR;                                          
+      LINIE.CCA     = ZZWS1;                                            
+      LINIE.INDHOLD = 'ANTAL OPDATERET IALT(UDEN OPTÆLLINGS INDIVID): ' 
+                      !! '             '  !!                            
+                      HJ_PIC9;                                          
+      CALL ZZ20300(LINIE,'01');                                         
+                                                                        
+      CALL ZZ20300(' ','99'); /*luk print datasæt*/                     
+                                                                        
+ END AFSLUT;                                                            
+ /* %INCLUDE BE54997M; */     /* ER FORGÆNGERE KØRT. STOP HVIS IKKE */  
+ END  BE84825;                                                          

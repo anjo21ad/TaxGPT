@@ -1,0 +1,1056 @@
+ BH96400: PROC OPTIONS (MAIN) REORDER;                                  
+ /********************************************************************* 
+ ***     SAMMENLIGNING AF GÆLDENDE LØSNING OG DB2 LØSNING           *** 
+ ***     NAVN               SAMMENLIGNING                           *** 
+ ***                                                                *** 
+ ***     FUNKTION           SAMMENLIGNER OUTPUT DATASET FRA         *** 
+ ***                        FIL LØSNING OG DB2 LØSNING.             *** 
+ ***                        UDSKRIVER DE FELTER DER ER FORSKELLIGE  *** 
+ ***                        SAMT CPRNR DER MANGLER I ENTEN DEN      *** 
+ ***                        GAMLE ELLER DEN NYE LØSNING             *** 
+ ***                                                                *** 
+ ***     INPUT              SORTERET BH96120O - FIL LØSNING         *** 
+ ***                        SORTERET BH86120O - DB2 LØSNING         *** 
+ ***                                                                *** 
+ ***     OUTPUT             BH96400O DATASET MED FORSKELLE          *** 
+ ***                                                                *** 
+ **********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /*      FIL DEFINITIONER                                             */
+ /*********************************************************************/
+ DCL BH961I FILE RECORD INPUT;         /* FIL LØSNING                 */
+ DCL 01 BH961_DATA,                                                     
+ %INCLUDE BH96110N;;                                                    
+                                                                        
+ DCL BH861I FILE RECORD INPUT;         /* DB2 LØSNING                 */
+ DCL 01 BH861_DATA,                                                     
+ %INCLUDE BH96110N;;                                                    
+                                                                        
+ DCL BH964O FILE RECORD OUTPUT;        /* DIFFERENCE DATASET          */
+ DCL DIF_OUT        CHAR(10000) VAR;                                    
+                                                                        
+ DCL BH964K FILE RECORD OUTPUT;        /* KONTROLFIL VEDR. CPRNR      */
+ DCL KON_OUT        CHAR(200)   VAR;                                    
+                                                                        
+ DCL SYSPRINT FILE STREAM PRINT;                                        
+                                                                        
+ /*********************************************************************/
+ /*      DIVERSE                                                      */
+ /*********************************************************************/
+ DCL ZS30101        ENTRY;                  /* ABENDRUTINE            */
+ DCL ABENDKODE      FIXED       (2);                                    
+ DCL 1 ABENDMEDD,                                                       
+       2 ABENDMODUL CHAR      (7),                                      
+       2 ABENDFILL1 CHAR      (1)    INIT (' '),                        
+       2 ABENDMEDNR CHAR      (2)    INIT ('**'),                       
+       2 ABENDFILL2 CHAR      (1)    INIT (' '),                        
+       2 ABENDTXT   CHAR      (45);                                     
+                                                                        
+ DCL ABENDRTKODE    FIXED     (1)    INIT (2);                          
+                                                                        
+ DCL JA             BIT(1)           INIT('1'B);                        
+ DCL NEJ            BIT(1)           INIT('0'B);                        
+ DCL BH961_MORE     BIT(1)           INIT('1'B);                        
+ DCL BH861_MORE     BIT(1)           INIT('1'B);                        
+ DCL FFLAG          BIT(1)           INIT('0'B);                        
+ DCL ANTAL_FEJL     FIXED DEC(9,0)   INIT(0);                           
+ DCL ANTAL_FREC     FIXED DEC(9,0)   INIT(0);                           
+ DCL ANTAL_SAM_OK   FIXED DEC(9,0)   INIT(0);                           
+ DCL LÆST_BH86120   FIXED DEC(9,0)   INIT(0);                           
+ DCL LÆST_BH96120   FIXED DEC(9,0)   INIT(0);                           
+ DCL ANTAL_EJ_SAM   FIXED DEC(9,0)   INIT(0);                           
+                                                                        
+ /**********************************************************************
+ *                                                                     *
+ *       ***** HOUSEKEEPING ***                                        *
+ *                                                                     *
+ **********************************************************************/
+     OPEN FILE (BH961I) TITLE ('BH96120I');                             
+     OPEN FILE (BH861I) TITLE ('BH86120I');                             
+     OPEN FILE (BH964O) TITLE ('BH96400O');                             
+     OPEN FILE (BH964K) TITLE ('BH96400K');                             
+     ON ENDFILE (BH961I)                                                
+        BEGIN;                                                          
+           BH961_MORE = NEJ;                                            
+        END;                                                            
+     ON ENDFILE (BH861I)                                                
+        BEGIN;                                                          
+           BH861_MORE = NEJ;                                            
+        END;                                                            
+                                                                        
+ /**********************************************************************
+ *                                                                     *
+ *       ***** PROCESSING *****                                        *
+ *                                                                     *
+ **********************************************************************/
+                                                                        
+     READ FILE(BH961I) INTO(BH961_DATA);                                
+     READ FILE(BH861I) INTO(BH861_DATA);                                
+     DO WHILE(BH961_MORE & BH861_MORE);                                 
+        CALL SKRIV_KONTROL();                                           
+        IF BH961_DATA.DCPRN    = BH861_DATA.DCPRN                       
+         & BH961_DATA.EKOMNR   = BH861_DATA.EKOMNR                      
+         & BH961_DATA.EEJDNR   = BH861_DATA.EEJDNR                      
+         & BH961_DATA.ELBNR    = BH861_DATA.ELBNR                       
+        THEN DO;                                                        
+           CALL SAMMENLIGN_DATA();                                      
+           READ FILE(BH961I) INTO(BH961_DATA);                          
+           LÆST_BH96120 = LÆST_BH96120 + 1;                             
+           READ FILE(BH861I) INTO(BH861_DATA);                          
+           LÆST_BH86120 = LÆST_BH86120 + 1;                             
+        END;                                                            
+        ELSE DO;                                                        
+           IF BH961_DATA.DCPRN > BH861_DATA.DCPRN                       
+            ! (BH961_DATA.DCPRN    = BH861_DATA.DCPRN                   
+               & BH961_DATA.EKOMNR > BH861_DATA.EKOMNR)                 
+            ! (BH961_DATA.DCPRN    = BH861_DATA.DCPRN                   
+               & BH961_DATA.EKOMNR = BH861_DATA.EKOMNR                  
+               &  BH961_DATA.EEJDNR > BH861_DATA.EEJDNR)                
+            ! (BH961_DATA.DCPRN    = BH861_DATA.DCPRN                   
+               & BH961_DATA.EKOMNR = BH861_DATA.EKOMNR                  
+               & BH961_DATA.EEJDNR = BH861_DATA.EEJDNR                  
+               & BH961_DATA.ELBNR  > BH861_DATA.ELBNR)                  
+           THEN DO;                                                     
+              DIF_OUT = BH861_DATA.DCPRN!!' '!!BH861_DATA.EKOMNR!!' '!! 
+                        BH861_DATA.EEJDNR!!' '!!BH861_DATA.ELBNR!!'   ' 
+                        !!'RECORD IKKE MED I BH96100 DATASET';          
+              WRITE FILE(BH964O) FROM(DIF_OUT);                         
+              READ FILE(BH861I) INTO(BH861_DATA);                       
+              LÆST_BH86120 = LÆST_BH86120 + 1;                          
+              ANTAL_EJ_SAM = ANTAL_EJ_SAM + 1;                          
+           END;                                                         
+           ELSE DO;                                                     
+              DIF_OUT = BH961_DATA.DCPRN!!' '!!BH961_DATA.EKOMNR!!' '!! 
+                        BH961_DATA.EEJDNR!!' '!!BH961_DATA.ELBNR!!'   ' 
+                        !!'RECORD IKKE MED I BH86100 DATASET';          
+              WRITE FILE(BH964O) FROM(DIF_OUT);                         
+              READ FILE(BH961I) INTO(BH961_DATA);                       
+              LÆST_BH96120 = LÆST_BH96120 + 1;                          
+              ANTAL_EJ_SAM = ANTAL_EJ_SAM + 1;                          
+           END;                                                         
+        END;                                                            
+     END;                                                               
+     IF ^BH961_MORE & BH861_MORE THEN                                   
+        PUT SKIP LIST('BH96120 SLUTTER FØR BH86120');                   
+     IF BH961_MORE & ^BH861_MORE THEN                                   
+        PUT SKIP LIST('BH86120 SLUTTER FØR BH96120');                   
+                                                                        
+     PUT SKIP LIST('ANTAL LÆST_BH86120     = '!!LÆST_BH86120);          
+     PUT SKIP LIST('ANTAL LÆST_BH96120     = '!!LÆST_BH96120);          
+     PUT SKIP LIST('ANTAL RECORDS MED FEJL = '!!ANTAL_FREC);            
+     PUT SKIP LIST('ANTAL FEJL IALT        = '!!ANTAL_FEJL);            
+     PUT SKIP LIST('ANTAL SAMMENLINING OK  = '!!ANTAL_SAM_OK);          
+                                                                        
+                                                                        
+ /**********************************************************************
+ *                                                                     *
+ *       ***** SKRIV KONTROL FIL *****                                 *
+ *                                                                     *
+ **********************************************************************/
+ SKRIV_KONTROL: PROC;                                                   
+                                                                        
+     KON_OUT = 'BH961: '!!BH961_DATA.DCPRN!!' / '!!                     
+                          BH961_DATA.EKOMNR!!' / '!!                    
+                          BH961_DATA.EEJDNR!!' / '!!                    
+                          BH961_DATA.ELBNR!!'    BH861: '!!             
+                          BH861_DATA.DCPRN!!' / '!!                     
+                          BH861_DATA.EKOMNR!!' / '!!                    
+                          BH861_DATA.EEJDNR!!' / '!!                    
+                          BH861_DATA.ELBNR;                             
+     WRITE FILE(BH964K) FROM(KON_OUT);                                  
+                                                                        
+ END SKRIV_KONTROL;                                                     
+ /**********************************************************************
+ *                                                                     *
+ *       ***** SAMMENLIGN DATA FRA FIL OG DB2 *****                    *
+ *                                                                     *
+ **********************************************************************/
+ SAMMENLIGN_DATA: PROC;                                                 
+     DIF_OUT = BH961_DATA.DCPRN!!' '!!BH961_DATA.EKOMNR!!' '!!          
+               BH961_DATA.EEJDNR!!' '!!BH961_DATA.ELBNR!!' ';           
+     IF BH961_DATA.CSLET = BH861_DATA.CSLET THEN;                       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CSLET: '!!BH961_DATA.CSLET!!'/'!!           
+                                      BH861_DATA.CSLET!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CLANDEKODE = BH861_DATA.CLANDEKODE THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CLANDEKODE: '!!BH961_DATA.CLANDEKODE!!'/'!! 
+                                      BH861_DATA.CLANDEKODE!!' ';       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CSKPLOMF = BH861_DATA.CSKPLOMF THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CSKPLOMF: '!!BH961_DATA.CSKPLOMF!!'/'!!     
+                                      BH861_DATA.CSKPLOMF!!' ';         
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CEJBEVS = BH861_DATA.CEJBEVS THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CEJBEVS: '!!BH961_DATA.CEJBEVS!!'/'!!       
+                                      BH861_DATA.CEJBEVS!!' ';          
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BOBEHAKOD = BH861_DATA.BOBEHAKOD THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BOBEHAKOD: '!!BH961_DATA.BOBEHAKOD!!'/'!!   
+                                      BH861_DATA.BOBEHAKOD!!' ';        
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.MANPENSSTI_I = BH861_DATA.MANPENSSTI_I THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'MANPENSSTI_I: '!!BH961_DATA.MANPENSSTI_I!!  
+                                      '/'!!BH861_DATA.MANPENSSTI_I!!' ';
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.MANPENSSTI = BH861_DATA.MANPENSSTI THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BOBEHAKOD: '!!BH961_DATA.MANPENSSTI!!'/'!!  
+                                      BH861_DATA.MANPENSSTI!!' ';       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_015ANV_I = BH861_DATA.BBERGRL_015ANV_I THEN; 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_015ANV_I: '!!                       
+                           BH961_DATA.BBERGRL_015ANV_I!!'/'!!           
+                           BH861_DATA.BBERGRL_015ANV_I!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_015ANV = BH861_DATA.BBERGRL_015ANV THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_015ANV: '!!                         
+                           BH961_DATA.BBERGRL_015ANV!!'/'!!             
+                           BH861_DATA.BBERGRL_015ANV!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_02ANV_I = BH861_DATA.BBERGRL_02ANV_I THEN;   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_02ANV_I: '!!                        
+                           BH961_DATA.BBERGRL_02ANV_I!!'/'!!            
+                           BH861_DATA.BBERGRL_02ANV_I!!' ';             
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_02ANV = BH861_DATA.BBERGRL_02ANV THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_02ANV: '!!                          
+                           BH961_DATA.BBERGRL_02ANV!!'/'!!              
+                           BH861_DATA.BBERGRL_02ANV!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_AKT_I = BH861_DATA.BBERGRL_AKT_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_AKT_I: '!!                          
+                           BH961_DATA.BBERGRL_AKT_I!!'/'!!              
+                           BH861_DATA.BBERGRL_AKT_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_AKT = BH861_DATA.BBERGRL_AKT THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_AKT: '!!                            
+                           BH961_DATA.BBERGRL_AKT!!'/'!!                
+                           BH861_DATA.BBERGRL_AKT!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_015ANV_I = BH861_DATA.BBER2FAM_015ANV_I     
+     THEN;                                                              
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_015ANV_I: '!!                      
+                           BH961_DATA.BBER2FAM_015ANV_I!!'/'!!          
+                           BH861_DATA.BBER2FAM_015ANV_I!!' ';           
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_015ANV = BH861_DATA.BBER2FAM_015ANV THEN;   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_015ANV: '!!                        
+                           BH961_DATA.BBER2FAM_015ANV!!'/'!!            
+                           BH861_DATA.BBER2FAM_015ANV!!' ';             
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_02ANV_I = BH861_DATA.BBER2FAM_02ANV_I THEN; 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_02ANV_I: '!!                       
+                           BH961_DATA.BBER2FAM_02ANV_I!!'/'!!           
+                           BH861_DATA.BBER2FAM_02ANV_I!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_02ANV = BH861_DATA.BBER2FAM_02ANV THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_02ANV: '!!                         
+                           BH961_DATA.BBER2FAM_02ANV!!'/'!!             
+                           BH861_DATA.BBER2FAM_02ANV!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_AKT_I = BH861_DATA.BBER2FAM_AKT_I THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_AKT_I: '!!                         
+                           BH961_DATA.BBER2FAM_AKT_I!!'/'!!             
+                           BH861_DATA.BBER2FAM_AKT_I!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_AKT = BH861_DATA.BBER2FAM_AKT THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_AKT: '!!                           
+                           BH961_DATA.BBER2FAM_AKT!!'/'!!               
+                           BH861_DATA.BBER2FAM_AKT!!' ';                
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.EJDBELIG = BH861_DATA.EJDBELIG THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'EJDBELIG: '!!                               
+                           BH961_DATA.EJDBELIG!!'/'!!                   
+                           BH861_DATA.EJDBELIG!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CEJDTYPE = BH861_DATA.CEJDTYPE THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CEJDTYPE: '!!                               
+                           BH961_DATA.CEJDTYPE!!'/'!!                   
+                           BH861_DATA.CEJDTYPE!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CÆGTOPR = BH861_DATA.CÆGTOPR THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CÆGTOPR: '!!                                
+                           BH961_DATA.CÆGTOPR!!'/'!!                    
+                           BH861_DATA.CÆGTOPR!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DOVTG = BH861_DATA.DOVTG THEN;                       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DOVTG: '!!                                  
+                           BH961_DATA.DOVTG!!'/'!!                      
+                           BH861_DATA.DOVTG!!' ';                       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DAFSTAA = BH861_DATA.DAFSTAA THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DAFSTAA: '!!                                
+                           BH961_DATA.DAFSTAA!!'/'!!                    
+                           BH861_DATA.DAFSTAA!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.GPCTEJER_I = BH861_DATA.GPCTEJER_I THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'GPCTEJER_I: '!!                             
+                           BH961_DATA.GPCTEJER_I!!'/'!!                 
+                           BH861_DATA.GPCTEJER_I!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.GPCTEJER = BH861_DATA.GPCTEJER THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'GPCTEJER: '!!                               
+                           BH961_DATA.GPCTEJER!!'/'!!                   
+                           BH861_DATA.GPCTEJER!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FDAGUDLE = BH861_DATA.FDAGUDLE THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FDAGUDLE: '!!                               
+                           BH961_DATA.FDAGUDLE!!'/'!!                   
+                           BH861_DATA.FDAGUDLE!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.GPCTUDLE = BH861_DATA.GPCTUDLE THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'GPCTUDLE: '!!                               
+                           BH961_DATA.GPCTUDLE!!'/'!!                   
+                           BH861_DATA.GPCTUDLE!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FUDL100 = BH861_DATA.FUDL100 THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FUDL100: '!!                                
+                           BH961_DATA.FUDL100!!'/'!!                    
+                           BH861_DATA.FUDL100!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.GPCTERHV = BH861_DATA.GPCTERHV THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'GPCTERHV: '!!                               
+                           BH961_DATA.GPCTERHV!!'/'!!                   
+                           BH861_DATA.GPCTERHV!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FDAGERHV = BH861_DATA.FDAGERHV THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FDAGERHV: '!!                               
+                           BH961_DATA.FDAGERHV!!'/'!!                   
+                           BH861_DATA.FDAGERHV!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FERHVFLER = BH861_DATA.FERHVFLER THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FERHVFLER: '!!                              
+                           BH961_DATA.FERHVFLER!!'/'!!                  
+                           BH861_DATA.FERHVFLER!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CENKE = BH861_DATA.CENKE THEN;                       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CENKE: '!!                                  
+                           BH961_DATA.CENKE!!'/'!!                      
+                           BH861_DATA.CENKE!!' ';                       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CPTYPSLUT = BH861_DATA.CPTYPSLUT THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CPTYPSLUT: '!!                              
+                           BH961_DATA.CPTYPSLUT!!'/'!!                  
+                           BH861_DATA.CPTYPSLUT!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CPTYPGL = BH861_DATA.CPTYPGL THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CPTYPGL: '!!                                
+                           BH961_DATA.CPTYPGL!!'/'!!                    
+                           BH861_DATA.CPTYPGL!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FELT759 = BH861_DATA.FELT759 THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FELT759: '!!                                
+                           BH961_DATA.FELT759!!'/'!!                    
+                           BH861_DATA.FELT759!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FELT760 = BH861_DATA.FELT760 THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FELT760: '!!                                
+                           BH961_DATA.FELT760!!'/'!!                    
+                           BH861_DATA.FELT760!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEVSGL_I = BH861_DATA.BEVSGL_I THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEVSGL_I: '!!                               
+                           BH961_DATA.BEVSGL_I!!'/'!!                   
+                           BH861_DATA.BEVSGL_I!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEVSGL = BH861_DATA.BEVSGL THEN;                     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEVSGL: '!!                                 
+                           BH961_DATA.BEVSGL!!'/'!!                     
+                           BH861_DATA.BEVSGL!!' ';                      
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJDVPUSKTP_I = BH861_DATA.BEJDVPUSKTP_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJDVPUSKTP_I: '!!                          
+                           BH961_DATA.BEJDVPUSKTP_I!!'/'!!              
+                           BH861_DATA.BEJDVPUSKTP_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJDVPUSKTP = BH861_DATA.BEJDVPUSKTP THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJDVPUSKTP: '!!                            
+                           BH961_DATA.BEJDVPUSKTP!!'/'!!                
+                           BH861_DATA.BEJDVPUSKTP!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BPENSNEDGL_I = BH861_DATA.BPENSNEDGL_I THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BPENSNEDGL_I: '!!                           
+                           BH961_DATA.BPENSNEDGL_I!!'/'!!               
+                           BH861_DATA.BPENSNEDGL_I!!' ';                
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BPENSNEDGL = BH861_DATA.BPENSNEDGL THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BPENSNEDGL: '!!                             
+                           BH961_DATA.BPENSNEDGL!!'/'!!                 
+                           BH861_DATA.BPENSNEDGL!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DINDFLYT = BH861_DATA.DINDFLYT THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DINDFLYT: '!!                               
+                           BH961_DATA.DINDFLYT!!'/'!!                   
+                           BH861_DATA.DINDFLYT!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DFRAFLYT = BH861_DATA.DFRAFLYT THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DFRAFLYT: '!!                               
+                           BH961_DATA.DFRAFLYT!!'/'!!                   
+                           BH861_DATA.DFRAFLYT!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FUBEBOELIG = BH861_DATA.FUBEBOELIG THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FUBEBOELIG: '!!                             
+                           BH961_DATA.FUBEBOELIG!!'/'!!                 
+                           BH861_DATA.FUBEBOELIG!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJDVÆPUSKP_I = BH861_DATA.BEJDVÆPUSKP_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJDVÆPUSKP_I: '!!                          
+                           BH961_DATA.BEJDVÆPUSKP_I!!'/'!!              
+                           BH861_DATA.BEJDVÆPUSKP_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJDVÆPUSKP = BH861_DATA.BEJDVÆPUSKP THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJDVÆPUSKP: '!!                            
+                           BH961_DATA.BEJDVÆPUSKP!!'/'!!                
+                           BH861_DATA.BEJDVÆPUSKP!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BFASTSTIGBGR_I = BH861_DATA.BFASTSTIGBGR_I THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BFASTSTIGBGR_I: '!!                         
+                           BH961_DATA.BFASTSTIGBGR_I!!'/'!!             
+                           BH861_DATA.BFASTSTIGBGR_I!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BFASTSTIGBGR = BH861_DATA.BFASTSTIGBGR THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BFASTSTIGBGR: '!!                           
+                           BH961_DATA.BFASTSTIGBGR!!'/'!!               
+                           BH861_DATA.BFASTSTIGBGR!!' ';                
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CINDFLYT = BH861_DATA.CINDFLYT THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CINDFLYT: '!!                               
+                           BH961_DATA.CINDFLYT!!'/'!!                   
+                           BH861_DATA.CINDFLYT!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CBERGRGLOP = BH861_DATA.CBERGRGLOP THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CBERGRGLOP: '!!                             
+                           BH961_DATA.CBERGRGLOP!!'/'!!                 
+                           BH861_DATA.CBERGRGLOP!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BMANEVSSTI_I = BH861_DATA.BMANEVSSTI_I THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BMANEVSSTI_I: '!!                           
+                           BH961_DATA.BMANEVSSTI_I!!'/'!!               
+                           BH861_DATA.BMANEVSSTI_I!!' ';                
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BMANEVSSTI = BH861_DATA.BMANEVSSTI THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BMANEVSSTI: '!!                             
+                           BH961_DATA.BMANEVSSTI!!'/'!!                 
+                           BH861_DATA.BMANEVSSTI!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEVSMAN_I = BH861_DATA.BEVSMAN_I THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEVSMAN_I: '!!                              
+                           BH961_DATA.BEVSMAN_I!!'/'!!                  
+                           BH861_DATA.BEVSMAN_I!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEVSMAN = BH861_DATA.BEVSMAN THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEVSMAN: '!!                                
+                           BH961_DATA.BEVSMAN!!'/'!!                    
+                           BH861_DATA.BEVSMAN!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BMANNEDSL_I = BH861_DATA.BMANNEDSL_I THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BMANNEDSL_I: '!!                            
+                           BH961_DATA.BMANNEDSL_I!!'/'!!                
+                           BH861_DATA.BMANNEDSL_I!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BMANNEDSL = BH861_DATA.BMANNEDSL THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BMANNEDSL: '!!                              
+                           BH961_DATA.BMANNEDSL!!'/'!!                  
+                           BH861_DATA.BMANNEDSL!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CEKSEMP = BH861_DATA.CEKSEMP THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CEKSEMP: '!!                                
+                           BH961_DATA.CEKSEMP!!'/'!!                    
+                           BH861_DATA.CEKSEMP!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.MANNEDSLSTI_I = BH861_DATA.MANNEDSLSTI_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'MANNEDSLSTI_I: '!!                          
+                           BH961_DATA.MANNEDSLSTI_I!!'/'!!              
+                           BH861_DATA.MANNEDSLSTI_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.MANNEDSLSTI = BH861_DATA.MANNEDSLSTI THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'MANNEDSLSTI: '!!                            
+                           BH961_DATA.MANNEDSLSTI!!'/'!!                
+                           BH861_DATA.MANNEDSLSTI!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BUDLSKC_I = BH861_DATA.BUDLSKC_I THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BUDLSKC_I: '!!                              
+                           BH961_DATA.BUDLSKC_I!!'/'!!                  
+                           BH861_DATA.BUDLSKC_I!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BUDLSKC = BH861_DATA.BUDLSKC THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BUDLSKC: '!!                                
+                           BH961_DATA.BUDLSKC!!'/'!!                    
+                           BH861_DATA.BUDLSKC!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_AKT_I = BH861_DATA.BEJBOL1_AKT_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_AKT_I: '!!                          
+                           BH961_DATA.BEJBOL1_AKT_I!!'/'!!              
+                           BH861_DATA.BEJBOL1_AKT_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_AKT = BH861_DATA.BEJBOL1_AKT THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_AKT: '!!                            
+                           BH961_DATA.BEJBOL1_AKT!!'/'!!                
+                           BH861_DATA.BEJBOL1_AKT!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_AKT_I = BH861_DATA.BEJBOL2_AKT_I THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_AKT_I: '!!                          
+                           BH961_DATA.BEJBOL2_AKT_I!!'/'!!              
+                           BH861_DATA.BEJBOL2_AKT_I!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_AKT = BH861_DATA.BEJBOL2_AKT THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_AKT: '!!                            
+                           BH961_DATA.BEJBOL2_AKT!!'/'!!                
+                           BH861_DATA.BEJBOL2_AKT!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DAFSTAAFOR = BH861_DATA.DAFSTAAFOR THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DAFSTAAFOR: '!!                             
+                           BH961_DATA.DAFSTAAFOR!!'/'!!                 
+                           BH861_DATA.DAFSTAAFOR!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CVURDOPR = BH861_DATA.CVURDOPR THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CVURDOPR: '!!                               
+                           BH961_DATA.CVURDOPR!!'/'!!                   
+                           BH861_DATA.CVURDOPR!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_02ANV_I = BH861_DATA.BEJBOL1_02ANV_I THEN;   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_02ANV_I: '!!                        
+                           BH961_DATA.BEJBOL1_02ANV_I!!'/'!!            
+                           BH861_DATA.BEJBOL1_02ANV_I!!' ';             
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_02ANV = BH861_DATA.BEJBOL1_02ANV THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_02ANV: '!!                          
+                           BH961_DATA.BEJBOL1_02ANV!!'/'!!              
+                           BH861_DATA.BEJBOL1_02ANV!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_02ANV_I = BH861_DATA.BEJBOL2_02ANV_I THEN;   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_02ANV_I: '!!                        
+                           BH961_DATA.BEJBOL2_02ANV_I!!'/'!!            
+                           BH861_DATA.BEJBOL2_02ANV_I!!' ';             
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_02ANV = BH861_DATA.BEJBOL2_02ANV THEN;       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_02ANV: '!!                          
+                           BH961_DATA.BEJBOL2_02ANV!!'/'!!              
+                           BH861_DATA.BEJBOL2_02ANV!!' ';               
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CBENYT = BH861_DATA.CBENYT THEN;                     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CBENYT: '!!                                 
+                           BH961_DATA.CBENYT!!'/'!!                     
+                           BH861_DATA.CBENYT!!' ';                      
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.COMBYG = BH861_DATA.COMBYG THEN;                     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'COMBYG: '!!                                 
+                           BH961_DATA.COMBYG!!'/'!!                     
+                           BH861_DATA.COMBYG!!' ';                      
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CBERGRL = BH861_DATA.CBERGRL THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CBERGRL: '!!                                
+                           BH961_DATA.CBERGRL!!'/'!!                    
+                           BH861_DATA.CBERGRL!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CELØNCOR = BH861_DATA.CELØNCOR THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CELØNCOR: '!!                               
+                           BH961_DATA.CELØNCOR!!'/'!!                   
+                           BH861_DATA.CELØNCOR!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.GPCTEJERFOR = BH861_DATA.GPCTEJERFOR THEN;           
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'GPCTEJERFOR: '!!                            
+                           BH961_DATA.GPCTEJERFOR!!'/'!!                
+                           BH861_DATA.GPCTEJERFOR!!' ';                 
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CERHV = BH861_DATA.CERHV THEN;                       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CERHV: '!!                                  
+                           BH961_DATA.CERHV!!'/'!!                      
+                           BH861_DATA.CERHV!!' ';                       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_AKT_I = BH861_DATA.BLANDVÆR_AKT_I THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_AKT_I: '!!                         
+                           BH961_DATA.BLANDVÆR_AKT_I!!'/'!!             
+                           BH861_DATA.BLANDVÆR_AKT_I!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_AKT = BH861_DATA.BLANDVÆR_AKT THEN;         
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_AKT: '!!                           
+                           BH961_DATA.BLANDVÆR_AKT!!'/'!!               
+                           BH861_DATA.BLANDVÆR_AKT!!' ';                
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_015ANV_I = BH861_DATA.BLANDVÆR_015ANV_I     
+     THEN;                                                              
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_015ANV_I: '!!                      
+                           BH961_DATA.BLANDVÆR_015ANV_I!!'/'!!          
+                           BH861_DATA.BLANDVÆR_015ANV_I!!' ';           
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_015ANV = BH861_DATA.BLANDVÆR_015ANV THEN;   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_015ANV: '!!                        
+                           BH961_DATA.BLANDVÆR_015ANV!!'/'!!            
+                           BH861_DATA.BLANDVÆR_015ANV!!' ';             
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_02ANV_I = BH861_DATA.BLANDVÆR_02ANV_I THEN; 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_02ANV_I: '!!                       
+                           BH961_DATA.BLANDVÆR_02ANV_I!!'/'!!           
+                           BH861_DATA.BLANDVÆR_02ANV_I!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BLANDVÆR_02ANV = BH861_DATA.BLANDVÆR_02ANV THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BLANDVÆR_02ANV: '!!                         
+                           BH961_DATA.BLANDVÆR_02ANV!!'/'!!             
+                           BH861_DATA.BLANDVÆR_02ANV!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL_I = BH861_DATA.BBERGRL_I THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL_I: '!!                              
+                           BH961_DATA.BBERGRL_I!!'/'!!                  
+                           BH861_DATA.BBERGRL_I!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBERGRL = BH861_DATA.BBERGRL THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBERGRL: '!!                                
+                           BH961_DATA.BBERGRL!!'/'!!                    
+                           BH861_DATA.BBERGRL!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CBERGROP = BH861_DATA.CBERGROP THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CBERGROP: '!!                               
+                           BH961_DATA.CBERGROP!!'/'!!                   
+                           BH861_DATA.CBERGROP!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BFORSKAT_I = BH861_DATA.BFORSKAT_I THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BFORSKAT_I: '!!                             
+                           BH961_DATA.BFORSKAT_I!!'/'!!                 
+                           BH861_DATA.BFORSKAT_I!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BFORSKAT = BH861_DATA.BFORSKAT THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BFORSKAT: '!!                               
+                           BH961_DATA.BFORSKAT!!'/'!!                   
+                           BH861_DATA.BFORSKAT!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CFORSKAT = BH861_DATA.CFORSKAT THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CFORSKAT: '!!                               
+                           BH961_DATA.CFORSKAT!!'/'!!                   
+                           BH861_DATA.CFORSKAT!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CUDLMAN = BH861_DATA.CUDLMAN THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CUDLMAN: '!!                                
+                           BH961_DATA.CUDLMAN!!'/'!!                    
+                           BH861_DATA.CUDLMAN!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM_I = BH861_DATA.BBER2FAM_I THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM_I: '!!                             
+                           BH961_DATA.BBER2FAM_I!!'/'!!                 
+                           BH861_DATA.BBER2FAM_I!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BBER2FAM = BH861_DATA.BBER2FAM THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BBER2FAM: '!!                               
+                           BH961_DATA.BBER2FAM!!'/'!!                   
+                           BH861_DATA.BBER2FAM!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FEJLNR = BH861_DATA.FEJLNR THEN;                     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FEJLNR: '!!                                 
+                           BH961_DATA.FEJLNR!!'/'!!                     
+                           BH861_DATA.FEJLNR!!' ';                      
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_015ANV_I = BH861_DATA.BEJBOL1_015ANV_I THEN; 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_015ANV_I: '!!                       
+                           BH961_DATA.BEJBOL1_015ANV_I!!'/'!!           
+                           BH861_DATA.BEJBOL1_015ANV_I!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL1_015ANV = BH861_DATA.BEJBOL1_015ANV THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL1_015ANV: '!!                         
+                           BH961_DATA.BEJBOL1_015ANV!!'/'!!             
+                           BH861_DATA.BEJBOL1_015ANV!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_015ANV_I = BH861_DATA.BEJBOL2_015ANV_I THEN; 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_015ANV_I: '!!                       
+                           BH961_DATA.BEJBOL2_015ANV_I!!'/'!!           
+                           BH861_DATA.BEJBOL2_015ANV_I!!' ';            
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.BEJBOL2_015ANV = BH861_DATA.BEJBOL2_015ANV THEN;     
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'BEJBOL2_015ANV: '!!                         
+                           BH961_DATA.BEJBOL2_015ANV!!'/'!!             
+                           BH861_DATA.BEJBOL2_015ANV!!' ';              
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.EKOMNR_GL = BH861_DATA.EKOMNR_GL THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'EKOMNR_GL: '!!                              
+                           BH961_DATA.EKOMNR_GL!!'/'!!                  
+                           BH861_DATA.EKOMNR_GL!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.EEJDNR_GL = BH861_DATA.EEJDNR_GL THEN;               
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'EEJDNR_GL: '!!                              
+                           BH961_DATA.EEJDNR_GL!!'/'!!                  
+                           BH861_DATA.EEJDNR_GL!!' ';                   
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CSKPLOMFGL = BH861_DATA.CSKPLOMFGL THEN;             
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CSKPLOMFGL: '!!                             
+                           BH961_DATA.CSKPLOMFGL!!'/'!!                 
+                           BH861_DATA.CSKPLOMFGL!!' ';                  
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+ /* CHECK AF DFRAGLD STJERNET UD EFTER AFTALE MED ESBEN 04-01-2018    */
+ /*  IF BH961_DATA.DFRAGLD = BH861_DATA.DFRAGLD THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DFRAGLD: '!!                                
+                           BH961_DATA.DFRAGLD!!'/'!!                    
+                           BH861_DATA.DFRAGLD!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END; */                                                            
+     IF BH961_DATA.CNEDSL1 = BH861_DATA.CNEDSL1 THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CNEDSL1: '!!                                
+                           BH961_DATA.CNEDSL1!!'/'!!                    
+                           BH861_DATA.CNEDSL1!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.FLEJL = BH861_DATA.FLEJL THEN;                       
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'FLEJL: '!!                                  
+                           BH961_DATA.FLEJL!!'/'!!                      
+                           BH861_DATA.FLEJL!!' ';                       
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.DOVTGFOR = BH861_DATA.DOVTGFOR THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'DOVTGFOR: '!!                               
+                           BH961_DATA.DOVTGFOR!!'/'!!                   
+                           BH861_DATA.DOVTGFOR!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CDATAFRA = BH861_DATA.CDATAFRA THEN;                 
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CDATAFRA: '!!                               
+                           BH961_DATA.CDATAFRA!!'/'!!                   
+                           BH861_DATA.CDATAFRA!!' ';                    
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CUDLHEL = BH861_DATA.CUDLHEL THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CUDLHEL: '!!                                
+                           BH961_DATA.CUDLHEL!!'/'!!                    
+                           BH861_DATA.CUDLHEL!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+     IF BH961_DATA.CUDLDEL = BH861_DATA.CUDLDEL THEN;                   
+     ELSE DO;                                                           
+        FFLAG = JA;                                                     
+        DIF_OUT = DIF_OUT!!'CUDLDEL: '!!                                
+                           BH961_DATA.CUDLDEL!!'/'!!                    
+                           BH861_DATA.CUDLDEL!!' ';                     
+        ANTAL_FEJL = ANTAL_FEJL + 1;                                    
+     END;                                                               
+                                                                        
+   IF FFLAG THEN                                                        
+     CALL SKRIV_DIF();                                                  
+   ELSE                                                                 
+     ANTAL_SAM_OK = ANTAL_SAM_OK + 1;                                   
+                                                                        
+ END SAMMENLIGN_DATA;                                                   
+                                                                        
+ SKRIV_DIF: PROC;                                                       
+                                                                        
+   WRITE FILE(BH964O) FROM(DIF_OUT);                                    
+   FFLAG = NEJ;                                                         
+   ANTAL_FREC = ANTAL_FREC + 1;                                         
+                                                                        
+ END SKRIV_DIF;                                                         
+                                                                        
+ END BH96400;                                                           

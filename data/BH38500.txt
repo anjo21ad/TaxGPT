@@ -1,0 +1,526 @@
+  BH38500: PROCEDURE OPTIONS (MAIN);                                    
+ /**********************************************************************
+ * PROJEKT:     Opdatering af adresser i fiktivt EVS Miljø             *
+ * PROGRAMNAVN: BH38500.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    Opdatering af adresser i EVS test miljø.               *
+ *              Data kommer fra ESR efter opbygning af maskeret miljø  *
+ *                                                                     *
+ * INDDATA:     BH38501I - Evt. Fejl behæftede.                        *
+ * UDDATA:      BQ30000T/BQ31000T - EVS PERSONTABEL.                   *
+ *                                                                     *
+ * KONSTRUKTØR: Claus Marcussen, CMC, KMO              September 2015. *
+ * Forskud 2017 rettet brug af IPARM fil  QEB          August    2016  *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2015');            
+                                                                        
+ DCL     BH38500I FILE RECORD INPUT;     /* Parm                      */
+ DCL     BH38501I FILE RECORD INPUT;     /* Evt. fejlramte            */
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK                                            * 
+ *********************************************************************/ 
+                                                                        
+           %INCLUDE CX21000N;                                           
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL    */        
+ EXEC SQL INCLUDE BQ70000T;     /* */                                   
+ EXEC SQL INCLUDE BQ71000T;     /* */                                   
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL ZS30101        ENTRY;                                              
+ DCL ZS67000        ENTRY;                                              
+ DCL ZS61900        ENTRY;                        /* KST/SSI INFO */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL JA             BIT(1)           VALUE('1'B);                       
+ DCL NEJ            BIT(1)           VALUE('0'B);                       
+                                                                        
+ DCL BH38501I_EOF   BIT(1)           INIT(NEJ);                         
+ DCL PARM_EOF       BIT(1)           INIT(NEJ);                         
+                                                                        
+ DCL PULS_COUNT     FIXED DEC(11,0)  INIT(0);                           
+ DCL OPDAT_SW       BIT(1)           INIT('0'B);                        
+ DCL KONTROL_SW     BIT(1)           INIT('0'B);                        
+                                                                        
+ DCL DAGSDATO       BIN FIXED(31);                                      
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆS BIN FIXED (31) INIT(0);    /*                    */       
+ DCL   ANTUPD BIN FIXED (31) INIT(0);    /*                    */       
+ DCL   ANTINS BIN FIXED (31) INIT(0);    /*                    */       
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PARAMETER                                         */
+ /*********************************************************************/
+ DCL     IPARM    FILE  RECORD  INPUT;                                  
+ DCL     1 PARMI,                                                       
+          2 KØRSW    CHAR(8),                                           
+          2 FILLER   CHAR(72);                                          
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN1          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL1        CHAR (66);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR(1),                                       
+           2 CPRNR       PIC '9999999999',                              
+           2 FIL1        CHAR(5),                                       
+           2 KOMNR       PIC 'ZZZ9',                                    
+           2 FIL2        CHAR(5),                                       
+           2 EEJDNR      PIC 'ZZZZZZ9',                                 
+           2 FIL3        CHAR(5),                                       
+           2 ELBNR       PIC 'ZZ9',                                     
+           2 FIL4        CHAR(5),                                       
+           2 TEXT        CHAR(88);                                      
+                                                                        
+ %INCLUDE ZZ20301M;                          /* PRINT STYREKARAKTERER */
+ %INCLUDE ZS38000N;                                                     
+ %INCLUDE ZS38002N;                                                     
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+ DCL     (ADDR,DATETIME,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+    ON ENDFILE (IPARM)                                                  
+       PARM_EOF = JA;                                                   
+                                                                        
+    ON ENDFILE (BH38501I)                                               
+       BH38501I_EOF = JA;                                               
+                                                                        
+    ON ERROR                                                            
+       BEGIN;                                                           
+          ON ERROR SYSTEM;                                              
+          FLUSH FILE (*);                                               
+          PUT SKIP LIST ('PROGRAMFEJL');                                
+          CALL PLIDUMP  ('SBHO','MODUL BH38500');                       
+       END;                                                             
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+    CALL INITIALISERING();                                              
+    CALL ZZ20390('*OPEN','BH38001Y');       /* ÅBEN KONTROLLISTE */     
+    LINIE = ZZWS3 !! ' EVS Miljø Opdatering af adresser'                
+                  !! ' efter maskering          ' !! 'DATO: '           
+                  !!   DATETIME('YYYY-MM-DD');                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS3 !! ' PROGRAMID: BH38500 ';                            
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZS61900;                              /* KST/SSI INFO   */     
+                                                                        
+    OPEN FILE (BH38501I) TITLE ('BH38501I');                            
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+    CALL LÆS_ADRESSE_RECORD();                                          
+                                                                        
+    DO UNTIL (BH38501I_EOF);                                            
+        CALL BEHANDEL_ADRESSE_RECORD();                                 
+        CALL LÆS_ADRESSE_RECORD();                                      
+    END;                                                                
+                                                                        
+    CALL AFSLUT;                                                        
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ BEHANDEL_ADRESSE_RECORD: PROC();                                       
+                                                                        
+    IF LÆS_ADRESSE_DB2() THEN                                           
+    DO;                                                                 
+       IF FORSKEL_ADRESSE() THEN                                        
+       DO;                                                              
+          CALL DAN_HISTORIK();                                          
+          CALL OPDATER_ADRESSE();                                       
+       END;                                                             
+    END;                                                                
+    ELSE DO;                                                            
+       CALL INSERT_ADRESSE();                                           
+    END;                                                                
+                                                                        
+ END BEHANDEL_ADRESSE_RECORD;                                           
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ FORSKEL_ADRESSE: PROC()  RETURNS(BIT(1));                              
+                                                                        
+    IF DCLBQ70000T.BOPAEKMNR    =                                       
+                   CX21000_STRUKTUR.KOMMUNENUMMER            &          
+       DCLBQ70000T.VEJKOD       =                                       
+                   CX21000_STRUKTUR.VEJ_KODE                 &          
+       DCLBQ70000T.HUSNR        =                                       
+                   SUBSTR(CX21000_STRUKTUR.HUS_NUMMER,1,3)   &          
+       DCLBQ70000T.HUSBOGSTAADR =                                       
+                   SUBSTR(CX21000_STRUKTUR.HUS_NUMMER,4,1)   &          
+       DCLBQ70000T.ETAGENR      =                                       
+                   CX21000_STRUKTUR.ETAGE                    &          
+       DCLBQ70000T.SIDEDOERNR   =                                       
+                   CX21000_STRUKTUR.SIDE_DOERNR  THEN                   
+    DO;                                                                 
+       RETURN(NEJ);                                                     
+    END;                                                                
+    ELSE DO;                                                            
+       RETURN(JA);                                                      
+    END;                                                                
+                                                                        
+ END FORSKEL_ADRESSE;                                                   
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ UDFYLD_RECORD: PROC();                                                 
+                                                                        
+ DCL   VEJKOD_PIC    PIC '9999';                                        
+                                                                        
+    DCLBQ70000T.PNR          = CX21000_STRUKTUR.CPRNR;                  
+    DCLBQ70000T.ADRFRADTO    = CX21000_STRUKTUR.DOVTG;                  
+    DCLBQ70000T.BOPAEKMNR    = CX21000_STRUKTUR.KOMMUNENUMMER;          
+    VEJKOD_PIC               = CX21000_STRUKTUR.VEJ_KODE;               
+    DCLBQ70000T.VEJKOD       = VEJKOD_PIC;                              
+    DCLBQ70000T.HUSNR        = SUBSTR(CX21000_STRUKTUR.HUS_NUMMER,1,3); 
+    DCLBQ70000T.HUSBOGSTAADR = SUBSTR(CX21000_STRUKTUR.HUS_NUMMER,4,1); 
+    DCLBQ70000T.ETAGENR      = CX21000_STRUKTUR.ETAGE;                  
+    DCLBQ70000T.SIDEDOERNR   = CX21000_STRUKTUR.SIDE_DOERNR;            
+                                                                        
+ END UDFYLD_RECORD;                                                     
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ LÆS_ADRESSE_DB2: PROC()   RETURNS(BIT(1));                             
+                                                                        
+    EXEC SQL                                                            
+       SELECT PNR                                                       
+            , AEGTFPNR                                                  
+            , CIVISKOD                                                  
+            , CVISFRADTO                                                
+            , ADRFRADTO                                                 
+            , BOPAEKMNR                                                 
+            , VEJKOD                                                    
+            , HUSNR                                                     
+            , HUSBOGSTAADR                                              
+            , ETAGENR                                                   
+            , SIDEDOERNR                                                
+            , ANTAL_HIST                                                
+            , KMDTID                                                    
+       INTO :DCLBQ70000T.PNR                                            
+          , :DCLBQ70000T.AEGTFPNR                                       
+          , :DCLBQ70000T.CIVISKOD                                       
+          , :DCLBQ70000T.CVISFRADTO                                     
+          , :DCLBQ70000T.ADRFRADTO                                      
+          , :DCLBQ70000T.BOPAEKMNR                                      
+          , :DCLBQ70000T.VEJKOD                                         
+          , :DCLBQ70000T.HUSNR                                          
+          , :DCLBQ70000T.HUSBOGSTAADR                                   
+          , :DCLBQ70000T.ETAGENR                                        
+          , :DCLBQ70000T.SIDEDOERNR                                     
+          , :DCLBQ70000T.ANTAL_HIST                                     
+          , :DCLBQ70000T.KMDTID                                         
+       FROM BQ70000T                                                    
+       WHERE PNR = :CX21000_STRUKTUR.CPRNR;                             
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          RETURN(JA);                                                   
+       END;                                                             
+    WHEN (100)                                                          
+       DO;                                                              
+          RETURN(NEJ);                                                  
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('SQLFEJL', 'FEJL VED LÆS_ADRESSE_DB2');         
+       END;                                                             
+    END;                                                                
+                                                                        
+ END LÆS_ADRESSE_DB2;                                                   
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ DAN_HISTORIK: PROC();                                                  
+                                                                        
+    DCLBQ70000T.ANTAL_HIST = DCLBQ70000T.ANTAL_HIST + 1;                
+                                                                        
+    EXEC SQL                                                            
+       INSERT INTO BQ71000T                                             
+             ( PNR                                                      
+             , HISTNR                                                   
+             , ADRFRADTO                                                
+             , ADRTILDTO                                                
+             , BOPAEKMNR                                                
+             , VEJKOD                                                   
+             , HUSNR                                                    
+             , HUSBOGSTAADR                                             
+             , ETAGENR                                                  
+             , SIDEDOERNR )                                             
+        VALUES                                                          
+             ( :DCLBQ70000T.PNR                                         
+             , :DCLBQ70000T.ANTAL_HIST                                  
+             , :DCLBQ70000T.ADRFRADTO                                   
+             , :DAGSDATO                                                
+             , :DCLBQ70000T.BOPAEKMNR                                   
+             , :DCLBQ70000T.VEJKOD                                      
+             , :DCLBQ70000T.HUSNR                                       
+             , :DCLBQ70000T.HUSBOGSTAADR                                
+             , :DCLBQ70000T.ETAGENR                                     
+             , :DCLBQ70000T.SIDEDOERNR );                               
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0);                                                           
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('SQLFEJL', 'FEJL VED DAN_HISTORIK');            
+       END;                                                             
+    END;                                                                
+                                                                        
+ END DAN_HISTORIK;                                                      
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ OPDATER_ADRESSE: PROC();                                               
+                                                                        
+    CALL UDFYLD_RECORD();                                               
+                                                                        
+    EXEC SQL                                                            
+       UPDATE  BQ70000T                                                 
+       SET ADRFRADTO    = :DCLBQ70000T.ADRFRADTO                        
+         , BOPAEKMNR    = :DCLBQ70000T.BOPAEKMNR                        
+         , VEJKOD       = :DCLBQ70000T.VEJKOD                           
+         , HUSNR        = :DCLBQ70000T.HUSNR                            
+         , HUSBOGSTAADR = :DCLBQ70000T.HUSBOGSTAADR                     
+         , ETAGENR      = :DCLBQ70000T.ETAGENR                          
+         , SIDEDOERNR   = :DCLBQ70000T.SIDEDOERNR                       
+         , ANTAL_HIST   = :DCLBQ70000T.ANTAL_HIST                       
+         , KMDTID       = CURRENT TIMESTAMP                             
+       WHERE PNR = :DCLBQ70000T.PNR;                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          ANTUPD = ANTUPD + 1;                                          
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('SQLFEJL', 'FEJL VED OPDATER_ADRESSE');         
+       END;                                                             
+    END;                                                                
+                                                                        
+ END OPDATER_ADRESSE;                                                   
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ INSERT_ADRESSE: PROC();                                                
+                                                                        
+    CALL UDFYLD_RECORD();                                               
+                                                                        
+    EXEC SQL                                                            
+       INSERT INTO BQ70000T                                             
+                 ( PNR                                                  
+                 , AEGTFPNR                                             
+                 , CIVISKOD                                             
+                 , CVISFRADTO                                           
+                 , ADRFRADTO                                            
+                 , BOPAEKMNR                                            
+                 , VEJKOD                                               
+                 , HUSNR                                                
+                 , HUSBOGSTAADR                                         
+                 , ETAGENR                                              
+                 , SIDEDOERNR                                           
+                 , ANTAL_HIST                                           
+                 , KMDTID )                                             
+       VALUES ( :DCLBQ70000T.PNR                                        
+              , 0                                                       
+              , 'U'                                                     
+              , :DAGSDATO                                               
+              , :DCLBQ70000T.ADRFRADTO                                  
+              , :DCLBQ70000T.BOPAEKMNR                                  
+              , :DCLBQ70000T.VEJKOD                                     
+              , :DCLBQ70000T.HUSNR                                      
+              , :DCLBQ70000T.HUSBOGSTAADR                               
+              , :DCLBQ70000T.ETAGENR                                    
+              , :DCLBQ70000T.SIDEDOERNR                                 
+              , 0                                                       
+              , CURRENT TIMESTAMP );                                    
+                                                                        
+    SELECT (SQLCA.SQLCODE);                                             
+    WHEN (0)                                                            
+       DO;                                                              
+          ANTINS = ANTINS + 1;                                          
+       END;                                                             
+    OTHERWISE                                                           
+       DO;                                                              
+          CALL SQL_FEJL('SQLFEJL', 'FEJL VED INSERT_ADRESSE');          
+       END;                                                             
+    END;                                                                
+                                                                        
+ END INSERT_ADRESSE;                                                    
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*********************************************************************/
+ LÆS_ADRESSE_RECORD: PROC();                                            
+                                                                        
+    READ FILE (BH38501I) INTO (CX21000_STRUKTUR);                       
+                                                                        
+    IF ^BH38501I_EOF THEN                                               
+    DO;                                                                 
+       ANTLÆS = ANTLÆS + 1;                                             
+    END;                                                                
+                                                                        
+ END LÆS_ADRESSE_RECORD;                                                
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV KONTROL                                                */
+ /*********************************************************************/
+ SKRIV_KONTROL: PROC(DCPRN, EKOMNR, EEJDNR, ELBNR, TEXT_MEDD);          
+                                                                        
+ DCL   DCPRN                 DECIMAL(11,0);                             
+ DCL   EKOMNR                BIN FIXED(15);                             
+ DCL   EEJDNR                BIN FIXED(31);                             
+ DCL   ELBNR                 BIN FIXED(15);                             
+ DCL   TEXT_MEDD             CHAR(88);                                  
+                                                                        
+    LINIE       = ZZWS2;                                                
+    LIN2.CPRNR  = DCPRN;                                                
+    LIN2.KOMNR  = EKOMNR;                                               
+    LIN2.EEJDNR = EEJDNR;                                               
+    LIN2.ELBNR  = ELBNR;                                                
+    LIN2.TEXT   = TEXT_MEDD;                                            
+    CALL ZZ20300(LINIE,'01');                                           
+                                                                        
+ END SKRIV_KONTROL;                                                     
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ INITIALISERING: PROC;                                                  
+                                                                        
+    OPEN FILE(IPARM) TITLE('BH38500I');                                 
+    READ FILE(IPARM) INTO(PARMI);                                       
+                                                                        
+    PUT SKIP LIST('PARMI.KØRSW =',PARMI.KØRSW);                         
+                                                                        
+    IF ^PARM_EOF THEN DO;                                               
+       IF PARMI.KØRSW = 'ROLLBACK' THEN                                 
+          OPDAT_SW = NEJ;                                               
+       ELSE                                                             
+          OPDAT_SW = JA;                                                
+    END;                                                                
+    ELSE DO;                                                            
+       OPDAT_SW = JA;                                                   
+    END;                                                                
+                                                                        
+    IF OPDAT_SW THEN                                                    
+       PUT SKIP LIST('Der sker opdatering');                            
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering');                               
+                                                                        
+    CLOSE FILE(IPARM);                                                  
+                                                                        
+    ZS380PARM.FUNKTION = 'DAGSDATO';                                    
+    ZS380PARM.RETURKODE = 0;                                            
+    ZS380PARM.VALIDERING = 'N';                                         
+    ZS380PARM.PARM = '';                                                
+    CALL ZS38000(FUNKTION,VALIDERING,PARM,RETURKODE);                   
+                                                                        
+    DAGSDATO = DATO1;                                                   
+                                                                        
+ END INITIALISERING;                                                    
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC(FEJLTEKST, ABENDMEDD);                                  
+                                                                        
+ DCL FEJLTEKST      CHAR (20);                                          
+ DCL ABENDMEDD      CHAR (56);                                          
+                                                                        
+    PUT SKIP LIST('SQL_FEJL.....');                                     
+    PUT SKIP LIST('SQLCA',SQLCA);                                       
+    CALL ZS67000(SQLCA);                                                
+    ABENDMEDD =  FEJLTEKST;                                             
+    CALL ZS30101 (5, ABENDMEDD, 2);                                     
+                                                                        
+ END SQL_FEJL;                                                          
+                                                                        
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    IF OPDAT_SW = NEJ THEN                                              
+    DO;                                                                 
+       PUT SKIP LIST ('ROLLBACK !!');                                   
+       EXEC SQL ROLLBACK;                                               
+    END;                                                                
+                                                                        
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL LÆSTE ADRESSE RECORD.................';         
+    LIN1.ANT   = ANTLÆS;                                                
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL INSERT ADRESSE RECORD................';         
+    LIN1.ANT   = ANTINS;                                                
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL UPDATE ADRESSE RECORD................';         
+    LIN1.ANT   = ANTUPD;                                                
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */     
+                                                                        
+    CLOSE FILE (BH38501I);                                              
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+                                                                        
+ END BH38500;                                                           

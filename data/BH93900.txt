@@ -1,0 +1,619 @@
+ BH93900: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     SLUT 2018                                              *
+ * PROGRAMNAVN: BH93900.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    FINDER DEM SOM HAR OVERLAP I PERIODE                   *
+ *              PGA AF DOVTG ER INDBERETTET FORKET I VURD/ESR          *
+ *              DER DANNES EN FIL PÅ DE AKTUELLE EJERSKABER PÅ         *
+ *              BQ30000T SÅ SKAT KAN FINDES DISSE                      *
+ *                                                                     *
+ * KONSTRUKTØR: ESBEN BRODERSEN                           MARTS  2019  *
+ ***********************************************************************
+ * ÆNDRINGSLOG: BH93900L ER NU ET UDSØGNINGS PROGRAM                   *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2018');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE BQ30000T;   /* EVS SLUT EJERTABEL           */
+         EXEC SQL INCLUDE BQ31000T;   /* EVS SLUT EJERFELTTABEL       */
+                                                                        
+         EXEC SQL INCLUDE SQLCA;      /* SQL KOMMUNIKATIONSAREAL      */
+                                                                        
+ DCL     1 EJER_TABEL,                /* EVS EJERSKABSTABELEN         */
+         %INCLUDE BQ30000N;;                                            
+                                                                        
+                                                                        
+ DCL     1 EJER_FELT_TABEL,           /* EVS EJERFELTTABEL            */
+         %INCLUDE BQ31000N;;                                            
+                                                                        
+                                                                        
+ /* TIL EJER OPLYSNINGER */                                             
+ DCL     1 PERSON,                    /* EVS EJERSKABSTABELEN       */  
+         %INCLUDE BQ17200N;;                                            
+                                                                        
+ DCL     1 INDK_PERS,                 /* INDIKATOR EJERSKAB OPLYSN. */  
+         %INCLUDE BQ17006N;;                                            
+                                                                        
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ABEND_STR               CHAR (56) BASED(ADDR(ABEND_STRUK));    
+ DCL     1 ABEND_STRUK,                                                 
+          2 MODULNAVN            CHAR (07) INIT ('BH93900'),            
+          2 HFILL1               CHAR (01) INIT (' '),                  
+          2 MEDDELNR             CHAR (02) INIT ('**'),                 
+          2 HFILL2               CHAR (01) INIT (' '),                  
+          2 MEDDELTXT            CHAR (45) INIT ('');                   
+                                                                        
+ DCL     FEJLTEKST       CHAR (20)        INIT(' ');                    
+ DCL     ABENDMEDD       CHAR (56)        INIT(' ');                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     HJ_SLUTAAR      BIN FIXED(15);                                 
+ DCL     HJ_SLUTAAR_PIC  PIC '9999';                                    
+                                                                        
+ DCL     SQLKODE         PIC '9999';                                    
+ DCL     HJPIC10         PIC 'ZZZZZZZZZ9';                              
+ DCL     OVERSKRIFT      BIT(1)         INIT('1'B);                     
+                                                                        
+ DCL     DETTEÅR_CH4     CHAR(04);                                      
+ DCL     HJ_INDKOMSTAAR  CHAR(04);                                      
+                                                                        
+ DCL     HJ_SIDSTEÅR     PIC '9999';                                    
+                                                                        
+ DCL     ANT_OVERLAP_PERIODE BIN FIXED(31) INIT (0);                    
+ DCL     ANT_DOVTG           BIN FIXED(31) INIT (0);                    
+ DCL     ANT_DAFSTAA         BIN FIXED(31) INIT (0);                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH9390O FILE OUTPUT RECORD;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+ DCL     UDDATA_EJER         CHAR(121);                                 
+ DCL     1 EJER_STRUK BASED     (ADDR(UDDATA_EJER)),                    
+             %INCLUDE BH93900N;                                         
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (3),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (63);                                     
+                                                                        
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (111);                                    
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+                                                                        
+ DCL   GEM_DCPRN        DEC FIXED (11,0) INIT(0);                       
+ DCL   GEM_EKOMNR       BIN FIXED (15)   INIT(0);                       
+ DCL   GEM_EEJDNR       BIN FIXED (31)   INIT(0);                       
+ DCL   GEM_EENHEDLBNR   BIN FIXED (15)   INIT(0);                       
+ DCL   GEM_ELBNR        BIN FIXED (15)   INIT(0);                       
+ DCL   GEM_EGENNR       BIN FIXED (15)   INIT(0);                       
+ DCL   GEM_DOVTG        CHAR(10)         INIT('');                      
+ DCL   GEM_DAFSTAA      CHAR(10)         INIT('');                      
+                                                                        
+ DCL   EJER_SQL_CODE    BIN FIXED (15)   INIT(0);                       
+                                                                        
+ /*********************************************************************/
+ /* PARM KORT                                                         */
+ /*********************************************************************/
+  DCL     EOF_PARM         BIT (1) INIT ('0'B);                         
+  DCL     PARMKORT         FILE RECORD INPUT;                           
+  DCL     PARM_AR          CHAR  (80)  INIT (' ');                      
+  DCL     PARM_MEDTAGET    BIT (1)       INIT ('0'B);                   
+  DCL     PARM_FEJL        BIT (1)       INIT ('0'B);                   
+                                                                        
+  DCL     1 PARMLINIE  BASED (ADDR (PARM_AR) ),                         
+            2 PARMSTART    CHAR      (02),                              
+            2 PROGNAVN     CHAR      (07),                              
+            2 INDKOMSTAAR  CHAR      (04),                              
+            2 REST         CHAR      (67);                              
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH93900');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+         OPEN FILE (PARMKORT)   TITLE ('PARMKORT');                     
+         OPEN FILE (BH9390O)    TITLE ('BH93900O');                     
+                                                                        
+         CALL OPSTART_INIT;  /*OPSÆT INDKOMSTÅR*/                       
+                                                                        
+                                                                        
+         CALL ZZ20390('*OPEN','BH93901Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH93900 AFVIKLET MED ' !!        
+                          'INDKOMSTÅR ' !! HJ_SLUTAAR_PIC;              
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! '';                                           
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+                                                                        
+         CALL OPEN_EJER_CUR;                                            
+         CALL FETCH_EJER_CUR;                                           
+         EJER_SQL_CODE = SQLCA.SQLCODE;                                 
+         SELECT (EJER_SQL_CODE);                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               DO WHILE (EJER_SQL_CODE = 0);                            
+                  PERSON = '';                                          
+                  CALL OPEN_EJER_FELT_CUR;                              
+                  DO WHILE (SQLCA.SQLCODE = 0);                         
+                    CALL FETCH_EJER_FELT_CUR;                           
+                  END;                                                  
+                  CALL CLOSE_EJER_FELT_CUR;                             
+                  CALL UNDERSØG_PERIODE;                                
+                  CALL FETCH_EJER_CUR;                                  
+                  EJER_SQL_CODE = SQLCA.SQLCODE;                        
+               END;                                                     
+             END;                                                       
+           WHEN (100);                                                  
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH EJER_CURSOR ';                       
+               CALL SQL_FEJL;                                           
+             END;                                                       
+         END; /* SELECT*/                                               
+         CALL CLOSE_EJER_CUR;                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF BQ30000T                            RUTINE */
+ /*********************************************************************/
+ OPEN_EJER_CUR: PROC;                                                   
+                                                                        
+         EXEC SQL OPEN EJER_CURSOR;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN EJER_CURSOR';                           
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_EJER_CUR;                                                     
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF PERSONTABEL BQ30000T               RUTINE */
+ /*********************************************************************/
+ CLOSE_EJER_CUR: PROC;                                                  
+                                                                        
+         EXEC SQL CLOSE EJER_CURSOR;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE EJER_CURSOR';                          
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_EJER_CUR;                                                    
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF BQ31000T                            RUTINE */
+ /*********************************************************************/
+ OPEN_EJER_FELT_CUR: PROC;                                              
+                                                                        
+         EXEC SQL OPEN ESK_FEL_CUR;                                     
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN EJER_FELT_CURSOR';                      
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_EJER_FELT_CUR;                                                
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF TABEL BQ31000T                     RUTINE */
+ /*********************************************************************/
+ CLOSE_EJER_FELT_CUR: PROC;                                             
+                                                                        
+         EXEC SQL CLOSE ESK_FEL_CUR;                                    
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE EJER_FELT_CURSOR';                     
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_EJER_FELT_CUR;                                               
+ /*********************************************************************/
+ SKRIV_EJER: PROC;                                                      
+                                                                        
+         EJER_STRUK.DINDKAAR    = EJER_TABEL.DINDKAAR;                  
+         EJER_STRUK.DCPRN       = EJER_TABEL.DCPRN;                     
+         EJER_STRUK.EKOMNR      = EJER_TABEL.EKOMNR;                    
+         EJER_STRUK.EEJDNR      = EJER_TABEL.EEJDNR;                    
+         EJER_STRUK.EENHEDLBNR  = EJER_TABEL.EENHEDLBNR;                
+         EJER_STRUK.ELBNR       = EJER_TABEL.ELBNR;                     
+         EJER_STRUK.EGENNR      = EJER_TABEL.EGENNR;                    
+         EJER_STRUK.DOVTG       = PERSON.DOVTG;                         
+         EJER_STRUK.DAFSTAA     = PERSON.DAFSTAA;                       
+         EJER_STRUK.GPCTEJER    = PERSON.GPCTEJER;                      
+         EJER_STRUK.CSCREGISTMP = EJER_TABEL.CSCREGISTMP;               
+         EJER_STRUK.CAJOUR      = EJER_TABEL.CAJOUR;                    
+         EJER_STRUK.CSUPPL      = EJER_TABEL.CSUPPL;                    
+         EJER_STRUK.DBRGN_MODT  = EJER_TABEL.DBRGN_MODT;                
+         EJER_STRUK.FEJLNR      = EJER_TABEL.FEJLNR;                    
+                                                                        
+         WRITE FILE (BH9390O) FROM (UDDATA_EJER);                       
+         ANT_OVERLAP_PERIODE = ANT_OVERLAP_PERIODE + 1;                 
+                                                                        
+ END SKRIV_EJER;                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         SQLKODE = SQLCA.SQLCODE;                                       
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = 'BH93900 ** 250 ' !! FEJLTEKST !! SQLKODE;         
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CLOSE FILE (BH9390O);                                          
+                                                                        
+         LINIE = ZZWS3 !! ' ';                                          
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+                                                                        
+         HJPIC10 = ANT_OVERLAP_PERIODE;                                 
+         LINIE = ZZWS3 !! ' ANTAL SKREVET EJER MED PERIODE ' !!         
+                          'LØBENUMMER UORDEN PÅ '            !!         
+                          'BQ30000T ' !! HJPIC10;                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         HJPIC10 = ANT_DOVTG;                                           
+         LINIE = ZZWS3 !! ' HERAF UORDEN I DOVTG ' !! HJPIC10;          
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         HJPIC10 = ANT_DAFSTAA;                                         
+         LINIE = ZZWS3 !! ' HERAF UORDEN I DAFSTAA ' !! HJPIC10;        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ DECLARE_EJER_CUR: PROC;                                                
+                                                                        
+         EXEC SQL DECLARE EJER_CURSOR CURSOR FOR                        
+                                                                        
+         SELECT T1.DINDKAAR,                                            
+                T1.DCPRN,                                               
+                T1.EKOMNR,                                              
+                T1.EEJDNR,                                              
+                T1.EENHEDLBNR,                                          
+                T1.ELBNR,                                               
+                T1.EGENNR,                                              
+                T1.DFRAGLD,                                             
+                T1.DTILGLD,                                             
+                T1.DBRGN_MODT,                                          
+                T1.CSCREGISTMP,                                         
+                T1.FEJLNR,                                              
+                T1.CAJOUR,                                              
+                T1.CSUPPL                                               
+         FROM BQ30000T T1                                               
+         WHERE T1.DINDKAAR   = :HJ_SLUTAAR                              
+           AND T1.DTILGLD    = '9999-12-31-23.59.59.999999'             
+           AND T1.EGENNR     = (SELECT MAX(T2.EGENNR)                   
+                                FROM BQ30000T T2                        
+                                WHERE T2.DINDKAAR      = T1.DINDKAAR    
+                                  AND T2.DCPRN         = T1.DCPRN       
+                                  AND T2.EKOMNR        = T1.EKOMNR      
+                                  AND T2.EEJDNR        = T1.EEJDNR      
+                                  AND T2.EENHEDLBNR    = T1.EENHEDLBNR  
+                                  AND T2.ELBNR         = T1.ELBNR)      
+         ORDER BY T1.DCPRN,                                             
+                  T1.EKOMNR,                                            
+                  T1.EEJDNR,                                            
+                  T1.EENHEDLBNR,                                        
+                  T1.ELBNR,                                             
+                  T1.EGENNR;                                            
+                                                                        
+ END DECLARE_EJER_CUR;                                                  
+ /*********************************************************************/
+ FETCH_EJER_CUR: PROC;                                                  
+                                                                        
+     EJER_TABEL = '';                                                   
+     EJER_STRUK = '';                                                   
+                                                                        
+         EXEC SQL FETCH EJER_CURSOR                                     
+                                                                        
+         INTO :EJER_TABEL.DINDKAAR,                                     
+              :EJER_TABEL.DCPRN,                                        
+              :EJER_TABEL.EKOMNR,                                       
+              :EJER_TABEL.EEJDNR,                                       
+              :EJER_TABEL.EENHEDLBNR,                                   
+              :EJER_TABEL.ELBNR,                                        
+              :EJER_TABEL.EGENNR,                                       
+              :EJER_TABEL.DFRAGLD,                                      
+              :EJER_TABEL.DTILGLD,                                      
+              :EJER_TABEL.DBRGN_MODT,                                   
+              :EJER_TABEL.CSCREGISTMP,                                  
+              :EJER_TABEL.FEJLNR,                                       
+              :EJER_TABEL.CAJOUR,                                       
+              :EJER_TABEL.CSUPPL                                        
+              ;                                                         
+                                                                        
+         SELECT(SQLCA.SQLCODE);                                         
+            WHEN(0)                                                     
+              DO;                                                       
+        /*      EJER_STRUK.DINDKAAR      = EJER_TABEL.DINDKAAR;         
+                EJER_STRUK.DCPRN         = EJER_TABEL.DCPRN;            
+                EJER_STRUK.EKOMNR        = EJER_TABEL.EKOMNR;           
+                EJER_STRUK.EEJDNR        = EJER_TABEL.EEJDNR;           
+                EJER_STRUK.EENHEDLBNR    = EJER_TABEL.EENHEDLBNR;       
+                EJER_STRUK.ELBNR         = EJER_TABEL.ELBNR;            
+                EJER_STRUK.EGENNR        = EJER_TABEL.EGENNR;           
+                EJER_STRUK.DFRAGLD       = EJER_TABEL.DFRAGLD;          
+                EJER_STRUK.DTILGLD       = EJER_TABEL.DTILGLD;          
+                EJER_STRUK.FEJLNR        = EJER_TABEL.FEJLNR;  */       
+              END;                                                      
+            WHEN(100)                                                   
+              DO;                                                       
+              END;                                                      
+            OTHERWISE                                                   
+              DO;                                                       
+                FEJLTEKST  = 'FETCH EJER_CURSOR ';                      
+                CALL SQL_FEJL;                                          
+              END;                                                      
+         END; /*SELECT*/                                                
+                                                                        
+ END FETCH_EJER_CUR;                                                    
+ /*********************************************************************/
+ DECLARE_EJER_FELT_CUR :PROC;                                           
+                                                                        
+    EXEC SQL                                                            
+       DECLARE ESK_FEL_CUR CURSOR FOR                                   
+                                                                        
+       SELECT T5.INDHOLD_C,                                             
+              T5.INDHOLD_D,                                             
+              T5.FELTKODE                                               
+                                                                        
+       FROM   BQ31000T T5                                               
+                                                                        
+       WHERE  T5.DINDKAAR   = :EJER_TABEL.DINDKAAR                      
+       AND    T5.EKOMNR     = :EJER_TABEL.EKOMNR                        
+       AND    T5.EEJDNR     = :EJER_TABEL.EEJDNR                        
+       AND    T5.EENHEDLBNR = :EJER_TABEL.EENHEDLBNR                    
+       AND    T5.DCPRN      = :EJER_TABEL.DCPRN                         
+       AND    T5.ELBNR      = :EJER_TABEL.ELBNR                         
+       AND    T5.EGENNR     = :EJER_TABEL.EGENNR                        
+       AND    T5.FELTKODE  IN (96,102,117)                              
+                                                                        
+       ORDER BY T5.FELTKODE                                             
+       FOR READ ONLY;                                                   
+                                                                        
+ END DECLARE_EJER_FELT_CUR;                                             
+ /*********************************************************************/
+ FETCH_EJER_FELT_CUR: PROC;                                             
+                                                                        
+    EXEC SQL                                                            
+                                                                        
+      FETCH ESK_FEL_CUR                                                 
+                                                                        
+      INTO :EJER_FELT_TABEL.INDHOLD_C,                                  
+           :EJER_FELT_TABEL.INDHOLD_D,                                  
+           :EJER_FELT_TABEL.FELTKODE;                                   
+                                                                        
+       IF SQLCA.SQLCODE = 0                                             
+       THEN                                                             
+         DO;                                                            
+           CALL FLYT_EJER_FELT;                                         
+         END;                                                           
+                                                                        
+ END FETCH_EJER_FELT_CUR;                                               
+ /*********************************************************************/
+ /* DEL AF UDPAKNING TAGET FRA BH30010M                               */
+ /*********************************************************************/
+ FLYT_EJER_FELT: PROC;                                                  
+                                                                        
+     SELECT (EJER_FELT_TABEL.FELTKODE);                                 
+       WHEN (96)                                                        
+         DO;                                                            
+          PERSON.DAFSTAA   = EJER_FELT_TABEL.INDHOLD_C;                 
+         END;                                                           
+       WHEN (102)                                                       
+         DO;                                                            
+           PERSON.DOVTG    = EJER_FELT_TABEL.INDHOLD_C;                 
+         END;                                                           
+       WHEN (117)                                                       
+         DO;                                                            
+           PERSON.GPCTEJER = EJER_FELT_TABEL.INDHOLD_D;                 
+           /*INDK_PERS.GPCTEJER_I             = 0;*/                    
+         END;                                                           
+       OTHERWISE;                                                       
+     END; /*SELECT */                                                   
+                                                                        
+ END FLYT_EJER_FELT;                                                    
+ /*********************************************************************/
+ UNDERSØG_PERIODE: PROC;                                                
+                                                                        
+   IF GEM_DCPRN       = EJER_TABEL.DCPRN    &                           
+      GEM_EKOMNR      = EJER_TABEL.EKOMNR   &                           
+      GEM_EEJDNR      = EJER_TABEL.EEJDNR   &                           
+      GEM_EENHEDLBNR  = EJER_TABEL.EENHEDLBNR                           
+   THEN                                                                 
+     DO;                                                                
+       IF GEM_ELBNR < EJER_TABEL.ELBNR &                                
+          GEM_DOVTG >= PERSON.DOVTG    &                                
+          GEM_DOVTG ^= GEM_DAFSTAA                                      
+       THEN                                                             
+         DO;                                                            
+           EJER_STRUK.TEKST_PERIODE = 'DOVTG LIG/MINDRE TIDL';          
+           PUT SKIP LIST('GEM_DCPRN  ',GEM_DCPRN);                      
+           PUT SKIP LIST('GEM_EKOMNR ',GEM_EKOMNR);                     
+           PUT SKIP LIST('GEM_EEJDNR ',GEM_EEJDNR);                     
+           PUT SKIP LIST('GEM_EENHEDLBNR ',GEM_EENHEDLBNR);             
+           PUT SKIP LIST('GEM_DOVTG ',GEM_DOVTG);                       
+           PUT SKIP LIST('PERSON.DOVTG ',PERSON.DOVTG);                 
+           ANT_DOVTG = ANT_DOVTG + 1;                                   
+           CALL SKRIV_EJER;                                             
+         END;                                                           
+       IF GEM_ELBNR < EJER_TABEL.ELBNR  &                               
+          GEM_DAFSTAA >= PERSON.DAFSTAA &                               
+          GEM_DOVTG ^= GEM_DAFSTAA      &                               
+          GEM_DAFSTAA > '0' &                                           
+          PERSON.DAFSTAA > '0'                                          
+       THEN                                                             
+         DO;                                                            
+           EJER_STRUK.TEKST_PERIODE = 'DAFSTAA LIG/MINDRE TIDL';        
+           PUT SKIP LIST('GEM_DCPRN      ',GEM_DCPRN);                  
+           PUT SKIP LIST('GEM_EKOMNR     ',GEM_EKOMNR);                 
+           PUT SKIP LIST('GEM_EEJDNR     ',GEM_EEJDNR);                 
+           PUT SKIP LIST('GEM_EENHEDLBNR ',GEM_EENHEDLBNR);             
+           PUT SKIP LIST('GEM_DAFSTAA    ',GEM_DAFSTAA);                
+           PUT SKIP LIST('PERSON.DAFSTAA ',PERSON.DAFSTAA);             
+           ANT_DAFSTAA = ANT_DAFSTAA + 1;                               
+           CALL SKRIV_EJER;                                             
+         END;                                                           
+     END;                                                               
+   ELSE /* Nyt ejerforhold gemmes kun */                                
+     DO;                                                                
+       GEM_DCPRN   = EJER_TABEL.DCPRN;                                  
+       GEM_EKOMNR  = EJER_TABEL.EKOMNR;                                 
+       GEM_EEJDNR  = EJER_TABEL.EEJDNR;                                 
+       GEM_EENHEDLBNR = EJER_TABEL.EENHEDLBNR;                          
+       GEM_ELBNR   = EJER_TABEL.ELBNR;                                  
+       GEM_EGENNR  = EJER_TABEL.EGENNR;                                 
+       GEM_DOVTG   = PERSON.DOVTG;                                      
+       GEM_DAFSTAA = PERSON.DAFSTAA;                                    
+     END;                                                               
+                                                                        
+                                                                        
+ END UNDERSØG_PERIODE;                                                  
+ /*********************************************************************/
+ OPSTART_INIT: PROC;                                                    
+                                                                        
+   /* PARMKORT ER EVT. MEDTAGET I KØRSLEN */                            
+   ON  ENDFILE (PARMKORT)                                               
+   BEGIN;                                                               
+      EOF_PARM  = '1'B;                                                 
+      GO TO INIT_SLUT;                                                  
+   END;                                                                 
+                                                                        
+   READ FILE (PARMKORT) INTO  (PARM_AR);                                
+                                                                        
+   IF PARMLINIE.PROGNAVN ^= 'BH93900'                                   
+    THEN                                                                
+       PARM_FEJL = '1'B;                                                
+                                                                        
+    IF VERIFY (PARMLINIE.INDKOMSTAAR ,'0123456789')  >  0               
+    THEN                                                                
+      DO;                                                               
+        PARM_FEJL = '1'B;                                               
+      END;                                                              
+                                                                        
+    IF PARMLINIE.INDKOMSTAAR  <  '2015' !                               
+       PARMLINIE.INDKOMSTAAR  >  '2099'                                 
+    THEN                                                                
+      DO;                                                               
+        PARM_FEJL = '1'B;                                               
+      END;                                                              
+                                                                        
+                                                                        
+    IF PARM_FEJL                                                        
+    THEN                                                                
+       DO;                                                              
+         PUT SKIP LIST ('FEJL I PARMKORT: ',PARM_AR);                   
+         MEDDELTXT = '101 FEJL I PARMKORT';                             
+         CALL ZS30101(5,ABEND_STR,2);                                   
+       END;                                                             
+    ELSE                                                                
+       DO;                                                              
+         PARM_MEDTAGET  = '1'B;                                         
+         PUT SKIP LIST('PARMKORT MEDTAGET: ' !!                         
+                PARMLINIE.PROGNAVN  !! PARMLINIE.INDKOMSTAAR);          
+       END;                                                             
+                                                                        
+   INIT_SLUT:                                                           
+                                                                        
+   IF PARMLINIE.INDKOMSTAAR = ''                                        
+   THEN                                                                 
+     DO;                                                                
+       ZS380PARM = '';                                                  
+       CALL ZS38000('DAGSDATO','N',PARM,RETURKODE);                     
+       DETTEÅR_CH4   = SUBSTR(ZS380PARM3.DATO1,1,4);                    
+       HJ_SLUTAAR_PIC = DETTEÅR_CH4;                                    
+       HJ_SLUTAAR_PIC = HJ_SLUTAAR_PIC - 1; /*SIDSTE ÅR ER DEFAULT*/    
+       PUT SKIP LIST('DEFAULT HJ_INDKOMSTAAR = ',HJ_SLUTAAR_PIC);       
+     END;                                                               
+   ELSE                                                                 
+     DO;                                                                
+       HJ_SLUTAAR_PIC = PARMLINIE.INDKOMSTAAR;                          
+       PUT SKIP LIST('PARM HJ_INDKOMSTAAR = ',HJ_SLUTAAR_PIC);          
+     END;                                                               
+                                                                        
+   HJ_SLUTAAR  = HJ_SLUTAAR_PIC;                                        
+                                                                        
+ END OPSTART_INIT;                                                      
+ /*********************************************************************/
+ %INCLUDE ZS38000N;                                                     
+ %INCLUDE ZS38001N;                                                     
+ END BH93900;                                                           

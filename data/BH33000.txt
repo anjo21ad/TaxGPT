@@ -1,0 +1,539 @@
+ BH33000: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS FORSKUD 2002/EVS SLUT 2001                         *
+ * PROGRAMNAVN: BH33000.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    PROGRAMMET UDTRÆKKER ALLE AKTIVE OG VALIDE EJENDOMME   *
+ *              FRA EVS SLUT 2000.                                     *
+ * PGMFORLØB:   1. ÅBEN EVS UDTRÆKSFIL.                                *
+ *              2. DECLARE PERSONEJENDOMSOPL.                          *
+ *              3. OPEN PERSONEJENDOMSOPL.                             *
+ *              4. LÆS/FETCH RÆKKE PÅ PERSONTABEL.                     *
+ *              5. BEHANDL DATA TIL FØRSTE DEL AF RECORDSTRUKTUR.      *
+ *              6. BEHANDL DATA TIL SIDSTE DEL AF RECORDSTRUKTUR.      *
+ *              7. CHECK/SKRIV RÆKKE PÅ EVS FIL.                       *
+ *              8. GENTAG PUNKT 4 TIL 7 INTIL IKKE FLERE RÆKKER        *
+ *              9. LUK PERSONEJENDOMSOPL.                              *
+ *             10. LUK EVS UDTRÆKSFIL.                                 *
+ *             11. SKRIV KONTROLLISTE.                                 *
+ * INDDATA:     BQ00100T - KOPI AF EVS EJENDOMSTABEL.                  *
+ *              BQ00200T - KOPI AF EVS PERSONTABEL.                    *
+ * UDDATA:      BH33000O - BH33000N UDTRÆK FRA EVS SLUT 2000.          *
+ *              BH33001Y - KONTROLLISTE.                               *
+ * KONSTRUKTØR: THOMAS FLINDT         THF, PUS/T&S BRØNDBY 16.07.2001. *
+ * ÆNDRINGSLOG: PROGRAMMET ER TILRETTET TIL EVS 2001                   *
+ *              ESBEN BRODERSEN       ESB,     T&S BRØNDBY 16.11.2001. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2001');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+         EXEC SQL INCLUDE BQ00600T;           /* EVS EJENDOMSTABELLEN */
+         EXEC SQL INCLUDE BQ00700T;           /* EVS PERSONTABELLEN   */
+         EXEC SQL INCLUDE SQLCA;           /* SQL KOMMUNIKATIONSAREAL */
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL     ZS30101        ENTRY;                                          
+ DCL     ZS67000        ENTRY;                                          
+ DCL     ZS61900        ENTRY;                        /* KST/SSI INFO */
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     HJ_DCPRN       CHAR (10);                                      
+ DCL     HJ_DCPRN_PIC   PIC  '(10)9' BASED(ADDR(HJ_DCPRN));             
+ DCL     HJ_EKOMNR      CHAR (03);                                      
+ DCL     HJ_EEJDNR      CHAR (06);                                      
+ DCL     EKOMEEJD_NR    CHAR (09);                                      
+ DCL     OK             CHAR (01)        INIT('J');                     
+ DCL     FEJLTEKST      CHAR (20)        INIT(' ');                     
+ DCL     ABENDMEDD      CHAR (56)        INIT(' ');                     
+                                                                        
+ DCL     DT             CHAR (6);                                       
+ DCL     1 DAT          BASED(ADDR(DT)),                                
+         2 ÅR           PIC   '99',                                     
+         2 MD           PIC   '99',                                     
+         2 DAG          PIC   '99';                                     
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+                                                                        
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+ DCL     BH3300O FILE OUTPUT RECORD; /* EVS UDTRÆK EXCL. KOMMUNE 999 */ 
+ DCL     BH3301O FILE OUTPUT RECORD; /* EVS UDTRÆK KUN   KOMMUNE 999 */ 
+ /*********************************************************************/
+ /* DECLARE STRUKTURER                                                */
+ /*********************************************************************/
+                                                                        
+ DCL     1 UDTRÆK_SLUT,                                                 
+         %INCLUDE BH30000N;;                                            
+                                                                        
+ DCL     1 INDK_PERS,                                                   
+         %INCLUDE BQ00006N;;                                            
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+                                                                        
+ /* DCL     PLIXOPT   CHAR  (04) VAR STATIC EXT INIT ('STAE');          
+            IKKE UNDERSTØTTET AF KOMPILER ?                      */     
+ DCL     (ADDR,DATE,VERIFY,NULL,MOD,SUBSTR,PLIDUMP) BUILTIN;            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+                                                                        
+ DCL   ANTLÆS_PERSON     BIN FIXED (31) INIT(0);/* LÆSTE PERSONTABEL  */
+ DCL   ANTSKRIV_PERSON   BIN FIXED (31) INIT(0);/* SKREVET UDTRÆKSFIL */
+ DCL   ANTSKRIV_ØVR      BIN FIXED (31) INIT(0);/* SKREVET EXCL UDLAND*/
+ DCL   ANTSKRIV_ØVR_CÆG  BIN FIXED (31) INIT(0);/* SKREVET EXCL UDLAND*/
+                                                /* OG CÆGTOPR ^= ' '  */
+ DCL   ANTSKRIV_UDL      BIN FIXED (31) INIT(0);/* SKREVET KUN  UDLAND*/
+ DCL   ANTEJDNR_EJ_OK    BIN FIXED (31) INIT(0);/* IKKE MODULUS 11 OK */
+ DCL   ANTCEJBEVS_9      BIN FIXED (31) INIT(0);/* CEJBEVS=9(SLETTET) */
+ DCL   ANTCSLET_1        BIN FIXED (31) INIT(0);/* CSLET=1  (SLETTET) */
+ DCL   ANTEJDNR_UDL_EJ   BIN FIXED (31) INIT(0);/* FORKERT EJENDOMSNR */
+                                                /* HOS CSC FOR UDLAND */
+ DCL   ANTEJDNR_EEJDNR_0 BIN FIXED (31) INIT(0);/* FORKERT EJENDOMSNR */
+                                                /* HOS CSC            */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+                                                                        
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN           BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 FIL1        CHAR (21),                                     
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL2        CHAR (45);                                     
+         %INCLUDE ZZ20301M;                                             
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                CALL PLIDUMP  ('SBHO','MODUL BH33000');                 
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+         UDTRÆK_SLUT           = '';                                    
+         TESTPERSON            = '';                                    
+         TESTEJENDOM           = '';                                    
+         DT = DATE;                                                     
+                                                                        
+         OPEN FILE (BH3300O) TITLE ('BH33000O');                        
+         OPEN FILE (BH3301O) TITLE ('BH33010O');                        
+                                                                        
+         CALL ZZ20390('*OPEN','BH33001Y');       /* ÅBEN KONTROLLISTE */
+                                                                        
+         LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'            
+                       !! ' UDTRÆK FRA EVS SLUT 2000    ' !! 'DATO: '   
+                       !!   DAT.DAG !! '.' !! DAT.MD !! '.' !! DAT.ÅR;  
+                                                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS3 !! ' PROGRAMID: BH33000 ';                       
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZS61900;                              /* KST/SSI INFO   */
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+         PUT SKIP LIST('PROGRAMMET BH33000 STARTER');                   
+         CALL DECLARE_PERSONEJENDOMSOPL;                                
+         CALL OPEN_PERSONEJENDOMSOPL;                                   
+         CALL FETCH_PERSONEJENDOMSOPL;                                  
+                                                                        
+         SELECT (SQLCA.SQLCODE);                                        
+                                                                        
+           WHEN (0)                                                     
+             DO;                                                        
+               DO WHILE (SQLCA.SQLCODE = 0);                            
+                 CALL BEHANDL;                                          
+                 CALL FETCH_PERSONEJENDOMSOPL;                          
+               END;                                                     
+             END;                                                       
+                                                                        
+           WHEN (100)                                                   
+               PUT SKIP LIST ('INGEN RÆKKER LÆST');                     
+                                                                        
+           OTHERWISE                                                    
+             DO;                                                        
+               FEJLTEKST  = 'FETCH PERSON_CURSOR ';                     
+               CALL SQL_FEJL;                                           
+             END;                                                       
+                                                                        
+         END; /* SELECT */                                              
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR TIL LÆS AF PERSONTABEL BQ00200T                RUTINE */
+ /*********************************************************************/
+ OPEN_PERSONEJENDOMSOPL: PROC;                                          
+                                                                        
+         EXEC SQL OPEN PERSON_CURSOR;                                   
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'OPEN PERSON_CURSOR';                         
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END OPEN_PERSONEJENDOMSOPL;                                            
+ /*********************************************************************/
+ /* CLOSE CURSOR TIL LÆS AF PERSONTABEL BQ00200T               RUTINE */
+ /*********************************************************************/
+ CLOSE_PERSONEJENDOMSOPL: PROC;                                         
+                                                                        
+         EXEC SQL CLOSE PERSON_CURSOR;                                  
+                                                                        
+         IF SQLCA.SQLCODE ^= 0                                          
+         THEN                                                           
+            DO;                                                         
+              FEJLTEKST = 'CLOSE PERSON_CURSOR';                        
+              CALL SQL_FEJL;                                            
+            END;                                                        
+                                                                        
+ END CLOSE_PERSONEJENDOMSOPL;                                           
+ /*********************************************************************/
+ /* BEHANDL                                                    RUTINE */
+ /*********************************************************************/
+ BEHANDL: PROC;                                                         
+           CALL GEM_FØRSTE;                                             
+           CALL GEM_SIDSTE_CHECK_SKRIV;                                 
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /* HER INDSÆTTES DATA I DEN FØRSTE DEL AF STUKTUR BH33000N           */
+ /*********************************************************************/
+ GEM_FØRSTE:  PROC;                                                     
+ /*********************************************************************/
+ /*      STAM/NØGLEDATA/FÆLLESDATA                                    */
+ /*********************************************************************/
+                                                                        
+         UDTRÆK_SLUT.DCPRN      = TESTPERSON.DCPRN;                     
+         UDTRÆK_SLUT.EKOMNR     = TESTPERSON.EKOMNR;                    
+         UDTRÆK_SLUT.EEJDNR     = TESTPERSON.EEJDNR;                    
+         UDTRÆK_SLUT.CFRATYPE   = '1';                                  
+         IF TESTPERSON.DOVTG ^= (10)' '                                 
+         THEN                                                           
+            UDTRÆK_SLUT.FØRSTE.DOVTG =                                  
+            DB2_DATO_TIL_FIX09(TESTPERSON.DOVTG);                       
+         ELSE                                                           
+            UDTRÆK_SLUT.FØRSTE.DOVTG = 0;                               
+                                                                        
+         UDTRÆK_SLUT.DSORTDAT2 = UDTRÆK_SLUT.FØRSTE.DOVTG;              
+                                                                        
+         IF TESTPERSON.DAFSTAA ^= (10)' '                               
+         THEN                                                           
+            UDTRÆK_SLUT.FØRSTE.DAFSTAA =                                
+            DB2_DATO_TIL_FIX09(TESTPERSON.DAFSTAA);                     
+         ELSE                                                           
+            UDTRÆK_SLUT.FØRSTE.DAFSTAA = 0;                             
+                                                                        
+         IF UDTRÆK_SLUT.FØRSTE.DAFSTAA > 0                              
+         THEN                                                           
+            UDTRÆK_SLUT.DSORTDAT1 = UDTRÆK_SLUT.FØRSTE.DAFSTAA;         
+         ELSE                                                           
+            UDTRÆK_SLUT.DSORTDAT1 = 99991231;                           
+                                                                        
+         IF TESTPERSON.DATO0107 ^= (10)' '                              
+         THEN                                                           
+            UDTRÆK_SLUT.FØRSTE.DATO0107 =                               
+            DB2_DATO_TIL_FIX09(TESTPERSON.DATO0107);                    
+         ELSE                                                           
+            UDTRÆK_SLUT.FØRSTE.DATO0107 = 0;                            
+                                                                        
+         UDTRÆK_SLUT.CKOPI             = TESTPERSON.CKOPI;              
+         UDTRÆK_SLUT.DCPRNKOPI         = TESTPERSON.DCPRNKOPI;          
+         UDTRÆK_SLUT.EJDBELIG          = TESTEJENDOM.EJDBELIG;          
+         UDTRÆK_SLUT.CBENYT            = TESTEJENDOM.CBENYT;            
+         UDTRÆK_SLUT.CEJBOLTYP1        = TESTEJENDOM.CEJBOLTYP1;        
+         UDTRÆK_SLUT.CEJBOLTYP2        = TESTEJENDOM.CEJBOLTYP2;        
+ /*******************************************************************/  
+ /*    VARIABLE DATA FOR RÆKKE MED EGENNR = 1 OG ELBNR = 1          */  
+ /*******************************************************************/  
+         UDTRÆK_SLUT.FØRSTE.ELBNR      = TESTPERSON.ELBNR;              
+         UDTRÆK_SLUT.FØRSTE.EGENNR     = TESTPERSON.EGENNR;             
+         UDTRÆK_SLUT.FØRSTE.DFRAGLD    = TESTPERSON.DFRAGLD;            
+         UDTRÆK_SLUT.FØRSTE.DTILGLD    = TESTPERSON.DTILGLD;            
+         UDTRÆK_SLUT.FØRSTE.CÆGTOPR    = TESTPERSON.CÆGTOPR;            
+         UDTRÆK_SLUT.FØRSTE.CSKPLOMF   = TESTPERSON.CSKPLOMF;           
+         UDTRÆK_SLUT.FØRSTE.CEJBEVS    = TESTPERSON.CEJBEVS;            
+         UDTRÆK_SLUT.FØRSTE.CEJDTYPE   = TESTPERSON.CEJDTYPE;           
+         UDTRÆK_SLUT.FØRSTE.CFRED      = TESTPERSON.CFRED;              
+         UDTRÆK_SLUT.FØRSTE.CNEDSL1    = TESTPERSON.CNEDSL1;            
+     /*  UDTRÆK_SLUT.FØRSTE.DATO0107   SÆTTES OVENFOR */                
+     /*  UDTRÆK_SLUT.FØRSTE.DOVTG      SÆTTES OVENFOR */                
+     /*  UDTRÆK_SLUT.FØRSTE.DAFSTAA    SÆTTES OVENFOR */                
+         UDTRÆK_SLUT.FØRSTE.GPCTEJER   = TESTPERSON.GPCTEJER;           
+         UDTRÆK_SLUT.FØRSTE.FDAGUDLE   = TESTPERSON.FDAGUDLE;           
+         UDTRÆK_SLUT.FØRSTE.GPCTUDLE   = TESTPERSON.GPCTUDLE;           
+         UDTRÆK_SLUT.FØRSTE.FUDL100    = TESTPERSON.FUDL100;            
+         UDTRÆK_SLUT.FØRSTE.FDAGERHV   = TESTPERSON.FDAGERHV;           
+         UDTRÆK_SLUT.FØRSTE.GPCTERHV   = TESTPERSON.GPCTERHV;           
+         UDTRÆK_SLUT.FØRSTE.FERHVFLER  = TESTPERSON.FERHVFLER;          
+         UDTRÆK_SLUT.FØRSTE.BPROM1     = TESTPERSON.BPROM1;             
+         UDTRÆK_SLUT.FØRSTE.BPROM2     = TESTPERSON.BPROM2;             
+         UDTRÆK_SLUT.FØRSTE.BNEDSL1    = TESTPERSON.BNEDSL1;            
+         UDTRÆK_SLUT.FØRSTE.BNEDSL2    = TESTPERSON.BNEDSL2;            
+         UDTRÆK_SLUT.FØRSTE.BPENSNED   = TESTPERSON.BPENSNED;           
+         UDTRÆK_SLUT.FØRSTE.BPENSNÆ    = TESTPERSON.BPENSNÆ;            
+                                                                        
+         IF TESTPERSON.BPROM1 > 0                                       
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BNETTO = TESTPERSON.BNETTO;           
+               UDTRÆK_SLUT.FØRSTE.BNETTO_SW = 0;                        
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BNETTO = 0;                           
+               UDTRÆK_SLUT.FØRSTE.BNETTO_SW = -1;                       
+            END;                                                        
+                                                                        
+         UDTRÆK_SLUT.FØRSTE.BEJERAN    = TESTPERSON.BEJERAN;            
+                                                                        
+         IF INDK_PERS.BEVSMAN_I = 0                                     
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEVSMAN = TESTPERSON.BEVSMAN;         
+               UDTRÆK_SLUT.FØRSTE.BEVSMAN_SW = 0;                       
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEVSMAN = 0;                          
+               UDTRÆK_SLUT.FØRSTE.BEVSMAN_SW = -1;                      
+            END;                                                        
+                                                                        
+         UDTRÆK_SLUT.FØRSTE.BMANEVSSTI = TESTPERSON.BMANEVSSTI;         
+         UDTRÆK_SLUT.FØRSTE.MANPENSSTI = TESTPERSON.MANPENSSTI;         
+         UDTRÆK_SLUT.FØRSTE.BMANNEDSL  = TESTPERSON.BMANNEDSL;          
+         UDTRÆK_SLUT.FØRSTE.CENKE      = TESTPERSON.CENKE;              
+         UDTRÆK_SLUT.FØRSTE.CSLET      = TESTPERSON.CSLET;              
+         IF INDK_PERS.BEJBOL1_I = 0                                     
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL1 = TESTPERSON.BEJBOL1;         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL1_SW = 0;                       
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL1 = 0;                          
+               UDTRÆK_SLUT.FØRSTE.BEJBOL1_SW = -1;                      
+            END;                                                        
+         IF INDK_PERS.BEJBOL2_I = 0                                     
+         THEN                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL2 = TESTPERSON.BEJBOL2;         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL2_SW = 0;                       
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               UDTRÆK_SLUT.FØRSTE.BEJBOL2 = 0;                          
+               UDTRÆK_SLUT.FØRSTE.BEJBOL2_SW = -1;                      
+            END;                                                        
+         UDTRÆK_SLUT.FØRSTE.CANVEBOL   = TESTPERSON.CANVEBOL;           
+         UDTRÆK_SLUT.FØRSTE.CSTIBEGR   = TESTPERSON.CSTIBEGR;           
+         UDTRÆK_SLUT.FØRSTE.CPTYPSLUT  = TESTPERSON.CPTYPSLUT;          
+         UDTRÆK_SLUT.FØRSTE.CPENSNED   = TESTPERSON.CPENSNED;           
+         UDTRÆK_SLUT.FØRSTE.CFRÅR      = TESTPERSON.CFRÅR;              
+         UDTRÆK_SLUT.FØRSTE.COMPLA     = ' ';                           
+         UDTRÆK_SLUT.FØRSTE.DOMPLACPR  = 0;                             
+                                                                        
+ END GEM_FØRSTE;                                                        
+ /*********************************************************************/
+ /* HER INDSÆTTES DATA I DEN SIDSTE DEL AF STUKTUR BH33000N           */
+ /*********************************************************************/
+ GEM_SIDSTE_CHECK_SKRIV: PROC;                                          
+ /*********************************************************************/
+ /* DEN SIDSTE DEL AF STRUKTUREN ER MAGEN TIL DEN FØRSTE FOR          */
+ /*    VARIABLE DATA FOR RÆKKE MED EGENNR = 1 OG ELBNR = 1            */
+ /*********************************************************************/
+             UDTRÆK_SLUT.SIDSTE = UDTRÆK_SLUT.FØRSTE;                   
+                                                                        
+ /*******************************************************************/  
+ /*    CHECK FOR FORKERTE EJENDOMSNUMMER                            */  
+ /*******************************************************************/  
+         CALL CHECK_EJDNR;                                              
+                                                                        
+         IF OK ^= 'J'                                                   
+         THEN                                                           
+            DO;                                                         
+               ANTEJDNR_EJ_OK = ANTEJDNR_EJ_OK + 1;                     
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF (UDTRÆK_SLUT.EKOMNR = 999 & UDTRÆK_SLUT.EEJDNR > 99999)     
+         THEN                                                           
+            DO;                                                         
+               ANTEJDNR_UDL_EJ = ANTEJDNR_UDL_EJ + 1;                   
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF (UDTRÆK_SLUT.EEJDNR = 0)                                    
+         THEN                                                           
+            DO;                                                         
+               ANTEJDNR_EEJDNR_0 = ANTEJDNR_EEJDNR_0 + 1;               
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF UDTRÆK_SLUT.SIDSTE.CEJBEVS = '9'                            
+         THEN                                                           
+            DO;                                                         
+               ANTCEJBEVS_9 = ANTCEJBEVS_9 + 1;                         
+               RETURN;                                                  
+            END;                                                        
+                                                                        
+         IF UDTRÆK_SLUT.SIDSTE.CSLET = '1'                              
+         THEN                                                           
+            DO;                                                         
+               ANTCSLET_1 = ANTCSLET_1 + 1;                             
+               /*  RETURN;   SKAL MED I UDTRÆKKET FOR EVS 2001 */       
+               /*  TÆLLEREN BEVARES AF KONTROL HENSYN          */       
+            END;                                                        
+                                                                        
+ /*********************************************************************/
+ /* UDSKRIVNING                                                       */
+ /*********************************************************************/
+         ANTSKRIV_PERSON = ANTSKRIV_PERSON + 1;                         
+                                                                        
+           IF UDTRÆK_SLUT.EKOMNR ^= 999 THEN                            
+             DO;                                                        
+               WRITE FILE (BH3300O) FROM (UDTRÆK_SLUT);                 
+               ANTSKRIV_ØVR = ANTSKRIV_ØVR + 1;                         
+             END;                                                       
+           ELSE                                                         
+             DO;                                                        
+               WRITE FILE (BH3301O) FROM (UDTRÆK_SLUT);                 
+               ANTSKRIV_UDL = ANTSKRIV_UDL + 1;                         
+             END;                                                       
+                                                                        
+ END GEM_SIDSTE_CHECK_SKRIV;                                            
+ /*********************************************************************/
+ /* HER CHECKES OM EJENDOMSNUMMER ER MODULUS-11 VALIDT         RUTINE */
+ /*********************************************************************/
+ CHECK_EJDNR: PROC;                                                     
+                                                                        
+         OK = 'J';                                                      
+                                                                        
+         HJ_DCPRN_PIC = UDTRÆK_SLUT.DCPRN;                              
+         HJ_EKOMNR   = ZM_KONV_BF15_CH3 (UDTRÆK_SLUT.EKOMNR);           
+         HJ_EEJDNR   = KONV_BF31_CH06_F (UDTRÆK_SLUT.EEJDNR);           
+         EKOMEEJD_NR = HJ_EKOMNR !! HJ_EEJDNR;                          
+                                                                        
+         IF UDTRÆK_SLUT.EKOMNR ^= 999                                   
+         THEN                                                           
+            IF EVS_MOD11_CHK(EKOMEEJD_NR) = '1'B                        
+            THEN;                                                       
+            ELSE                                                        
+               DO;                                                      
+                  OK = 'N';                                             
+                  LIN.TEKST =                                           
+                  ' KOMMUNENR/EJENDOMSNR EJ MODULUS-11 VALIDT';         
+                  LIN.FIL1  = HJ_DCPRN !! ' ' !!                        
+                              HJ_EKOMNR !! ' ' !! HJ_EEJDNR;            
+                  CALL ZZ20300(LINIE,'01');                             
+               END;                                                     
+                                                                        
+ END CHECK_EJDNR;                                                       
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         CLOSE FILE (BH3300O);                                          
+         CLOSE FILE (BH3301O);                                          
+         CALL CLOSE_PERSONEJENDOMSOPL;                                  
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         ABENDMEDD = 'BH33000 ** 250 ' !! FEJLTEKST;                    
+                                                                        
+         CALL ZS30101 (5, ABENDMEDD, 2);                                
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+         PUT SKIP LIST('PROGRAMMET BH33000 SLUTTER');                   
+         CLOSE FILE (BH3300O);                                          
+         CLOSE FILE (BH3301O);                                          
+         CALL CLOSE_PERSONEJENDOMSOPL;                                  
+                                                                        
+         LINIE = ZZWS2;                                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL LÆSTE FRA PERSONTABELLEN ................'; 
+         LIN.ANT   = ANTLÆS_PERSON;                                     
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET IKKE VALIDE EJENDOMSNUMRE ....'; 
+         LIN.ANT   = ANTEJDNR_EJ_OK;                                    
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET MED CEJBEVS LIG 9 ............'; 
+         LIN.ANT   = ANTCEJBEVS_9;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET MED FORKET EJDNR FOR UDLAND ..'; 
+         LIN.ANT   = ANTEJDNR_UDL_EJ;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL EJ SKREVET MED EJDNR = 0 ................'; 
+         LIN.ANT   = ANTEJDNR_EEJDNR_0;                                 
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVET MED CSLET LIG 1 .................'; 
+         LIN.ANT   = ANTCSLET_1;                                        
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = 'ANTAL SKREVNE IALT ............................'; 
+         LIN.ANT   = ANTSKRIV_PERSON;                                   
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF IKKE UDENLANDSKE EJENDOMME ........'; 
+         LIN.ANT   = ANTSKRIV_ØVR;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         LIN.TEKST = '      HERAF UDENLANDSKE EJENDOMME .............'; 
+         LIN.ANT   = ANTSKRIV_UDL;                                      
+         CALL ZZ20300(LINIE,'01');                                      
+                                                                        
+         CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */
+                                                                        
+ END AFSLUT;                                                            
+ /*********************************************************************/
+ /* HER STARTER APPLIKATIONENS EGNE INCLUDES                          */
+ /*********************************************************************/
+                                                                        
+ %INCLUDE BH33000M;             /* DECLARE OG FETCH SQL STATEMENTS.   */
+ %INCLUDE BS55111M;             /* CHECK OM KOMNR OG EJENDOMSNR ER OK */
+ %INCLUDE ZM90051M;             /* KONV BIN15 TIL CHAR                */
+ %INCLUDE BS34307M;             /* KONV BF31 TIL CHAR6                */
+ %INCLUDE BH33001M;             /* KONV DATO FRA CHAR TIL DEC FIXED   */
+ %INCLUDE BH33002M;             /* KONV CHAR(10) TIL DEC FIXED(11)    */
+                                                                        
+ END BH33000;                                                           

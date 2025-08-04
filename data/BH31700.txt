@@ -1,0 +1,471 @@
+  PROCESS OPT(TIME);                                                    
+ BH31700: /* SAMMENLÆG EVS-UDTRÆK TIL ET INDV. PR. EJD. PR. PERSON */   
+         PROC OPTIONS (MAIN) REORDER;                                   
+ /*********************************************************************/
+ /*                                                                   */
+ /*      ÅRSTILRETNING VIL 'NORMALT' KUN BESTÅ AF REKOMPILERING       */
+ /*      PÅ GRUND AF ÆNDRING(ER) AF STRUKTURER.                       */
+ /*                                                                   */
+ /*********************************************************************/
+                                                                        
+ /*********************************************************************/
+ /*                                                                   */
+ /*      PROGRAMMET DANNER ET SAMLET EVS-UDTRÆK PÅ GRUNDLAG AF DATA   */
+ /*      FRA EVS SLUT OG/ELLER EVS FORSKUD. DER DANNES 1 INDIVID PR.  */
+ /*      EJENDOM PR. PERSON TIL SENERE BEHANDLING I PROGRAM BH90000L  */
+ /*      (HVIS KØRSEL VEDRØRER BEREGNING AF EVS TIL SLUT) ELLER       */
+ /*      PROGRAM BH90100L (HVIS KØRSEL VEDRØRER BEREGNING AF EVS TIL  */
+ /*      FORSKUD) HVOR BEREGNINGSBÅNDET DANNES I FØRSTE UDGAVE.       */
+ /*                                                                   */
+ /*      INDDATA : B.H31600D SAMSORTEREDE UDTRÆK FRA SLUT OG FORSKUD  */
+ /*                                                                   */
+ /*      UDDATA  : B.H31700D BEHANDLET UDTRÆK                         */
+ /*              : BH31701Y  KONTROLLISTE                             */
+ /*                                                                   */
+ /*      EXT. REF: ZS61900   (SSI-DATO)                               */
+ /*                                                                   */
+ /* PROGRAMMØR:    AAGE RASMUSSEN, LSU T&S  NOV.   2001               */
+ /*********************************************************************/
+ /* ÅRSTILRETTET:  OLUF MØRK,      LSU T&S JULI 2002.                 */
+ /* RETTET         ESBEN BRODERSEN          SEP    2018               */
+ /*                TIL SLUT 2018 EJENDOMME KAN NU VÆRE OPDELT MED     */
+ /*                EENHEDLBNR SOM VIL VÆRE UDFYLDT FOR 2 FAMILIE      */
+ /*                BOLIG                                              */
+ /* RETTET         ESBEN BRODERSEN          JUN    2019 FORSKUD 2020  */
+ /*                HVIS ET UDLANDSK EJERFORHOLD ER SLETTET            */
+ /*                CSLET = 1 I FORSKUD 2019 ELLER SLUT 2018           */
+ /*                SKAL EVS UDTRÆKKET IKKE SKRIVES VIDERE DEFECT 248  */
+ /*  SLUT 2019     CHECK PÅ SLETTET GÆLDER  FOR DANSKE OG UDLANDSKE   */
+ /* Forskud2021 Per Brunk                              Marts 2020     */
+ /*********************************************************************/
+                                                                        
+ DCL COPYRIGHT CHAR (30) STATIC INIT ('COPYRIGHT KOMMUNEDATA I/S 2002');
+                                                                        
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /*********************************************************************/
+ /*      DECLARE AF ENTRIES OG BUILTINS                               */
+ /*********************************************************************/
+ DCL     ZS61900   ENTRY OPTIONS (INTER ASM);          /* UDSKRIV SSI */
+ DCL     ZS38100   ENTRY OPTIONS (INTER ASM);          /* TIMESTAMP   */
+ DCL     ADDR      BUILTIN;                                             
+ /*********************************************************************/
+ /*      DECLARE AF FILER                                             */
+ /*********************************************************************/
+ DCL     BH316I          FILE RECORD INPUT;                             
+ DCL     BH317O          FILE RECORD OUTPUT;                            
+ /*********************************************************************/
+ /*      DECLARE AF INPUT                                             */
+ /*********************************************************************/
+ DCL     BH316_AR   CHAR      (1000) VAR;                               
+                                                                        
+ DCL     1 BH300              BASED(ADDR(BH316_AR)),                    
+   4 LÆNGDE       BIN FIXED (15),                                       
+   %INCLUDE BH30000N;;                                                  
+                                                                        
+ DCL     1 BH301              BASED(ADDR(BH316_AR)),                    
+   4 LÆNGDE       BIN FIXED (15),                                       
+   %INCLUDE BH30100N;;                                                  
+                                                                        
+ DCL     1 BH302              BASED(ADDR(BH316_AR)),                    
+   3 LÆNGDE       BIN FIXED (15),                                       
+   %INCLUDE BH30200N;;                                                  
+                                                                        
+ DCL     1 BH315              BASED(ADDR(BH316_AR)),                    
+   3 LÆNGDE       BIN FIXED (15),                                       
+   %INCLUDE BH31500N;;                                                  
+                                                                        
+ DCL     1 BH316              BASED(ADDR(BH316_AR)),                    
+   2 LÆNGDE       BIN FIXED (15),                                       
+   2 DCPRN        FIXED (11),          /* PERSONNUMMER                */
+   2 EKOMNR       BIN FIXED (15) UNAL, /* KOMMUNENR                   */
+   2 EEJDNR       BIN FIXED (31) UNAL, /* EJENDOMSNUMMER              */
+   2 EENHEDLBNR   BIN FIXED (15) UNAL, /* ENHEDSNR                    */
+   2 CFRATYPE     CHAR (1);                                             
+                                                                        
+ DCL     GEM_BH311_AR   CHAR      (50) VAR;                             
+                                                                        
+ DCL     1 GEM_BH311 BASED(ADDR(GEM_BH311_AR)),                         
+           4 LÆNGDE       BIN FIXED (15),                               
+           %INCLUDE BH31100N;;                                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF OUTPUT                                            */
+ /*********************************************************************/
+                                                                        
+ DCL     1 BH317,                                                       
+           %INCLUDE BH31700N;;                                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF TÆLLEVÆRKER                                       */
+ /*********************************************************************/
+                                                                        
+ DCL     1 TV,                                                          
+           2  SLET_UDL       FIXED DEC (7),                             
+           2  SLET_DANSK     FIXED DEC (7),                             
+           2  LÆSTE_IALT     FIXED DEC (7),                             
+           2  SKRIV_IALT     FIXED DEC (7);                             
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF DIVERSE FELTER                                    */
+ /*********************************************************************/
+                                                                        
+ DCL     EOF_BH316       BIT       (1);                                 
+ DCL     JA              BIT       (1)       INIT ('1'B);               
+ DCL     NEJ             BIT       (1)       INIT ('0'B);               
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+                                                                        
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER TIL KONTROLLISTE                      */
+ /*********************************************************************/
+                                                                        
+ DCL     1 OVLIN1,                                                      
+           2 CTL         CHAR      (01),                                
+           2 TXT1        CHAR      (50) INIT ('PROGRAM: BH31700L'),     
+           2 TXT2        CHAR      (58) INIT                            
+             ('DAN SAMLET EVS UDTRÆK TIL BEREGNING AF EVS SLUT   '),    
+           2 TXT3        CHAR      (14) INIT ('UDSKREVET DEN'),         
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVLIN2,                                                      
+           2 CTL         CHAR      (01),                                
+           2 F1          CHAR      (51) INIT (' '),                     
+           2 TXT1        CHAR      (91) INIT                            
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     LINIE           CHAR      (133);                               
+ DCL     1  DETAIL                           DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  TEKST       CHAR      (70),                                
+          2  ANTAL       PIC       'Z.ZZZ.ZZ9';                         
+                                                                        
+ DCL     1  SLET_OPL                         DEF LINIE,                 
+          2  STYR        CHAR      (1),                                 
+          2  DCPRNUM     PIC   '(10)9',                                 
+          2  FILLER1     CHAR      (1),                                 
+          2  EKOMNUM     PIC   '(03)9',                                 
+          2  STREG       CHAR      (1),                                 
+          2  EEJDNUM     PIC   '(06)9',                                 
+          2  FILLER2     CHAR      (1),                                 
+          2  EENHEDLBNUM  PIC   '(02)9',                                
+          2  FILLER3     CHAR      (1),                                 
+          2  TEKST       CHAR  (67);                                    
+                                                                        
+         %INCLUDE ZZ20301M;                                             
+ /*********************************************************************/
+ /*      H O U S E - K E E P I N G                                    */
+ /*********************************************************************/
+                                                                        
+         CALL ZS61900;                                                  
+                                                                        
+         OPEN FILE (BH316I) TITLE ('BH31600I');                         
+         OPEN FILE (BH317O) TITLE ('BH31700O');                         
+                                                                        
+         CALL ZZ20390 ('*OPEN','BH31701Y');                             
+         CALL ZZ20390 ('*OPEN','BH31702Y');                             
+                                                                        
+                                                                        
+         ON ENDFILE (BH316I)                                            
+         BEGIN;                                                         
+            EOF_BH316 = JA;                                             
+         END;                                                           
+                                                                        
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+                                                                        
+         TV = '';                                                       
+         BH317 = '';                                                    
+                                                                        
+ /*********************************************************************/
+ /*      P R O C E S S                                                */
+ /*********************************************************************/
+                                                                        
+         CALL LÆS;                                                      
+                                                                        
+         DO WHILE (EOF_BH316 = NEJ);                                    
+            CALL BEHANDL;                                               
+            CALL LÆS;                                                   
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /*********************************************************************/
+ /*      LÆS SAMSORTEREDE UDTRÆK                                      */
+ /*********************************************************************/
+ LÆS:                                                                   
+ PROC;                                                                  
+                                                                        
+         READ FILE (BH316I) INTO (BH316_AR);                            
+                                                                        
+         IF EOF_BH316 = NEJ                                             
+         THEN                                                           
+            TV.LÆSTE_IALT = TV.LÆSTE_IALT + 1;                          
+                                                                        
+ END LÆS;                                                               
+ /*********************************************************************/
+ /*      SKRIV BEHANDLET UDTRÆK                                       */
+ /*********************************************************************/
+ SKRIV: PROC;                                                           
+                                                                        
+         /* Defect 248 Forskud 2020 */                                  
+         IF BH317.EVS_SLUT_EJER.SIDSTE.CSLET  ^= '1'  &                 
+            BH317.EVS_FORSK_EJER.CSLET        ^= '1'                    
+         THEN                                                           
+           DO;                                                          
+              WRITE FILE (BH317O) FROM (BH317);                         
+              TV.SKRIV_IALT = TV.SKRIV_IALT + 1;                        
+           END;                                                         
+         ELSE                                                           
+           DO;                                                          
+             IF BH316.EKOMNR = 999                                      
+             THEN                                                       
+               TV.SLET_UDL = SLET_UDL + 1;                              
+             ELSE                                                       
+               TV.SLET_DANSK = SLET_DANSK + 1;                          
+             CALL SKRIV_SLET_LISTE;                                     
+           END;                                                         
+                                                                        
+         BH317.EVS_SLUT_EJER = '';                                      
+         BH317.EVS_SLUT_ÆGTF = '';                                      
+         BH317.EVS_FORSK_EJER = '';    /* F2003 */                      
+         BH317.EVS_FORSK_ÆGTF = '';    /* F2003 */                      
+                                                                        
+ END SKRIV;                                                             
+ /*********************************************************************/
+ /*      BEHANDLING AF INPUT                                          */
+ /*********************************************************************/
+ BEHANDL:                                                               
+ PROC;                                                                  
+                                                                        
+         SELECT;                                                        
+                                                                        
+            WHEN (BH316.EKOMNR = 999 & BH316.CFRATYPE = '0')            
+               /* STATUS INDIVID FOR UDENLANDSKE EJENDOMME */           
+               GEM_BH311_AR = BH316_AR;                                 
+                                                                        
+            WHEN (BH317.DCPRNUM ^= BH316.DCPRN)                         
+               DO;                                                      
+                  IF BH317.DCPRNUM ^= 0   /* IKKE FØRSTE GANG */        
+                  THEN                                                  
+                     DO;                                                
+                       CALL SKRIV;                                      
+                                                                        
+                       BH317.CUDLAND = ' ';                             
+                       BH317.CSBSK   = ' ';                             
+                     END;                                               
+                  CALL FLYT_DATA;                                       
+               END;                                                     
+                                                                        
+            WHEN (BH317.DCPRNUM       = BH316.DCPRN &                   
+                  (BH317.EKOMNUM     ^= BH316.EKOMNR !                  
+                   BH317.EEJDNUM     ^= BH316.EEJDNR !                  
+                   BH317.EENHEDLBNUM ^= BH316.EENHEDLBNR                
+                   ))                                                   
+               DO;                                                      
+                  /* SAMME PERSON OG NY EJENDOM */                      
+                  CALL SKRIV;                                           
+                  CALL FLYT_DATA;                                       
+               END;                                                     
+                                                                        
+            OTHERWISE                                                   
+               DO;                                                      
+                  /* SAMME PERSON OG SAMME EJENDOM */                   
+                  CALL FLYT_DATA;                                       
+               END;                                                     
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+ END BEHANDL;                                                           
+ /*********************************************************************/
+ /*      FLYT OPLYSNINGER FRA INPUT TIL RELEVANT PLADS I OUTPUT       */
+ /*********************************************************************/
+ FLYT_DATA:                                                             
+ PROC;                                                                  
+                                                                        
+         BH317.DCPRNUM = BH316.DCPRN;                                   
+         BH317.EKOMNUM = BH316.EKOMNR;                                  
+         BH317.EEJDNUM = BH316.EEJDNR;                                  
+         BH317.EENHEDLBNUM = BH316.EENHEDLBNR;                          
+         BH317.CITYP   = 0;                                             
+                                                                        
+         SELECT;                                                        
+                                                                        
+           WHEN (BH317.EKOMNUM = 999)          /* UDENLANDSK EJENDOM  */
+             DO;                                                        
+                CALL OPSÆT_STATUS;                                      
+                IF BH316.CFRATYPE = '2'                                 
+                THEN                                                    
+                   BH317.EVS_SLUT_EJER  = BH300, BY NAME;               
+                ELSE                                                    
+                   BH317.EVS_FORSK_EJER = BH301, BY NAME;   /* F2003 */ 
+             END;                                                       
+                                                                        
+           WHEN (BH316.CFRATYPE = '1')         /* DUBLET FRA EVS SLUT */
+            DO;                                                         
+             BH317.EVS_SLUT_ÆGTF = BH315.EVS_SLUT, BY NAME;             
+             BH317.CSBSK = BH315.CSBSK;                                 
+            END;                                                        
+                                                                        
+           WHEN (BH316.CFRATYPE = '2')          /* EJER FRA EVS SLUT */ 
+            DO;                                                         
+             BH317.EVS_SLUT_EJER = BH315.EVS_SLUT, BY NAME;             
+             BH317.CSBSK = BH315.CSBSK;                                 
+            END;                                                        
+                                                                        
+           WHEN (BH316.CFRATYPE = '3')          /* DUBLET FRA FORSKUD */
+            DO;                                                         
+             BH317.EVS_FORSK_ÆGTF = BH302.EVS_FORSKUD, BY NAME;         
+            END;                                                        
+                                                                        
+           WHEN (BH316.CFRATYPE = '4')          /* EJER FRA FORSKUD */  
+            DO;                                                         
+             IF BH302.COMPLA ^= '1'         /* IKKE HVIS OMPLACERET */  
+             THEN                                                       
+                BH317.EVS_FORSK_EJER = BH302.EVS_FORSKUD, BY NAME;      
+            END;                                                        
+                                                                        
+           OTHERWISE;                                                   
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+ END FLYT_DATA;                                                         
+ /*********************************************************************/
+ /*      OPSÆT STATUS KODE FOR EN PERSONS UDENLANDSKE EJENDOMME       */
+ /*********************************************************************/
+ OPSÆT_STATUS:                                                          
+ PROC;                                                                  
+                                                                        
+         SELECT;                                                        
+                                                                        
+           WHEN (GEM_BH311.FEJET_IALT = GEM_BH311.FEJET_SLUT &          
+                 GEM_BH311.FEJET_FORSKU = 0)                            
+              DO;                                                       
+                 /* ALLE EJES KUN I SLUT */                             
+                 BH317.CUDLAND = '1';                                   
+              END;                                                      
+                                                                        
+           WHEN (GEM_BH311.FEJET_IALT = GEM_BH311.FEJET_FORSKU &        
+                 GEM_BH311.FEJET_SLUT = 0)                              
+              DO;                                                       
+                 /* ALLE EJES KUN I FORSKUD */                          
+                 BH317.CUDLAND = '2';                                   
+              END;                                                      
+                                                                        
+           WHEN (GEM_BH311.FEJET_IALT = GEM_BH311.FEJET_BÅDEOG &        
+                 GEM_BH311.FEJET_IALT = GEM_BH311.FEJET_SLUT &          
+                 GEM_BH311.FEJET_IALT = GEM_BH311.FEJET_FORSKU)         
+              DO;                                                       
+                 BH317.CUDLAND = '3';                                   
+                 /* ALLE EJES BÅDE I SLUT OG FORSKUD */                 
+              END;                                                      
+                                                                        
+           OTHERWISE                                                    
+              BH317.CUDLAND = '4';                                      
+                                                                        
+         END; /* SELECT */                                              
+                                                                        
+ END OPSÆT_STATUS;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV KØRSELSKONTROLLISTE                                  */
+ /*********************************************************************/
+ KONTROLLISTE:                                                          
+ PROC;                                                                  
+                                                                        
+         LINIE = ZZIK1;                                                 
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         OVLIN1.CTL= ZZWS1;                                             
+         OVLIN1.DATO = UDDATO;                                          
+         CALL ZZ20300 (OVLIN1,'01');                                    
+                                                                        
+         OVLIN2.CTL= ZZWS2;                                             
+         CALL ZZ20300 (OVLIN2,'01');                                    
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL LÆSTE IALT                    B.H31600D';
+         DETAIL.ANTAL = TV.LÆSTE_IALT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL SLETTET UDLAND                         ';
+         DETAIL.ANTAL = TV.SLET_UDL;                                    
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL SLETTET DANSKE                         ';
+         DETAIL.ANTAL = TV.SLET_DANSK;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+         LINIE = '';                                                    
+         DETAIL.STYR = ZZWS2;                                           
+         DETAIL.TEKST = 'ANTAL SKREVET IALT                  B.H31700D';
+         DETAIL.ANTAL = TV.SKRIV_IALT;                                  
+         CALL ZZ20300 (LINIE,'01');                                     
+                                                                        
+                                                                        
+                                                                        
+ END KONTROLLISTE;                                                      
+ /*********************************************************************/
+ /*      UDSKRIV SLETTE LISTE                                         */
+ /*********************************************************************/
+ SKRIV_SLET_LISTE: PROC;                                                
+                                                                        
+         LINIE = '';                                                    
+         LINIE = ZZIK1;                                                 
+         CALL ZZ20300 (LINIE,'02');                                     
+                                                                        
+         LINIE = '';                                                    
+         SLET_OPL.STYR = ZZWS2;                                         
+         SLET_OPL.DCPRNUM = BH317.DCPRNUM;                              
+         SLET_OPL.EKOMNUM = BH317.EKOMNUM;                              
+         SLET_OPL.STREG   = '-';                                        
+         SLET_OPL.EEJDNUM = BH317.EEJDNUM;                              
+         SLET_OPL.EENHEDLBNUM = BH317.EENHEDLBNUM;                      
+                                                                        
+         IF BH317.EVS_SLUT_EJER.SIDSTE.CSLET  = '1' &                   
+            BH317.EVS_FORSK_EJER.CSLET = '1'                            
+         THEN                                                           
+           SLET_OPL.TEKST   = 'SLETTET I SLUT OG FORSKUD ';             
+         ELSE                                                           
+           IF BH317.EVS_SLUT_EJER.SIDSTE.CSLET  = '1'                   
+           THEN                                                         
+             SLET_OPL.TEKST   = 'SLETTET I SLUT';                       
+           ELSE                                                         
+             IF BH317.EVS_FORSK_EJER.CSLET = '1'                        
+             THEN                                                       
+               SLET_OPL.TEKST   = 'SLETTET I FORSKUD';                  
+                                                                        
+         CALL ZZ20300 (LINIE,'02');                                     
+                                                                        
+                                                                        
+ END SKRIV_SLET_LISTE;                                                  
+ /*********************************************************************/
+ /*      AFSLUTNING                                                   */
+ /*********************************************************************/
+ AFSLUT:                                                                
+ PROC;                                                                  
+                                                                        
+         CALL SKRIV; /* SIDSTE EJERS SIDSTE INDIVID */                  
+                                                                        
+         CALL KONTROLLISTE;                                             
+                                                                        
+         CALL ZZ20300(' ','99');                                        
+                                                                        
+         CLOSE FILE (BH316I),                                           
+               FILE (BH317O);                                           
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END BH31700;                                                           

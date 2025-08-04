@@ -1,0 +1,390 @@
+  PROCESS OPT(TIME);                                                    
+ BH81100: /* SKAF EVS-AKTUELT-ÅR-BELØB TIL BOT-NÆSTE-ÅR-BRUGERTEST   */ 
+         PROCEDURE OPTIONS (MAIN) REORDER;                              
+ /********************************************************************/ 
+         DCL COPYRIGHT   CHAR      (30) STATIC                          
+                         INIT ('COPYRIGHT KMD A/S 2004');               
+ /********************************************************************* 
+ *                                                                    * 
+ * FORMÅL : AT SKAFFE EJENDOMSVÆRDISKATTEN FOR NÆSTE ÅR TIL BRUG VED  * 
+ *          BRUGERTEST AF BOLIGYDELSESBEREGNINGEN FOR AKTUELLE ÅR.    * 
+ *          EJENDOMSVÆRDISKATTEN HENTES FRA FORSKUD-"KOMMENDE ÅR"     * 
+ *          EVS-PERSON-TABEL FOR DE AF BOT ØNSKEDE PERSONER/EJENDOMME * 
+ *          UDTRUKKET FRA ESR OG BOT.                                 * 
+ *                                                                    * 
+ * INPUT  : B.H30100D  UDTRÆK FRA EVS FORSKUD 2013                    * 
+ *          C.N57131D  UDTRÆK FRA ESR - SORTERET                      * 
+ *                                                                    * 
+ * OUTPUT : B.H81100D  UDTRÆK MED ØNSKEDE PERSONER/EJENDOMME TIL BOT  * 
+ *          BH81101Y   KØRSELSKONTROLLISTE                            * 
+ *                                                                    * 
+ * PROGRAMMØR: AAGE RASMUSSEN   PUS T&S FORSKUD        SEP 2000       * 
+ *--------------------------------------------------------------------* 
+ * ÅRSRUL:     BO SCHMIDT             *FORSKUD07*      JUL 2006       * 
+ * ÅRSRUL:     BO SCHMIDT             *FORSKUD08*      JUL 2007       * 
+ * ÅRSRUL:     BO SCHMIDT             *FORSKUD09*      JUN 2008       * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN     *FORSKUD10*      APR 2009       * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN     *FORSKUD11*      SEP 2010       * 
+ * ÅRSRUL:     GERD HOLM-PEDERSEN     *FORSKUD12*      JUN 2011       * 
+ * ÅRSRUL:     ESBEN BRODERSEN        *FORSKUD13*      SEP 2012       * 
+ * ÅRSRUL:     ESBEN BRODERSEN        *FORSKUD14*      MAJ 2013       * 
+ * ÅRSRUL:     JØRGEN SAUGMANN        *FORSKUD15*      OKT 2014       * 
+ * ÅRSRUL:     JNK                    *FORSKUD16*      NOV 2015       * 
+ * ÅRSRUL:     QEB OMLAGT TIL         *FORSKUD17*      JUN 2016       * 
+ *             ÅRSTALS MACRO BH65300M                                 * 
+ *********************************************************************/ 
+         DEFAULT RANGE (*) STATIC UNALIGNED CONN;                       
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     CN571I  FILE RECORD INPUT;          /* ESR UDTRÆK           */ 
+ DCL     BH301I  FILE RECORD INPUT;          /* EVS FORSKUD UDTRÆK   */ 
+ DCL     BH811O  FILE RECORD OUTPUT;         /* BOT UDTRÆK           */ 
+ DCL     SYSPRINT FILE OUTPUT;                                          
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK FRA ESR                                    * 
+ *********************************************************************/ 
+ DCL     1 CN571,                                                       
+           %INCLUDE CN57100N;                                           
+ DCL     1 CN571_ID1,                                                   
+           2 DCPRCIR     FIXED     (11),                                
+           2 EKOMNR      FIXED     (3),                                 
+           2 EEJDNR      FIXED     (7);                                 
+ DCL     CN571_ID        CHAR      (12)   BASED(ADDR(CN571_ID1));       
+ /********************************************************************* 
+ *       DECLARE AF EVS UDTRÆK                                        * 
+ *********************************************************************/ 
+ DCL     1 BH301,                                                       
+           %INCLUDE BH30100N;;                                          
+ DCL     1 BH301_ID1,                                                   
+           2 DCPRN       FIXED     (11),                                
+           2 EKOMNR      FIXED     (3),                                 
+           2 EEJDNR      FIXED     (7);                                 
+ DCL     BH301_ID        CHAR      (12)   BASED(ADDR(BH301_ID1));       
+ /********************************************************************* 
+ *       DECLARE AF UDTRÆK TIL BOT                                    * 
+ *********************************************************************/ 
+ DCL     1 BH811,                                                       
+           %INCLUDE BH81100N;                                           
+ /********************************************************************* 
+ *       DECLARE AF ÅRSTALS INCLUDE                                   * 
+ *********************************************************************/ 
+                                                                        
+ DCL     1 BH65300M,                                                    
+           %INCLUDE BH65300M;                                           
+                                                                        
+                                                                        
+ /********************************************************************* 
+ *               DECLARE AF DIV. TÆLLEVÆRKER                          * 
+ *********************************************************************/ 
+ DCL     1 TV,                        /* TÆLLEVÆRKER TIL TOTALLISTEN */ 
+           2 LÆS_CN571   FIXED DEC (7),                                 
+           2 LÆS_BH301   FIXED DEC (7),                                 
+           2 SKREVET     FIXED DEC (7),                                 
+           2 EJFUNDET    FIXED DEC (7),                                 
+           2 FUNDET      FIXED DEC (7),                                 
+           2 BEREGNET    FIXED DEC (7),                                 
+           2 EVS         FIXED DEC (15,2),                              
+           2 EJBEREGN    FIXED DEC (7);                                 
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     EOF_CN571       BIT       (1);                                 
+ DCL     EOF_BH301       BIT       (1);                                 
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     HJVÆRDI3        FIXED     (13,0);                              
+ DCL     HJVÆRDI4        FIXED     (15,1);                              
+ DCL     HJDAGE          FIXED     (3);                                 
+ DCL     HJPCT           FIXED     (5,4);                               
+                                                                        
+ DCL     FRADATO         PIC       '(8)9';                              
+ DCL     1 FRA           BASED(ADDR(FRADATO)),                          
+         2 ÅR            PIC       '9999',                              
+         2 MD            PIC       '99',                                
+         2 DG            PIC       '99';                                
+                                                                        
+ DCL     TILDATO         PIC       '(8)9';                              
+ DCL     1 TIL           BASED(ADDR(TILDATO)),                          
+         2 ÅR            PIC       '9999',                              
+         2 MD            PIC       '99',                                
+         2 DG            PIC       '99';                                
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF ENTRY OG BUILTIN                                  * 
+ *********************************************************************/ 
+ DCL     ADDR            BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     MULTIPLY        BUILTIN;                                       
+ DCL     DIVIDE          BUILTIN;                                       
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ DCL     ZS61900         ENTRY;                                         
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+         EXTERNAL INIT ('NOTEST(ALL,,;)');                              
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BH81100L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (55)      INIT      ('  '),          
+           2 F2          CHAR      (14)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (63)      INIT      ((63)' ');       
+ DCL     1 DETLIN3,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'Z.ZZZ.ZZ9',                         
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'Z.ZZZ.ZZZ.ZZZ.ZZ9,V99',             
+           2 F3          CHAR      (26)      INIT      ((26)' ');       
+         % INCLUDE ZZ20301M;                                            
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+                                                                        
+  OVERLIN1.TEKST2 =  'SKAF EVS ' !! BH65300M.INDKÅR1 !!                 
+                     ' TIL BRUGERTEST ' !! BH65300M.INDKÅR2 !!          
+                      ' AF BOLIGYDELSE';                                
+                                                                        
+                                                                        
+         CALL ZS61900;                         /* UDSKRIVNING AF SSI */ 
+         EOF_CN571 = NEJ;                                               
+         EOF_BH301 = NEJ;                                               
+         ON ERROR CALL PLIDUMP ('SNHOB');                               
+         OPEN FILE (CN571I)   TITLE ('CN57131I');                       
+         OPEN FILE (BH301I)   TITLE ('BH30100I');                       
+         OPEN FILE (BH811O)   TITLE ('BH81100O');                       
+         ON ENDFILE (CN571I)                                            
+         BEGIN;                                                         
+            EOF_CN571 = JA;                                             
+            CN571_ID1.DCPRCIR = 99999999999;                            
+            CN571_ID1.EKOMNR  = 999;                                    
+            CN571_ID1.EEJDNR  = 9999999;                                
+         END;                                                           
+         ON ENDFILE (BH301I)                                            
+         BEGIN;                                                         
+            EOF_BH301 = JA;                                             
+            BH301_ID1.DCPRN  = 99999999999;                             
+            BH301_ID1.EKOMNR = 999;                                     
+            BH301_ID1.EEJDNR = 9999999;                                 
+         END;                                                           
+         CALL ZZ20390 ('*OPEN','BH81101Y');                             
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !!                        
+                  '-' !! DATO2.ÅR;                                      
+         OVERLIN1.DATO  = UDDATO;                                       
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+         TV = '';                                                       
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         CALL LÆS_CN571;                                                
+         CALL LÆS_BH301;                                                
+                                                                        
+         DO WHILE ( EOF_CN571 = NEJ ! EOF_BH301 = NEJ );                
+            SELECT;                                                     
+               WHEN ( BH301.DOVTG > BH65300M.ÅR1231)                    
+                  CALL LÆS_BH301;                                       
+               WHEN ( BH301.DAFSTAA > 0 )                               
+                  CALL LÆS_BH301;                                       
+               WHEN ( BH301.DFRAFLYT > 0 )                              
+                  CALL LÆS_BH301;                                       
+               WHEN ( BH301.CEJBEVS = '9' )                             
+                  CALL LÆS_BH301;                                       
+               WHEN ( BH301_ID < CN571_ID )                             
+                  CALL LÆS_BH301;                                       
+               OTHERWISE                                                
+                  DO;                                                   
+                     CALL BEHANDL;   /* BEHANDLING AF ESR-UDTRÆK */     
+                     CALL LÆS_CN571;                                    
+                  END;                                                  
+            END;                                                        
+         END;                                                           
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /********************************************************************* 
+ *       LÆS EVS UDTRÆK                                               * 
+ *********************************************************************/ 
+ LÆS_BH301: PROC;                                                       
+                                                                        
+         READ FILE (BH301I) INTO (BH301);                               
+                                                                        
+         IF EOF_BH301 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               BH301_ID1.DCPRN = BH301.DCPRN;                           
+               BH301_ID1.EKOMNR = BH301.EKOMNR;                         
+               BH301_ID1.EEJDNR = BH301.EEJDNR;                         
+               TV.LÆS_BH301 = TV.LÆS_BH301 + 1;                         
+            END;                                                        
+                                                                        
+ END LÆS_BH301;                                                         
+ /********************************************************************* 
+ *       LÆS UDTRÆK FRA ESR                                           * 
+ *********************************************************************/ 
+ LÆS_CN571: PROC;                                                       
+                                                                        
+         READ FILE (CN571I) INTO (CN571);                               
+                                                                        
+         IF EOF_CN571 = NEJ                                             
+         THEN                                                           
+            DO;                                                         
+               CN571_ID1.DCPRCIR = CN571.DCPRCIR;                       
+               CN571_ID1.EKOMNR  = CN571.EKOMNR;                        
+               CN571_ID1.EEJDNR  = CN571.EEJDNR;                        
+               TV.LÆS_CN571 = TV.LÆS_CN571 + 1;                         
+            END;                                                        
+                                                                        
+ END LÆS_CN571;                                                         
+ /********************************************************************* 
+ *       PERSONER SOM SKAL BEHANDLES                                  * 
+ *********************************************************************/ 
+ BEHANDL: PROC;                                                         
+                                                                        
+         BH811.DCPRCIR = CN571.DCPRCIR;                                 
+         BH811.EKOMNR = CN571.EKOMNR;                                   
+         BH811.EEJDNR = CN571.EEJDNR;                                   
+                                                                        
+         IF BH301_ID = CN571_ID                                         
+         THEN                                                           
+            DO;                                                         
+               TV.FUNDET = TV.FUNDET + 1;                               
+               IF BH301.BBRUTTO_SW = 0                                  
+               THEN                                                     
+                  DO;                                                   
+                     TV.BEREGNET = TV.BEREGNET + 1;                     
+                     BH811.BEVSBOY = BH301.BBRUTTO;                     
+                     /* PERSONEN ER BEREGNET IFLG. EVS-UDTRÆK */        
+                     IF BH811.BEVSBOY = 0                               
+                     THEN;                                              
+                     ELSE                                               
+                        DO;                                             
+                          /* EJER HAN MINDRE END 100%? */               
+                           IF BH301.GPCTEJER > 0 &                      
+                              BH301.GPCTEJER < 10000                    
+                           THEN                                         
+                              DO;                                       
+                                 HJPCT =                                
+                                 BH301.GPCTEJER / 10000;                
+                                 BH811.BEVSBOY = MULTIPLY               
+                                (BH811.BEVSBOY,HJPCT,11,4);             
+                              END;                                      
+                          TV.EVS = TV.EVS + BH811.BEVSBOY;              
+                          BH811.CBOYBER = '1';                          
+                        END;                                            
+                  END;                                                  
+               ELSE                                                     
+                  DO;                                                   
+                     /* PERSONEN ER IKKE BEREGNET IFLG. EVS-UDTRÆK */   
+                     TV.EJBEREGN = TV.EJBEREGN + 1;                     
+                     BH811.BEVSBOY = 0;                                 
+                     BH811.CBOYBER = '2';                               
+                  END;                                                  
+            END;                                                        
+         ELSE                                                           
+            DO;                                                         
+               /* PERSONEN IKKE FUNDET PÅ EVS-UDTRÆK */                 
+               TV.EJFUNDET = TV.EJFUNDET + 1;                           
+               BH811.BEVSBOY = 0;                                       
+               BH811.CBOYBER = '3';                                     
+            END;                                                        
+                                                                        
+         TV.SKREVET = TV.SKREVET + 1;                                   
+         WRITE FILE (BH811O) FROM (BH811);                              
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.LÆS_CN571;                                  
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK FRA ESR     C.N57131D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.LÆS_BH301;                                  
+         DETLIN1.TEKST = 'ANTAL LÆSTE PÅ UDTRÆK FRA EVS     B.H30100D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.SKREVET;                                    
+         DETLIN1.TEKST = 'ANTAL SKREVNE PERSONER TIL BOT    B.H81100D'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.EJFUNDET;                                   
+         DETLIN1.TEKST = 'HERAF IKKE FUNDET PÅ EVS-UDTRÆK            '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS2;                                           
+         DETLIN1.ANTAL = TV.FUNDET;                                     
+         DETLIN1.TEKST = 'HERAF FUNDET PÅ EVS-UDTRÆK                 '; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN3.CCA = ZZWS1;                                           
+         DETLIN3.ANTAL = TV.BEREGNET;                                   
+         DETLIN3.TEKST = '      HERAF MED BEREGNET EVS         ANTAL:'; 
+         DETLIN3.BELØB = TV.EVS;                                        
+         CALL ZZ20300 (DETLIN3,'01');                                   
+                                                                        
+         DETLIN1.CCA = ZZWS1;                                           
+         DETLIN1.ANTAL = TV.EJBEREGN;                                   
+         DETLIN1.TEKST = '      HERAF UDEN EVS BEREGNING       ANTAL:'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+  END TOTALLISTE;                                                       
+ /*********************************************************************/
+ /*      CLOSE AF FILER OG SPOOL                                      */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+                                                                        
+         CLOSE FILE (BH301I),                                           
+               FILE (CN571I),                                           
+               FILE (BH811O);                                           
+                                                                        
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ END  BH81100;                                                          

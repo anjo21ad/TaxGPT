@@ -1,0 +1,543 @@
+ BQ99800: /* MQ GENNEMSTILLING TIL EVS */                               
+         PROC OPTIONS(MAIN,REENTRANT) REORDER;                          
+ /**********************************************************************
+ **                                                                   **
+ **     Navn              -   BQ99800                                 **
+ **                                                                   **
+ **     Funktion          -   Gennemstiller MQ forespørgsler til      **
+ **                           EVS systemet.                           **
+ **                                                                   **
+ **     Transaktionskode  -   B2Q0, B2Q2, B2Q3 OG B2Q4                **
+ **                                                                   **
+ **     Udvikler          -   Lars Kaae Harritshøj 16.05.2012         **
+ **     Nyt program       -   Erstatter program ZX28000. Indførsel    **
+ **                           af nyt MQ API                           **
+ **                                                                   **
+ ** KØ/TRANS sammenhæng:                                              **
+ **                                                                   **
+ ** B204:   MQB.Q%?D.EJV_RESUT_ASYN_REQUEST                           **
+ ** B2Q3:   MQB.Q%?D.EJV_OMPLA_ASYN_REQUEST                           **
+ ** B2Q2:   MQB.Q%?D.EJV_AEND_ASYN_REQUEST                            **
+ ** B2Q0:   MQB.Q%?D.EJV_AEND_SYN_REQUEST                             **
+ **                                                                   **
+ ** 2015-08-24 Programmet er ænret fra at behandle en enkelt meddel-  **
+ **            else af gangen til at behandle flere meddelelser i en  **
+ **            aktivering. Dette gøres ved at spørge om antallet af   **
+ **            meddelelser der er klar til at blive gettet og så køre **
+ **            det antal igennem                                      **
+ ** 2016-05-20 Nulstillig af Linkareal #01 Z8QEB                      **
+ ** 2016-11-23 Max størrelsen på besked sat op til 600 #02            **
+ **********************************************************************/
+ DCL 1 CAREA,                                                           
+ %INCLUDE ZS38301N   /* COMMAREA FRA STARTTRANS */;                     
+                                                                        
+ DCL 1 ZS38201N,                                                        
+ %INCLUDE ZS38201N   /* COMMAREA TIL MQ RUTINEN */;                     
+                                                                        
+ /********************************************************************/ 
+ /*    Declares af kommunikationsarealer til kald af MQAPI           */ 
+ /*    Programdele fra skabelon  YM43300 i RC.SOURCE                 */ 
+ /********************************************************************/ 
+  %DCL DRIFTSMILJØ CHAR;                                                
+  %DRIFTSMILJØ = 'CICS';    /* NB. Skal ligge før include af YM40020M */
+ DCL     1 YM40000N,                                                    
+         %INCLUDE(YM40000N);                                            
+ DCL     1 YM40002N_REQUEST,                                            
+         %INCLUDE(YM40002N);                                            
+ DCL     1 YM40002N_REPLY,                                              
+         %INCLUDE(YM40002N);                                            
+ DCL     1 YM40020N,                                                    
+         %INCLUDE YM40020N;                                             
+                                                                        
+                                                                        
+ DCL     REQUEST_PTR PTR;                                               
+ DCL     1 MQ_INPUTAREA    BASED(REQUEST_PTR),                          
+           2 REQUEST_BUFFER,  /* Areal hvori request gettes */          
+             5 REQUEST_TEXT      CHAR(600); /*#02*/                     
+                                                                        
+ /*                                                                     
+ DCL     1 MQ_OUTPUTAREA,                                               
+           2 REPLY_BUFFER,       Areal hvorfra reply puttes             
+             5 REPLY_AREA        CHAR(400);                             
+ */                                                                     
+  /*******************************************************************  
+  *   Declares af builtin og entry                                      
+  ********************************************************************/ 
+ DCL  (PLIDUMP,SUBSTR,CSTG,STG,ADDR,BINARYVALUE,NULL,PROCNAME,          
+       DATETIME,PTRADD)                               BUILTIN;          
+ DCL  ZS30101   ENTRY;                     /* Standard Abend   */       
+ DCL  ZS61900   ENTRY OPTIONS(INTER ASM);    /* Udskrift af SSI  */     
+  /*********************************************************************
+  *       Declares af diverse hjælpefelter                             *
+  *********************************************************************/
+ DCL  MODUL_NAVN      CHAR (8) STATIC INIT ('BQ99800');                 
+ DCL  KEY_FELT        CHAR (24);    /* Key-felt ved request/reply  */   
+ DCL  BQ99900_OK      BIT  (1)        INIT('0'B);                       
+ DCL  MSG_OK          BIT  (1)        INIT('0'B);                       
+                                                                        
+ DCL  JA              BIT  (1)        INIT('1'B);                       
+ DCL  NEJ             BIT  (1)        INIT('0'B);                       
+ DCL  PIC_4           PIC  '(4)9';                                      
+ DCL  PIC_81          PIC  '(8)9';                                      
+ DCL  PIC_82          PIC  '(8)9';                                      
+ DCL  WORK_LGD        FIXED BIN(31); /* Work area til svar længden  */  
+ DCL  SIKCHAR         CHAR(1);       /* 0 er ok 1 ej ok             */  
+ DCL  MSG_TALL        PIC '(3)9'     INIT(0);                           
+ DCL  MSG_TALC        BASED(ADDR(MSG_TALL))                             
+                      CHAR(3);                                          
+ DCL  MSG_CNT         FIXED BIN(31)  INIT(0);                           
+ DCL  TEST_SW         BIT(1)         INIT('0'B);                        
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ %INCLUDE ZS37800M;                                                     
+                                                                        
+ /**********************************************************************
+ *    LOG-/ABEND RUTINE.                                               *
+ **********************************************************************/
+ DCL 1 LINKAREAL,                                                       
+       2 INPUTLENGTH        BIN FIXED(31,0),                            
+       2 INPUTPTR           PTR,                                        
+       2 OUTPUTLENGTH       BIN FIXED(31,0),                            
+       2 OUTPUTPTR          PTR,                                        
+       2 FEJLNR             BIN FIXED (15),                             
+       2 FEJLTEKST          CHAR      (70);                             
+                                                                        
+ /**********************************************************************
+ *    STRUKTUR TIL AT ÆNDRE TRANSAKTIONSKODE I CMF.                    *
+ **********************************************************************/
+ %INCLUDE ZS62700N;                                                     
+ %INCLUDE ZS62701N;                                                     
+ %INCLUDE ZS62799N;                                                     
+ /**********************************************************************
+ *    ØVRIGE DECLARES                                                  *
+ **********************************************************************/
+ DCL  I                     FIXED BIN (15);                             
+ DCL  HLPNUM                PIC '99999999';                             
+ DCL  MAXTRANS              FIXED BIN (31);                             
+ DCL  VENTETRANS            FIXED BIN (31);                             
+ DCL  TRANSKLASE            CHAR(08);                                   
+ DCL  CICSRC                FIXED BIN (31);                             
+ DCL  WS_UNIKEY             CHAR(24);                                   
+ /**********************************************************************
+ **     HOVED STYRING.                                                **
+ **********************************************************************/
+ /**********************************************************************
+ **     følgende indsat start                                         **
+ **********************************************************************/
+    IF TEST_SW THEN DO;                                                 
+       PUT SKIP LIST('START BQ99800: '!!DATETIME);                      
+       PUT SKIP LIST('TRANSID      : '!! EIBTRNID);                     
+    END;                                                                
+                                                                        
+    EXEC CICS HANDLE CONDITION ERROR(CICS_ERROR);                       
+    SIKCHAR = '';                                                       
+    EXEC CICS LINK PROGRAM('ZY62760') COMMAREA(SIKCHAR);                
+    IF SIKCHAR = '1' THEN DO;                                           
+       CALL ABEND_PROCEDURE ('Du er ikke autoriseret til denne trans'); 
+       EXEC CICS RETURN;                                                
+    END;                                                                
+    EXEC CICS RETRIEVE INTO  (CAREA)                                    
+                       LENGTH(STG(CAREA))                               
+                       RESP  (CICSRC);                                  
+                                                                        
+    CALL INITIER;                                                       
+    CALL GET_MSG_COUNT;                                                 
+    DO WHILE(MSG_OK & MSG_CNT > 0);                                     
+       CALL GET_MQ_KOE;                                                 
+       DO WHILE(MSG_OK & MSG_CNT > 0);                                  
+          MSG_CNT = MSG_CNT - 1;                                        
+          IF TEST_SW THEN PUT SKIP LIST('MSG_CNT = '!!MSG_CNT);         
+       /* CALL START_TRANS('I'); */                                     
+          CALL KALD_BQ99900;                                            
+          IF BQ99900_OK THEN                                            
+             CALL PUT1_MQ_KOE;                                          
+       /* CALL START_TRANS('O'); */                                     
+          IF MSG_OK THEN DO;                                            
+             YM40020N.MQ_KALD     = MQ_COMMIT;                          
+             CALL UDFØR_MQ_KALD('1');                                   
+             IF MSG_OK THEN                                             
+                CALL GET_MQ_KOE;                                        
+          END;                                                          
+          ELSE DO;                                                      
+             YM40020N.MQ_KALD     = MQ_ROLLBACK;                        
+             CALL UDFØR_MQ_KALD('2');                                   
+          END;                                                          
+       END;                                                             
+       CALL GET_MSG_COUNT;                                              
+    END;                                                                
+    CALL SLUT_MQ_KOE;                                                   
+    IF TEST_SW THEN PUT SKIP LIST('SLUT : '!!DATETIME);                 
+    EXEC CICS RETURN;                                                   
+                                                                        
+ /**********************************************************************
+ **  Initiering af MQ Start og Open                                   **
+ **********************************************************************/
+ INITIER: PROC;                                                         
+                                                                        
+    IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                            
+    BQ99900_OK           = NEJ;                                         
+    LINKAREAL            = '';                                          
+    YM40020N.MQ_EOF      = 'N';                                         
+    YM40020N.YM40000_PTR = ADDR(YM40000N);                              
+    YM40020N.YM40002_PTR = ADDR(YM40002N_REQUEST);                      
+    YM40020N.MQ_KALD     = MQ_START;                                    
+    CALL UDFØR_MQ_KALD('3');                                            
+    YM40020N.MQ_KALD    = MQ_OPEN;                                      
+    IF EIBTRNID = 'B2Q4' THEN DO;                                       
+       YM40020N.MQ_SERVICE = 'BQ.BQ99800__B2Q4_GET';                    
+       CALL UDFØR_MQ_KALD('4');                                         
+    END;                                                                
+    IF EIBTRNID = 'B2Q3' THEN DO;                                       
+       YM40020N.MQ_SERVICE = 'BQ.BQ99800__B2Q3_GET';                    
+       CALL UDFØR_MQ_KALD('5');                                         
+    END;                                                                
+    IF EIBTRNID = 'B2Q2' THEN DO;                                       
+       YM40020N.MQ_SERVICE = 'BQ.BQ99800__B2Q2_GET';                    
+       CALL UDFØR_MQ_KALD('6');                                         
+    END;                                                                
+    IF EIBTRNID = 'B2Q0' THEN DO;                                       
+       YM40020N.MQ_SERVICE = 'BQ.BQ99800__B2Q0_GET';                    
+       CALL UDFØR_MQ_KALD('7');                                         
+    END;                                                                
+                                                                        
+ END INITIER;                                                           
+                                                                        
+ /**********************************************************************
+ **     Skaf antal messages på køen                                   **
+ **********************************************************************/
+ GET_MSG_COUNT: PROC;                                                   
+                                                                        
+    YM40020N.YM40000_PTR = ADDR(YM40000N);                              
+    YM40020N.YM40002_PTR = ADDR(YM40002N_REQUEST);                      
+    YM40020N.MQ_KALD     = MQ_INQ_KØ;                                   
+    CALL UDFØR_MQ_KALD('8');                                            
+    IF MSG_OK THEN DO;                                                  
+    /* MSG_CNT = YM40002N_REQUEST.RESERVERET.INQUIRED_OPENCNT; */       
+       MSG_CNT = YM40002N_REQUEST.RESERVERET.INQUIRED_QDEPTH;           
+       IF TEST_SW THEN PUT SKIP LIST('START MSG_CNT = '!!MSG_CNT);      
+    END;                                                                
+                                                                        
+ END GET_MSG_COUNT;                                                     
+                                                                        
+ /**********************************************************************
+ **     Getter på MQ                                                  **
+ **********************************************************************/
+ GET_MQ_KOE: PROC;                                                      
+                                                                        
+    IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                            
+    MSG_OK               = NEJ;                                         
+    CALL GETMAIN(REQUEST_PTR,STG(MQ_INPUTAREA));                        
+    YM40020N.MQ_KALD     = MQ_GET;                                      
+    YM40020N.YM40002_PTR = ADDR(YM40002N_REQUEST);                      
+    YM40020N.BUFFER_LGD  = STG(MQ_INPUTAREA);                           
+    YM40020N.BUFFER_PTR  = REQUEST_PTR;                                 
+    CALL UDFØR_MQ_KALD('9');                                            
+    IF MSG_OK THEN DO;                                                  
+       KEY_FELT = YM40002N_REQUEST.MQMD_MSGID; /* Nøgle på REQUEST */   
+    /* PUT SKIP LIST('BQ99800 LÆST  MSGID = '!!KEY_FELT); */            
+    END;                                                                
+                                                                        
+ END GET_MQ_KOE;                                                        
+ /**********************************************************************
+ **     Kalder under modul BQ99900                                    **
+ **********************************************************************/
+ KALD_BQ99900: PROC;                                                    
+                                                                        
+    IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                            
+    LINKAREAL = ''; /*#01*/                                             
+    LINKAREAL.INPUTPTR = ADDR(MQ_INPUTAREA);                            
+                                                                        
+    EXEC CICS LINK PROGRAM ('BQ99900')                                  
+                   COMMAREA(LINKAREAL)                                  
+                   RESP    (CICSRC);                                    
+    IF CICSRC ^= DFHRESP(NORMAL) THEN DO;                               
+       PIC_81 = CICSRC;                                                 
+       CALL ABEND_PROCEDURE('FEJL VED LINK TIL PROGRAM BQ99900, '!!     
+                            'CICSRC = '!!PIC_81);                       
+    END;                                                                
+    IF LINKAREAL.FEJLNR ^= 0 THEN DO;                                   
+       PUT SKIP LIST('BQ99800 - FEJL EFTER LINK: '!!LINKAREAL.FEJLNR!!  
+                     'FEJLTEKST: '!!LINKAREAL.FEJLTEKST);               
+       CALL SKRIV_FEJLKØ;                                               
+    END;                                                                
+    IF LINKAREAL.OUTPUTLENGTH > 0 THEN DO;                              
+       BQ99900_OK = JA;                                                 
+    END;                                                                
+    ELSE DO;                                                            
+       IF TEST_SW THEN PUT SKIP LIST('BQ99800 INTET RETUR FRA BQ99900 ' 
+                                     !!'(OUTPUTLENGTH = 0)');           
+       BQ99900_OK = NEJ;                                                
+    END;                                                                
+                                                                        
+ END KALD_BQ99900;                                                      
+ /**********************************************************************
+ **     Putter på MQ                                                  **
+ **********************************************************************/
+ PUT1_MQ_KOE: PROC;                                                     
+                                                                        
+    IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                            
+    /* CSC  har krævet at REQUEST.MSGID lægges i REPLY.MSGID til      */
+    /* brug for parring. Det korrekte er parring via CORRELID         */
+    YM40002N_REPLY.CORRELID = KEY_FELT;      /* Nøgle på REPLY */       
+    YM40002N_REPLY.MSGID    = KEY_FELT;      /* Nøgle på REPLY */       
+    IF EIBTRNID = 'B2Q4' THEN DO;                                       
+       YM40020N.MQ_KALD               = MQ_PUT1;                        
+       YM40020N.YM40002_PTR           = ADDR(YM40002N_REPLY);           
+       YM40020N.MEDTAG_AFVIKLINGSSTED = 'N';                            
+       YM40020N.MQ_SERVICE            = 'BQ.BQ99800__B2Q4_PUT';         
+       YM40020N.BUFFER_LGD            = LINKAREAL.OUTPUTLENGTH;         
+       YM40020N.BUFFER_PTR            = LINKAREAL.OUTPUTPTR;            
+       CALL UDFØR_MQ_KALD('10');                                        
+    END;                                                                
+    IF EIBTRNID = 'B2Q3' THEN DO;                                       
+       YM40020N.MQ_KALD               = MQ_PUT1;                        
+       YM40020N.YM40002_PTR           = ADDR(YM40002N_REPLY);           
+       YM40020N.MEDTAG_AFVIKLINGSSTED = 'N';                            
+       YM40020N.MQ_SERVICE            = 'BQ.BQ99800__B2Q3_PUT';         
+       YM40020N.BUFFER_LGD            = LINKAREAL.OUTPUTLENGTH;         
+       YM40020N.BUFFER_PTR            = LINKAREAL.OUTPUTPTR;            
+       CALL UDFØR_MQ_KALD('11');                                        
+     END;                                                               
+     IF EIBTRNID = 'B2Q2' THEN DO;                                      
+        YM40020N.MQ_KALD               = MQ_PUT1;                       
+        YM40020N.YM40002_PTR           = ADDR(YM40002N_REPLY);          
+        YM40020N.MEDTAG_AFVIKLINGSSTED = 'N';                           
+        YM40020N.MQ_SERVICE            = 'BQ.BQ99800__B2Q2_PUT';        
+        YM40020N.BUFFER_LGD            = LINKAREAL.OUTPUTLENGTH;        
+        YM40020N.BUFFER_PTR            = LINKAREAL.OUTPUTPTR;           
+        CALL UDFØR_MQ_KALD('12');                                       
+     END;                                                               
+     IF EIBTRNID = 'B2Q0' THEN DO;                                      
+        YM40020N.MQ_KALD               = MQ_PUT1;                       
+        YM40020N.YM40002_PTR           = ADDR(YM40002N_REPLY);          
+        YM40020N.MEDTAG_AFVIKLINGSSTED = 'N';                           
+        YM40020N.MQ_SERVICE            = 'BQ.BQ99800__B2Q0_PUT';        
+        YM40020N.BUFFER_LGD            = LINKAREAL.OUTPUTLENGTH;        
+        YM40020N.BUFFER_PTR            = LINKAREAL.OUTPUTPTR;           
+        CALL UDFØR_MQ_KALD('13');                                       
+     END;                                                               
+                                                                        
+ END PUT1_MQ_KOE;                                                       
+                                                                        
+ /**********************************************************************
+ **     UDFØR DET EGENTLIGE MQ KALD                                   **
+ **********************************************************************/
+ UDFØR_MQ_KALD: PROC(UMK_KALD);                                         
+ DCL UMK_KALD             CHAR(2);                                      
+ DCL UMK_KALD_TXT         CHAR(10)        INIT('');                     
+ DCL UMK_FTXT             CHAR(100) VAR;                                
+                                                                        
+    IF TEST_SW THEN DO;                                                 
+       SELECT(UMK_KALD);                                                
+          WHEN('1')                 UMK_KALD_TXT = 'COMMIT';            
+          WHEN('2')                 UMK_KALD_TXT = 'ROLLBACK';          
+          WHEN('3')                 UMK_KALD_TXT = 'START';             
+          WHEN('4','5','6','7')     UMK_KALD_TXT = 'OPEN';              
+          WHEN('8')                 UMK_KALD_TXT = 'INQUIRE';           
+          WHEN('9')                 UMK_KALD_TXT = 'GET';               
+          WHEN('10','11','12','13') UMK_KALD_TXT = 'PUT';               
+          WHEN('14','15','16','17') UMK_KALD_TXT = 'BACKOUT';           
+          WHEN('18')                UMK_KALD_TXT = 'CLOSE';             
+          WHEN('19')                UMK_KALD_TXT = 'SLUT';              
+          OTHER                     UMK_KALD_TXT = 'UKENDT';            
+       END;                                                             
+       PUT SKIP LIST(PROCNAME!!'  '!!UMK_KALD_TXT);                     
+    END;                                                                
+    CALL STD_MQ_KALD(YM40020N);                                         
+    SELECT(YM40000N.API_RETURKODE);                                     
+       WHEN(0)   MSG_OK = JA;                                           
+       WHEN(100) MSG_OK = NEJ;       /* IKKE FLERE MESSAGES           */
+       WHEN(900) DO;                 /* BACKOUT FRA MQ                */
+          MSG_OK   = NEJ;                                               
+       /* PUT SKIP LIST('BQ99800 MSGID    : '!!                         
+                        YM40002N_REQUEST.MQMD_MSGID!!                   
+                        '   BACKOUT BY MQ'); */                         
+       END;                                                             
+       OTHERWISE DO;                                                    
+          PIC_4  = YM40000N.API_RETURKODE;                              
+          PIC_81 = YM40000N.API_REASON;                                 
+          PIC_82 = YM40000N.MQ_REASON;                                  
+          PUT SKIP LIST('BQ99800 MQFEJL RTC: '!!PIC_4!!'  RRC: '!!PIC_81
+                      !!'  MQRRC: '!!PIC_82);                           
+          UMK_FTXT = 'Fejl ifm. YM40010 MQ-kald'!!                      
+                     ', Returkode: '!!PIC_4!!                           
+                     ', Reason : '!!PIC_81!!' MQ Reason : '!!PIC_82!!   
+                     ' Nr'!!UMK_KALD;                                   
+          CALL ABEND_PROCEDURE(UMK_FTXT);                               
+          EXEC CICS RETURN;                                             
+       END;                                                             
+    END;                                                                
+    IF LINKAREAL.OUTPUTLENGTH > 0 THEN                                  
+       CALL FREEMAIN(LINKAREAL.OUTPUTPTR);                              
+                                                                        
+ END UDFØR_MQ_KALD;                                                     
+                                                                        
+ /**********************************************************************
+ **     Skriv til fejl kø                                             **
+ **********************************************************************/
+ SKRIV_FEJLKØ: PROC;                                                    
+                                                                        
+    PUT SKIP LIST('BQ99800 - SKRIV_FEJLKØ');                            
+    PUT SKIP LIST('BQ99800 - MSGID    : '!!KEY_FELT!!                   
+                  '   BACKOUT BY APPLICATION');                         
+    PUT SKIP LIST('BQ99800 - FEJLNR   : '!!LINKAREAL.FEJLNR!!'  '!!     
+                  'FEJLTEKST: '!!LINKAREAL.FEJLTEKST);                  
+    IF EIBTRNID = 'B2Q4' THEN DO;                                       
+       YM40020N.MQ_KALD                 = MQ_PUT_ON_B;                  
+       YM40002N_REQUEST.BACKOUT_REASON  = 101;                          
+       YM40002N_REQUEST.BACKOUT_PROGRAM = 'BQ99800';                    
+       YM40002N_REQUEST.BACKOUT_TEKST   = 'Fejl CICS B2Q4';             
+       CALL UDFØR_MQ_KALD('14');                                        
+    END;                                                                
+    IF EIBTRNID = 'B2Q3' THEN DO;                                       
+       YM40020N.MQ_KALD                 = MQ_PUT_ON_B;                  
+       YM40002N_REQUEST.BACKOUT_REASON  = 102;                          
+       YM40002N_REQUEST.BACKOUT_PROGRAM = 'BQ99800';                    
+       YM40002N_REQUEST.BACKOUT_TEKST   = 'Fejl CICS B2Q3';             
+       CALL UDFØR_MQ_KALD('15');                                        
+    END;                                                                
+    IF EIBTRNID = 'B2Q2' THEN DO;                                       
+       YM40020N.MQ_KALD                 = MQ_PUT_ON_B;                  
+       YM40002N_REQUEST.BACKOUT_REASON  = 103;                          
+       YM40002N_REQUEST.BACKOUT_PROGRAM = 'BQ99800';                    
+       YM40002N_REQUEST.BACKOUT_TEKST   = 'Fejl CICS B2Q2';             
+       CALL UDFØR_MQ_KALD('16');                                        
+    END;                                                                
+    IF EIBTRNID = 'B2Q0' THEN DO;                                       
+       YM40020N.MQ_KALD                 = MQ_PUT_ON_B;                  
+       YM40002N_REQUEST.BACKOUT_REASON  = 104;                          
+       YM40002N_REQUEST.BACKOUT_PROGRAM = 'BQ99800';                    
+       YM40002N_REQUEST.BACKOUT_TEKST   = 'Fejl CICS B2Q0';             
+       CALL UDFØR_MQ_KALD('17');                                        
+    END;                                                                
+                                                                        
+ END SKRIV_FEJLKØ;                                                      
+                                                                        
+ /**********************************************************************
+ **     Afslutter kommunikation til MQ                                **
+ **********************************************************************/
+ SLUT_MQ_KOE: PROC;                                                     
+                                                                        
+     IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                           
+     YM40020N.MQ_KALD     = MQ_CLOSE;                                   
+     YM40020N.YM40002_PTR = ADDR(YM40002N_REQUEST);                     
+     CALL UDFØR_MQ_KALD('18');                                          
+     YM40020N.MQ_KALD     = MQ_SLUT;                                    
+     CALL UDFØR_MQ_KALD('19');                                          
+                                                                        
+ END SLUT_MQ_KOE;                                                       
+                                                                        
+ /********************************************************************/ 
+ /*      Fejl og abend rutiner  ny kode                              */ 
+ /********************************************************************/ 
+ ABEND_PROCEDURE: PROC (FEJLTEKST);                                     
+ DCL FEJLTEKST CHAR (70);                                               
+                                                                        
+    ZS378FUNK  = '01'; /* Returner til CICS uden dump           */      
+    ZS378TYPE  = 'CICS';                                                
+    ZS378MODUL = 'BQ99800';                                             
+    ZS378KODE  = EIBTRNID;                                              
+    ZS378TEKST = FEJLTEKST;                                             
+    /* Hvis roolback sættes ZS378ROLLB = 'JA' */                        
+    %INCLUDE ZS37802M;                                                  
+                                                                        
+ END ABEND_PROCEDURE;                                                   
+                                                                        
+ CICS_ERROR:                                                            
+                                                                        
+    CALL ABEND_PROCEDURE ('');                                          
+    EXEC CICS RETURN;                                                   
+                                                                        
+ /**********************************************************************
+ *  Start ny transaktions kode til logning                             *
+ **********************************************************************/
+ START_TRANS: PROC(RETNING);                                            
+ DCL RETNING         CHAR(1);                                           
+ DCL 1 BQ99810N,                                                        
+ %INCLUDE BQ99810N;                                                     
+ DCL  CICSRC         BIN FIXED(31,0)  INIT(0);                          
+ DCL SL_LGD          FIXED BIN(31)       INIT(0);                       
+ DCL I_CHAR_PTR      PTR;                                               
+ DCL I_CHAR          BASED(I_CHAR_PTR)                                  
+                     CHAR(1);                                           
+ DCL O_CHAR_PTR      PTR;                                               
+ DCL O_CHAR          BASED(O_CHAR_PTR)                                  
+                     CHAR(1);                                           
+ DCL SL_INX          FIXED BIN(31,0)     INIT(0);                       
+ DCL SL_PTR          PTR;                                               
+                                                                        
+    IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                            
+    BQ99810N              = '';                                         
+    BQ99810N.IO_MARK      = RETNING;                                    
+    IF RETNING = 'I'                                                    
+    THEN DO;                                                            
+       MSG_TALL              = MSG_TALL + 1;                            
+       WS_UNIKEY             = EIBTRNID!!DATETIME!!MSG_TALC;            
+       BQ99810N.UNIKEY       = WS_UNIKEY;                               
+       BQ99810N.PUT_DATETIME = YM40002N_REQUEST.MQMD_PUTDATE!!          
+                               YM40002N_REQUEST.MQMD_PUTTIME;           
+    END;                                                                
+    ELSE DO;                                                            
+       BQ99810N.UNIKEY       = WS_UNIKEY;                               
+       WS_UNIKEY             = '';                                      
+       BQ99810N.PUT_DATETIME = YM40002N_REPLY.MQMD_PUTDATE!!            
+                               YM40002N_REPLY.MQMD_PUTTIME;             
+       BQ99810N.FEJLNR       = LINKAREAL.FEJLNR;                        
+       BQ99810N.FEJLTEKST    = LINKAREAL.FEJLTEKST;                     
+    END;                                                                
+    BQ99810N.PUT_DATETIME = YM40002N_REQUEST.MQMD_PUTDATE!!             
+                            YM40002N_REQUEST.MQMD_PUTTIME;              
+    I_CHAR_PTR = ADDR(MQ_INPUTAREA);                                    
+    SL_LGD = YM40020N.BUFFER_LGD;                                       
+    CALL GETMAIN(SL_PTR,SL_LGD);                                        
+    BQ99810N.STRUKLGD = SL_LGD;                                         
+    BQ99810N.STRUKPTR = SL_PTR;                                         
+    O_CHAR_PTR        = BQ99810N.STRUKPTR;                              
+    DO SL_INX = 1 TO SL_LGD;                                            
+       O_CHAR = I_CHAR;                                                 
+       I_CHAR_PTR = PTRADD(I_CHAR_PTR,1);                               
+       O_CHAR_PTR = PTRADD(O_CHAR_PTR,1);                               
+    END;                                                                
+    EXEC CICS START TRANSID('B973')                                     
+                    FROM   (BQ99810N)                                   
+                    LENGTH (STG(BQ99810N))                              
+                    RESP   (CICSRC);                                    
+    IF CICSRC ^= 0 THEN                                                 
+       CALL ABEND_PROCEDURE('KALD AF BS99810 FEJLET, RC = '!!CICSRC);   
+                                                                        
+ /**********************************************************************
+ **    FORETAG GETMAIN AF AREAL TIL OVERGIVET POINTER.                **
+ **********************************************************************/
+ GETMAIN:   PROC(GETPTR,GETLNG);                                        
+ DCL  GETPTR               PTR;                                         
+ DCL  GETLNG               FIXED BIN(31,0);                             
+ DCL  LAV                  CHAR(1) INIT('00'X);                         
+                                                                        
+   IF TEST_SW THEN PUT SKIP LIST(PROCNAME);                             
+   IF GETLNG > 0 THEN                                                   
+      EXEC CICS GETMAIN SET(GETPTR)                                     
+                        FLENGTH(GETLNG)                                 
+                        INITIMG(LAV)                                    
+                        SHARED                                          
+                        RESP(CICSRC);                                   
+   ELSE                                                                 
+      GETPTR = NULL;                                                    
+ END GETMAIN;                                                           
+                                                                        
+ END START_TRANS;                                                       
+                                                                        
+ /**********************************************************************
+ *                Slut ny kode                                         *
+ **********************************************************************/
+                                                                        
+ /**********************************************************************
+ *                HER STARTER STANDARD INCLUDES                        *
+ **********************************************************************/
+ %INCLUDE YM40010M;               /* UDSKRIV_KMDMQ                    */
+ %INCLUDE YM40020M;               /* STD_MQ_KALD                      */
+ %INCLUDE ZX23000G;               /* GETMAIN RUTINE                   */
+ %INCLUDE ZX23000F;               /* FREEMAIN RUTINE                  */
+                                                                        
+ END BQ99800;                                                           

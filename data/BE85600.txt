@@ -1,0 +1,1820 @@
+ PROCESS OPT(TIME);                                                     
+ BE85600: PROCEDURE (EXECPARM) OPTIONS (MAIN) REORDER;                  
+ /*********************************************************************/
+ DCL COPYRIGHT   CHAR      (30) STATIC  INIT ('COPYRIGHT KMD A/S 2022');
+ /**********************************************************************
+ *                                                                     *
+ * FORMÅL     : Dan GS Resultat, incl.                                 *
+ *              - Beregning af GS Indefrysningslån.                    *
+ *              - Beregning af GS Pensionistlån.                       *
+ *              - Match af EVS og GS oplysninger (kun optælling)       *
+ *                                                                     *
+ * INPUT      : BS01600T - EVS Ejerrelation                            *
+ *              BS03600T - GS  Grundlag Ejerforhold                    *
+ *              BS04400T - GS  Grundlag Sammenligningsår               *
+ *              BS04300T - GS  Grundlag Sammengningsår grundskyld      *
+ *              BE65000T - ESR Oplysninger                             *
+ *              BE64000T - GS baggrundstabel  (LAC 2023)               *
+ *                                                                     *
+ * OUTPUT     : GS Resultat oprettes i:                                *
+ *                BS04100T - GS Resultat Ejerrelation                  *
+ *                BS04200T - GS Resultat Ejerforhold                   *
+ *                                                                     *
+ *              Match af EVS og GS: Optællinger i Totalliste           *
+ *                                                                     *
+ *              B.H85610D  Udtræk - Fejlnumre Til BN04000T             *
+ *                                                                     *
+ *              Fejl/Advis-koder:                                      *
+ *              5410 GS Grundlag Fejlkode fra E&E           (Fejl)     *
+ *              5618 Sammenligningsår mangler               (Fejl)     *
+ *              5620 Indefrysningsvalg af GS ikke udfyldt   (Fejl)     *
+ *                                                                     *
+ * OPRETTET AF: Tina Carstens (TIC)   Juni 2022  BF17                  *
+ *                                                                     *
+ * Forskud 2025: Tina Carstens (TIC) Maj   2023  BF17 Forskud 2025     *
+ *                                                                     *
+ * Ændret af   : LAC Juli 2023   (LAC 2023)      BF17 Forskud 2025     *
+ *               Hent af opl. vedr. indefrysning og p-lån, hentes nu   *
+ *               på GS baggrundstabel BE64000T                         *
+ * Forskud 2025: JJJ Juni 2024                   BF17 Forskud 2025     *
+ *               BE55600M erstatter BE55300M                           *
+ *                                                                     *
+ ***********************************************************************
+ *                                                                     *
+ *                                                                     *
+ **********************************************************************/
+         DEFAULT RANGE (*) STATIC;                                      
+ /*********************************************************************/
+ /*      PARAMETER TIL ANGIVELSE AF OM DET ER PRODUKTION ELLER        */
+ /*      TESTKØRSEL AF HENSYN TIL MASKINEL AFSTEMNING                 */
+ /*********************************************************************/
+ DCL     EXECPARM        CHAR      (6) VAR;                             
+ DCL     EX_PARM         CHAR      (4);                                 
+         EX_PARM = EXECPARM;                                            
+ /********************************************************************* 
+ *                       DECLARE AF REGISTRE                          * 
+ *********************************************************************/ 
+ DCL     SYSPRINT   EXTERNAL FILE PRINT;                                
+ DCL     BE8561O FILE RECORD OUTPUT;    /* FEJLNUMRE TIL BN04000T    */ 
+                                                                        
+ DCL     1 BE8561,                                                      
+         %INCLUDE BE85110N;                                             
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+         EXEC SQL INCLUDE SQLCA;                                        
+                                                                        
+         EXEC SQL INCLUDE BS03600T; /* GS Grundlag - Ejerforhold      */
+                                                                        
+         EXEC SQL INCLUDE BS04100T; /* GS Resultat - Ejerrelation     */
+         EXEC SQL INCLUDE BS04200T; /* GS Resultat - Ejerforhold      */
+                                                                        
+         EXEC SQL INCLUDE BS04400T; /* GS Grundlag - Sammenligningsår */
+         EXEC SQL INCLUDE BS04300T; /* GS Grundlag - Saml.år Grundsk. */
+                                                                        
+         EXEC SQL INCLUDE BS04600T; /* Indefrysningsvalg              */
+                                                                        
+         EXEC SQL INCLUDE BS01600T; /* EVS Ejerrelation               */
+                                                                        
+         EXEC SQL INCLUDE BE65000T; /* ESR Oplysninger                */
+         EXEC SQL INCLUDE BE64000T; /* GS baggrundstabel LAC 2023     */
+                                                                        
+                                                                        
+         /* Tabelerklæring BS01600T med indikatorvariable             */
+ DCL     1 BS016_AREA,                                                  
+         %INCLUDE BS0160TN;                                             
+                                                                        
+         /* Indikatorvarianble for BS03600T                           */
+ DCL     1 BS036_SW,                                                    
+          2 FEJLKODE_SW        BIN FIXED (15),                          
+          2 FEJLTEKST_SW       BIN FIXED (15),                          
+          2 EJERANDEL_SW       BIN FIXED (15),                          
+          2 EP_EJERSLUTDATO_SW BIN FIXED (15),                          
+          2 EGS_RABATBELØB_SW  BIN FIXED (15);                          
+                                                                        
+         /* Indikatorvarianble for BS04200T                           */
+ DCL     1 BS042_SW,                                                    
+          2 GS_INDEFRYS_SW     BIN FIXED (15),                          
+          2 GS_INDEFRYS_MIN_SW BIN FIXED (15),                          
+          2 PENSIONISTLÅN_SW   BIN FIXED (15);                          
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF ØVRIGE FELTER                                     */
+ /*********************************************************************/
+                                                                        
+ DCL     WS_FORSKUD_SLUT_TXT            CHAR(16) INIT (' ');            
+ DCL     WS_TIL_EVS_AAR                 BIN FIXED (15);                 
+ DCL     WS_FORRIGE_EVS_AAR             BIN FIXED (15);                 
+ DCL     WS_DATA_ID                     BIN FIXED (15);                 
+ DCL     WS_PROGRAMNAVN                 CHAR(8)  INIT ('BE85600');      
+ /********************************************************************* 
+ *       DECLARE AF DIV. FÆLLESMACROER                                * 
+ *********************************************************************/ 
+ DCL     1 BE55600M,                                                    
+           %INCLUDE BE55600M;                                           
+                                                                        
+ DCL     1 BE60101M      ALIGNED,                                       
+           %INCLUDE BE60101M;                                           
+ /********************************************************************* 
+ *       DECLARE AF BUILTIN'S                                         * 
+ *********************************************************************/ 
+ DCL     MULTIPLY        BUILTIN;                                       
+ DCL     PLIDUMP         BUILTIN;                                       
+ DCL     DIVIDE          BUILTIN;                                       
+ DCL     VERIFY          BUILTIN;                                       
+ DCL     ADDR            BUILTIN;                                       
+ DCL    (STG,CSTG)       BUILTIN;                                       
+ /********************************************************************* 
+ *       DECLARE AF ENTRY'S                                           * 
+ *********************************************************************/ 
+ DCL     BT53000         ENTRY;        /* Beregn Indefrysningslån og */ 
+                                       /* Pensionistlån              */ 
+ DCL     ZS30101         ENTRY;                                         
+ DCL     ZS61900         ENTRY;                                         
+ DCL     ZS67000         ENTRY;                                         
+ DCL     ZS38100         ENTRY OPTIONS (INTER ASM);   /* TIMESTAMP    */
+ /*********************************************************************/
+ /*      DECLARE AF ABEND STRUKTUR m.v.                               */
+ /*********************************************************************/
+ DCL     SQLKODE         FIXED     (5);                                 
+ DCL     SQLCODE_CH      CHAR      (5);                                 
+ DCL     SQLCODE_PIC     PIC       'SSSS9' DEF SQLCODE_CH;              
+ DCL     SQLFEJL         PIC       '----9';                             
+                                                                        
+ DCL     ABENDKODE     FIXED       (2) INIT(5);                         
+ DCL     1 ABENDMEDD,                                                   
+          2 ABENDMODUL CHAR      (7) INIT ('BE85600'),                  
+          2 ABENDFILL1 CHAR      (1) INIT (' '),                        
+          2 ABENDMEDNR CHAR      (2) INIT ('**'),                       
+          2 ABENDFILL2 CHAR      (1) INIT (' '),                        
+          2 ABENDTXT   CHAR      (45);                                  
+                                                                        
+ DCL     ABENDRTKODE   FIXED     (1) INIT (2);                          
+ /*********************************************************************/
+ /*      DECLARE AF PRINTLINIER                                       */
+ /*********************************************************************/
+ DCL    1 SIDELIN,                                                      
+          2 CCA          CHAR      (01),                                
+          2 FILLER       CHAR      (132)     INIT      (' ');           
+ DCL     1 OVERLIN1,                                                    
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (17)      INIT      (                
+           'PROGRAM: BE85600L'),                                        
+           2 F1          CHAR      (25)      INIT      (' '),           
+           2 TEKST2      CHAR      (57)      INIT      (' '),           
+           2 F2          CHAR      (12)      INIT      (' '),           
+           2 TEKST3      CHAR      (11)      INIT      (                
+           'UDSKREVET:'),                                               
+           2 DATO        CHAR      (10);                                
+ DCL     1 OVERLIN2,                                                    
+           2 CCA         CHAR      (01),                                
+           2 F1          CHAR      (46)      INIT      (' '),           
+           2 TEKST1      CHAR      (86)      INIT                       
+           ('          KØRSELSKONTROLLISTE');                           
+ DCL     1 DETLIN0,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST1      CHAR      (41),                                
+           2 CPUÅR       PIC       '99',                                
+           2 TEKST2      CHAR      (11),                                
+           2 START       PIC       '999999',                            
+           2 TEKST3      CHAR      (9),                                 
+           2 SLUT        PIC       '999999',                            
+           2 TEKST4      CHAR      (57);                                
+ DCL     1 DETLIN1,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZZ',                       
+           2 F2          CHAR      (61)      INIT      (' ');           
+ DCL     1 DETLIN2,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (33),                                
+           2 RCKOD       CHAR      (01)      INIT      (' '),           
+           2 F1          CHAR      (19)      INIT      (' '),           
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (68)      INIT      (' ');           
+ DCL     1 DETLIN3,                                                     
+           2 CCA         CHAR      (01),                                
+           2 TEKST       CHAR      (60),                                
+           2 ANTAL       PIC       'ZZZ.ZZZ.ZZ9',                       
+           2 F2          CHAR      (10)      INIT      (' '),           
+           2 TEKST2      CHAR      (07)      INIT      ('BELØB: '),     
+           2 BELØB       PIC       'ZZZ.ZZZ.ZZZ.ZZZ.ZZ9V,99',           
+           2 F3          CHAR      (22)      INIT      (' ');           
+         %INCLUDE ZZ20301M;                                             
+ /********************************************************************* 
+ *               DECLARE AF PARAMETRE                                 * 
+ *********************************************************************/ 
+         /* Beregning GS Indefrysnings- og Pensionistlån             */ 
+ DCL     BT53000_PTR          PTR;                                      
+ DCL     1 BT53000P,                                                    
+         %INCLUDE BT53000N;                                             
+ /********************************************************************* 
+ *               DECLARE AF DIV. HJÆLPEFELTER                         * 
+ *********************************************************************/ 
+ DCL     PLIXOPT         CHAR      (40)      VAR STATIC                 
+ EXTERNAL INIT ('NOTEST(ALL,,;)');                                      
+ DCL     JA              BIT       (1)     INIT ('1'B);                 
+ DCL     NEJ             BIT       (1)     INIT ('0'B);                 
+                                                                        
+ DCL     TEKST45         CHAR      (45);                                
+                                                                        
+ DCL     UDDATO          CHAR      (10);                                
+                                                                        
+ DCL     HJ_CHAR4        CHAR      (4);                                 
+ DCL     HJ_PIC4         PIC       '(4)9'  BASED(ADDR(HJ_CHAR4));       
+                                                                        
+ DCL     DATO1           CHAR      (26);                                
+ DCL     1 DATO2         DEF DATO1,                                     
+           2 ÅR          CHAR      (04),                                
+           2 F1          CHAR      (01),                                
+           2 MD          CHAR      (02),                                
+           2 F2          CHAR      (01),                                
+           2 DG          CHAR      (02);                                
+                                                                        
+ DCL     HJ_DATO          PIC       '(8)9';                             
+ DCL     1 HJ_DATOP       DEF       HJ_DATO,                            
+          2 ÅR            PIC       '(4)9',                             
+          2 MDDG          PIC       '(4)9';                             
+ DCL     DAGSDATOC        CHAR      (08);                               
+ DCL     DAGSDATOP        PIC       '(8)9'  DEF DAGSDATOC;              
+ DCL     HJ_EVS_AAR_START DEC FIXED (09);                               
+ DCL     HJ_EVS_AAR_SlUT  DEC FIXED (09);                               
+                                                                        
+ DCL     OPRET_TIDSSTEMPEL    CHAR      (26);                           
+ DCL     DAGSDATO             DEC FIXED (09);                           
+                                                                        
+ DCL     AKTUEL_DINDKAAR        BIN FIXED (15);                         
+ DCL     AKTUEL_PERSONNUMMER    DEC FIXED (11);                         
+ DCL     AKTUEL_EKOMNR          BIN FIXED (15);                         
+ DCL     AKTUEL_EEJDNR          BIN FIXED (31);                         
+ DCL     AKTUEL_EPLBNR          BIN FIXED (15);                         
+ DCL     AKTUEL_DFRAGLD         CHAR      (26);                         
+                                                                        
+         /* Tællere                                                   */
+ DCL     1 TV,                                                          
+          2 LÆST_GSGR_EJERREL      BIN FIXED (31),                      
+          2 LÆST_GSGR_EJERFH       BIN FIXED (31),                      
+          2 LÆST_GSGR_SAMLÅR       BIN FIXED (31),                      
+          2 LÆST_GSGR_GSEJENDOM    BIN FIXED (31),                      
+          2 LÆST_IFR_VALG_JA       BIN FIXED (31),                      
+          2 LÆST_IFR_VALG_NEJ      BIN FIXED (31),                      
+          2 LÆST_IFR_VALG_UKENDT   BIN FIXED (31),                      
+          2 LÆST_IFR_VALG_U_GS     BIN FIXED (31),                      
+          2 LÆST_FEJL              BIN FIXED (31),                      
+          2 SKRIV_GSRES_EJERRL     BIN FIXED (31),                      
+          2 SKRIV_GSRES_EJERFH     BIN FIXED (31),                      
+          2 ANT_MATCH_GS_EVS       BIN FIXED (31),                      
+          2 ANT_EJ_MATCH_GS_EVS    BIN FIXED (31),                      
+          2 ANT_MATCH_EVS_GS_REL   BIN FIXED (31),                      
+          2 ANT_MATCH_EVS_GS_OV0   BIN FIXED (31),                      
+          2 ANT_EJ_MATCH_EVS_GS    BIN FIXED (31),                      
+          2 ANT_EJ_FUNDET_ESR      BIN FIXED (31),                      
+          2 ANT_BEBYGGET           BIN FIXED (31),                      
+          2 ANT_EJ_BEBYGGET        BIN FIXED (31),                      
+          2 FEJLKODE               BIN FIXED (31),                      
+          2 SAMLÅR_MGL             BIN FIXED (31),                      
+          2 EJD_EFT2024            BIN FIXED (31),                      
+          2 EJD_AFHÆNDET           BIN FIXED (31),                      
+          2 EJDP_AFHÆNDET          BIN FIXED (31),                      
+          2 EJDP_FEJL_IFR          BIN FIXED (31),                      
+          2 PLÅN_JA                BIN FIXED (31),                      
+          2 PLÅN_NEJ               BIN FIXED (31),                      
+          2 ANT_BER_EJERFH         BIN FIXED (31),                      
+          2 ANT_IFR                BIN FIXED (31),                      
+          2 TAB_EJER(3),        /* Indefrysningsvalg: 1 = J, 2 = N    */
+                                /*                    3 = Ukendt      */
+                                /* Optæl for Ejerforhold              */
+           3 ANT_EJ_BER            BIN FIXED (31),                      
+           3 ANT_IFR_POS           BIN FIXED (31),                      
+           3 ANT_IFR_NUL           BIN FIXED (31),                      
+           3 ANT_IFR_NEG           BIN FIXED (31),                      
+           3 ANT_IFR_MIN           BIN FIXED (31),                      
+           3 ANT_IFR_POT           BIN FIXED (31),                      
+           3 ANT_IFR_POT_NUL       BIN FIXED (31),                      
+          2 ANT_PLÅN_EJ_BER        BIN FIXED (31),                      
+          2 ANT_PLÅN_POS           BIN FIXED (31),                      
+          2 ANT_PLÅN_NUL           BIN FIXED (31),                      
+          2 SKRFEJL                BIN FIXED (31),                      
+          2 ANT_INS                BIN FIXED (31),                      
+          2 ANT_UPD                BIN FIXED (31),                      
+          2 ANT_COMM               BIN FIXED (31),                      
+          /* LAC 2023 */                                                
+          2 LÆST_PL_BEVILG_JA      BIN FIXED (31),                      
+          2 LÆST_PL_BEVILG_NEJ     BIN FIXED (31),                      
+          2 LÆST_PL_BEVILG_UKENDT  BIN FIXED (31);                      
+                                                                        
+                                                                        
+ DCL      HJ_ANT_FH_JA             BIN FIXED (31);                      
+ DCL      HJ_ANT_FH_NEJ            BIN FIXED (31);                      
+ DCL      HJ_ANT_FH_UKENDT         BIN FIXED (31);                      
+                                                                        
+ DCL     1 SUM,                                                         
+          2 IFR_LÅN_ANT            BIN FIXED (31),                      
+          2 IFR_LÅN_BEL            DEC FIXED (15,2),                    
+          2 PLÅN_ANT               BIN FIXED (31),                      
+          2 PLÅN_BEL               DEC FIXED (15,2);                    
+                                                                        
+ DCL     ANT_FEJLKODE         BIN FIXED (31);                           
+ DCL     FUNDET_FEJLKODE      BIT       (01);                           
+ DCL     1 FEJLKODE(200),                                               
+          2 KODE              CHAR      (20),                           
+          2 ANTAL             BIN FIXED (31);                           
+                                                                        
+ DCL     IFR_VALG             BIN FIXED (31);                           
+ DCL     HJ_INDEFRYS_VALG     CHAR      (01);                           
+ DCL     HJ_INDEFRYS_DATO     DEC FIXED (09);                           
+ DCL     HJ_COPR_CINDEFRYS_VALG  CHAR      (01);                        
+ DCL     HJ_PLÅN_TILSAGN      CHAR      (01);                           
+ DCL     HJ_PLÅN_DATO         DEC FIXED (09);                           
+ DCL     HJ_COPR_CPLÅN_TILSAGN  CHAR      (01);                         
+ DCL     HJ_ANTAL             BIN FIXED (31);                           
+ DCL     BEBYGGET_GRUND       BIT       (01);                           
+ DCL     BEREGNET_IFR         CHAR      (01);                           
+ DCL     BEREGNET_PLÅN        CHAR      (01);                           
+                                                                        
+ DCL     1 SKR_FEJLNR(5000:6000),      /* TÆLLEVÆRKER TIL TOTALLISTEN */
+          2 ANTAL       FIXED DEC (7);                                  
+                                                                        
+ DCL     GS_EJERFORH_FUNDET   BIT       (01);                           
+ DCL     GS_EJERREL_BEH       BIN FIXED (31);                           
+ DCL     GS_IFRVALG_FUNDET    BIT       (01);                           
+ DCL     ESR_OPL_FUNDET       BIT       (01);                           
+ DCL     MATCH_GS_OG_EVS      BIT       (01);                           
+                                                                        
+ DCL     NY_EJERRELATION      BIT       (01);                           
+ DCL     GS_PL_BEVILG_FUNDET  BIT       (01);   /* LAC 2023 */          
+                                                                        
+ /********************************************************************* 
+ *       DECLARE AF HJÆLPEFELTER TIL MASKINEL AFSTEMNING              * 
+ *********************************************************************/ 
+ DCL     (INDEX,I,J,K,N)      BIN FIXED (31)      INIT      (0);        
+ /********************************************************************* 
+ *       HOUSEKEEPING                                                 * 
+ *********************************************************************/ 
+         PUT SKIP LIST ('START ' !! WS_PROGRAMNAVN);                    
+                                                                        
+         ON ERROR                                                       
+            BEGIN;                                                      
+                ON ERROR SYSTEM;                                        
+                PUT SKIP LIST ('PROGRAMFEJL');                          
+                PUT SKIP LIST ('PERSON: ',AKTUEL_PERSONNUMMER);         
+                CALL PLIDUMP  ('SNHOB','PROGRAM BE85600L');             
+            END;                                                        
+                                                                        
+         CALL ZS61900;                          /* UDSKRIVNING AF SSI */
+                                                                        
+         ON UNDEFINEDFILE(BE8561O) BEGIN;                               
+            ABENDMEDD.ABENDTXT = 'Datasæt BE8561O kan ikke åbnes';      
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         CALL TERMINER_LISTE(' ');                                      
+         CALL TERMINER_LISTE                                            
+                      ('***            SKAT EVS FORSKUD          ***'); 
+         CALL TERMINER_LISTE('***          '!!                          
+                              BE55600M.AFVIKLINGS_ID!!' '!!             
+                              BE55600M.INDKÅR2!!'       ***');          
+         CALL TERMINER_LISTE                                            
+                      ('*** BE85600 - Dan GS Resultat            ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***         - Beregn GS Indefrysningslån ***'); 
+         CALL TERMINER_LISTE                                            
+                      ('***         - Beregn GS Pensionistlån    ***'); 
+         CALL TERMINER_LISTE(' ');                                      
+                                                                        
+         CALL ZZ20390 ('*OPEN','BE85601Y');                             
+                                                                        
+         CALL ZS38100(DATO1);                                           
+         UDDATO = DATO2.DG !! '/' !! DATO2.MD !! '-' !! DATO2.ÅR;       
+         OVERLIN1.DATO  = UDDATO;                                       
+                                                                        
+         SIDELIN.CCA    = ZZIK1;                                        
+         OVERLIN1.CCA   = ZZWS2;                                        
+         OVERLIN2.CCA   = ZZWS3;                                        
+                                                                        
+         OVERLIN1.TEKST2 =                                              
+               'DAN GS RESULTAT INCL INDEFRYSNINGS- OG PENSIONISTLÅN '  
+            !!  BE55600M.INDKÅR2;                                       
+                                                                        
+         TV               = 0;                                          
+         SUM              = 0;                                          
+         ANT_FEJLKODE     = 0;                                          
+         GS_EJERREL_BEH   = 0;                                          
+         HJ_ANT_FH_JA     = 0;                                          
+         HJ_ANT_FH_NEJ    = 0;                                          
+         HJ_ANT_FH_UKENDT = 0;                                          
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+            SKR_FEJLNR(INDEX).ANTAL = 0;                                
+         END;                                                           
+                                                                        
+         DCLBS03600T.PERSONNUMMER = 0;                                  
+         DCLBS03600T.EEJDNR       = 0;                                  
+                                                                        
+         AKTUEL_DINDKAAR          = 0;                                  
+         AKTUEL_PERSONNUMMER      = 0;                                  
+         AKTUEL_EKOMNR            = 0;                                  
+         AKTUEL_EEJDNR            = 0;                                  
+         AKTUEL_EPLBNR            = 0;                                  
+         AKTUEL_DFRAGLD           = '1001-01-01-00.00.00.000000';       
+                                                                        
+         OPEN FILE (BE8561O) TITLE ('BE85610O');                        
+                                                                        
+         /* Tidsstempel der bruges ved oprettelse af BS04100T/BS04200T*/
+         EXEC SQL SET :OPRET_TIDSSTEMPEL = CURRENT TIMESTAMP;           
+                                                                        
+         IF SQLCODE ^= 0                                                
+         THEN DO;                                                       
+            SQLFEJL            = SQLCODE;                               
+            ABENDMEDD.ABENDTXT =                                        
+                    'Fejl ved hent af aktuelt tidsstempel '!!SQLFEJL;   
+            CALL SQL_FEJL;                                              
+            END;                                                        
+                                                                        
+         DAGSDATOC = SUBSTR(OPRET_TIDSSTEMPEL,1,4) !!                   
+                     SUBSTR(OPRET_TIDSSTEMPEL,6,2) !!                   
+                     SUBSTR(OPRET_TIDSSTEMPEL,9,2);                     
+         DAGSDATO  = DAGSDATOP;                                         
+                                                                        
+         FETCH BT53000;                         /* Låneberegning      */
+                                                                        
+ /********************************************************************* 
+ *       HOVEDSTYRING                                                 * 
+ *********************************************************************/ 
+                                                                        
+         SELECT (BE55600M.AFVIKLINGS_ID);                               
+            WHEN ('OPRET_EVS_FORSK')                                    
+               DO;                                                      
+                  WS_FORSKUD_SLUT_TXT  = BE55600M.AFVIKLINGS_ID;        
+                  WS_TIL_EVS_AAR       = BE55600M.FORSKÅR;              
+                  WS_FORRIGE_EVS_AAR   = BE55600M.FORSKÅR -1; /* LAC */ 
+                  WS_DATA_ID           = BE55600M.DATA_ID;              
+                                                                        
+                  PUT SKIP EDIT('Dette er en EVS FORSKUD kørsel ',      
+                                 WS_TIL_EVS_AAR) (A,P'9999');           
+               END;                                                     
+            OTHERWISE                                                   
+               DO;                                                      
+                  PUT STRING(ABENDMEDD.ABENDTXT)                        
+                        EDIT('101 fejl ved AFVIKLINGS_ID ',             
+                             BE55600M.AFVIKLINGS_ID) (A,A);             
+                  CALL PROGRAM_FEJL;                                    
+               END;                                                     
+         END; /* select */                                              
+                                                                        
+         HJ_DATOP.ÅR      = WS_TIL_EVS_AAR;                             
+         HJ_DATOP.MDDG    = 0101;                                       
+         HJ_EVS_AAR_START = HJ_DATO;                                    
+         HJ_DATOP.MDDG    = 1231;                                       
+         HJ_EVS_AAR_SLUT  = HJ_DATO;                                    
+                                                                        
+         /********************************************************/     
+         /*  NU STARTER NORMALT FLOW                             */     
+         /********************************************************/     
+                                                                        
+         /* Ejerrelation: DINDKAAR, EKOMNR, EEJDNR, PERSONNUMMER      */
+         /* Ejerforhold :                                             */
+         /* BS03600T   DINDKAAR, EKOMNR, EEJDNR, PERSONNUMMER, EPLBNR */
+                                                                        
+         /* Oplysninger hentes fra BS03600T GS Grundlag - Ejerforhold */
+         /* som indlæses i Indkomstår, Komnr., Ejendomsnr.,           */
+         /* Personnummer og Periodeløbenr-orden                       */
+                                                                        
+         /* Fra BS03600T opsamles alle Ejerforhold for en Ejerrelation*/
+         /* før der beregnes. Dvs. ved skift af Ejerrelation beregnes */
+         /* det tidligere, og opsamling af oplysninger for ny         */
+         /* Ejerrelation startes.                                     */
+                                                                        
+         CALL CLOSE_GS_EJERFORHOLD;                                     
+         CALL OPEN_GS_EJERFORHOLD;                                      
+         CALL FETCH_GS_EJERFORHOLD;                                     
+                                                                        
+         DO WHILE (GS_EJERFORH_FUNDET);                                 
+                                                                        
+            CALL BEHANDL;                                               
+                                                                        
+            CALL FETCH_GS_EJERFORHOLD;                                  
+         END;                                                           
+                                                                        
+         /* Beregn og gem oplysninger for den sidste person           */
+         IF AKTUEL_DINDKAAR ^= 0                                        
+         THEN                                                           
+            CALL AFSLUT_EJERRELATION;                                   
+                                                                        
+         CALL CLOSE_GS_EJERFORHOLD;                                     
+                                                                        
+         /* Afslut med commit                                         */
+         IF GS_EJERREL_BEH > 0                                          
+         THEN DO;                                                       
+            EXEC SQL COMMIT;                                            
+                                                                        
+            PUT SKIP LIST ('Commit efter behandling af ' !!             
+                            GS_EJERREL_BEH               !!             
+                           ' GS Ejerrelationer. Ialt '   !!             
+                           TV.ANT_INS !! ' indsat og ' !! TV.ANT_UPD !! 
+                           ' opdateret.');                              
+            END;                                                        
+                                                                        
+         /* Diverse optællinger til Totalliste                        */
+         CALL DAN_OPTÆLLINGER_EVS_OG_GS;                                
+                                                                        
+         CALL AFSLUT;                                                   
+                                                                        
+ /**********************************************************************
+ *       BEANDLING                                                     *
+ **********************************************************************/
+ BEHANDL: PROC;                                                         
+                                                                        
+         /* Optæl fejl                                                */
+         IF BS036_SW.FEJLKODE_SW = 0                                    
+          & DCLBS03600T.FEJLKODE > ' '                                  
+         THEN                                                           
+            CALL BEHANDL_FEJL;                                          
+                                                                        
+         /* Skift af Ejerrelation                                     */
+         IF AKTUEL_DINDKAAR     ^= DCLBS03600T.DINDKAAR                 
+          ! AKTUEL_EKOMNR       ^= DCLBS03600T.EKOMNR                   
+          ! AKTUEL_EEJDNR       ^= DCLBS03600T.EEJDNR                   
+          ! AKTUEL_PERSONNUMMER ^= DCLBS03600T.PERSONNUMMER             
+         THEN DO;                                                       
+            /* Ved Skift af ejerrelation kan man afslutte den forrige,*/
+            /* dvs. beregne Indefrysnings- og Pensionistlån og gemme  */
+            /* GS Resultat                                            */
+            IF AKTUEL_DINDKAAR ^= 0                                     
+            THEN                                                        
+               CALL AFSLUT_EJERRELATION;                                
+                                                                        
+            /* Check om der skal committes                            */
+            IF TV.ANT_COMM > 9999                                       
+            THEN DO;                                                    
+               EXEC SQL COMMIT;                                         
+                                                                        
+               PUT SKIP LIST ('Commit efter behandling af ' !!          
+                               GS_EJERREL_BEH               !!          
+                              ' GS Ejerrelationer. Ialt '   !!          
+                           TV.ANT_INS !! ' indsat og ' !! TV.ANT_UPD !! 
+                           ' opdateret.');                              
+               TV.ANT_COMM = 0;                                         
+               END;                                                     
+                                                                        
+            /* Start på ny Ejerrelation                               */
+            NY_EJERRELATION      = JA;                                  
+            TV.LÆST_GSGR_EJERREL = TV.LÆST_GSGR_EJERREL + 1;            
+                                                                        
+            AKTUEL_DINDKAAR      = DCLBS03600T.DINDKAAR;                
+            AKTUEL_EKOMNR        = DCLBS03600T.EKOMNR;                  
+            AKTUEL_EEJDNR        = DCLBS03600T.EEJDNR;                  
+            AKTUEL_PERSONNUMMER  = DCLBS03600T.PERSONNUMMER;            
+            AKTUEL_EPLBNR        = DCLBS03600T.EPLBNR;                  
+            AKTUEL_DFRAGLD       = DCLBS03600T.DFRAGLD;                 
+                                                                        
+         /* CALL TEST_UDSKRIV('EJENDOMST'); */                          
+                                                                        
+            /* Match GS og EVS oplysninger - Optælling                */
+            CALL OPTÆL_MATCH_MELLEM_GS_OG_EVS;                          
+                                                                        
+            /* Hent oplysninger om valg af Indefrysningslån  m.m.     */
+            CALL HENT_GS_OPLYSNINGER;     /* LAC 2023 */                
+                                                                        
+            /* Oplysning om Pensionistlån Initieres LAC 2023            
+            HJ_PLÅN_TILSAGN  = ' ';                                     
+            HJ_PLÅN_DATO     = 0;   */                                  
+                                                                        
+            /* Hent oplysninger om Grundskyld i sammenligningsår      */
+            CALL SELECT_GS_SAMMENLIGNINGSÅR;                            
+            END;                                                        
+         ELSE                                                           
+            NY_EJERRELATION  = NEJ;                                     
+                                                                        
+         /* Udfyld beregningsoplysninger                              */
+         CALL UDFYLD_BEREGNINGSOPLYSNINGER;                             
+                                                                        
+ END BEHANDL;                                                           
+ /********************************************************************* 
+ *       MATCH GS OG EVS                                              * 
+ *********************************************************************/ 
+ OPTÆL_MATCH_MELLEM_GS_OG_EVS:        PROC;                             
+                                                                        
+         /* Skift af Ejerrelation:                                    */
+         /*  DINDKAAR, EKOMNR, EEJDNR, PERSONNUMMER                   */
+                                                                        
+         /* Find ud af om der er match mellem GS og EVS oplysninger.  */
+         DCLBS01600T.DINDKAAR     = DCLBS03600T.DINDKAAR;               
+         DCLBS01600T.PERSONNUMMER = DCLBS03600T.PERSONNUMMER;           
+         DCLBS01600T.EKOMNR       = DCLBS03600T.EKOMNR;                 
+         DCLBS01600T.EEJDNR       = DCLBS03600T.EEJDNR;                 
+                                                                        
+         EXEC SQL SELECT COUNT(*)                                       
+                    INTO :HJ_ANTAL                                      
+                    FROM BS01600T BS016                                 
+                   WHERE BS016.DINDKAAR      = :DCLBS01600T.DINDKAAR    
+                     AND BS016.PERSONNUMMER  = :DCLBS01600T.PERSONNUMMER
+                     AND BS016.EKOMNR        = :DCLBS01600T.EKOMNR      
+                     AND BS016.EEJDNR        = :DCLBS01600T.EEJDNR      
+                     AND BS016.DTILGLD       =                          
+                                         '9999-12-31-23.59.59.999999';  
+                                                                        
+         IF SQLCODE = 0                                                 
+         THEN DO;                                                       
+            IF HJ_ANTAL > 0                                             
+            THEN DO;                                                    
+               TV.ANT_MATCH_EVS_GS_REL = TV.ANT_MATCH_EVS_GS_REL +      
+                                                             HJ_ANTAL;  
+               IF HJ_ANTAL > 1                                          
+               THEN                                                     
+                  TV.ANT_MATCH_EVS_GS_OV0 = TV.ANT_MATCH_EVS_GS_OV0 + 1;
+               END;                                                     
+            END;                                                        
+         ELSE                                                           
+            IF SQLCODE = 100                                            
+            THEN                                                        
+               HJ_ANTAL = 0;                                            
+            ELSE DO;                                                    
+               ABENDTXT = '101 HENT EVS MATCH MED GS BS01600T';         
+               CALL SQL_FEJL;                                           
+               END;                                                     
+                                                                        
+         IF HJ_ANTAL = 0                                                
+         THEN                                                           
+            TV.ANT_EJ_MATCH_GS_EVS = TV.ANT_EJ_MATCH_GS_EVS + 1;        
+         ELSE                                                           
+            TV.ANT_MATCH_GS_EVS    = TV.ANT_MATCH_GS_EVS + 1;           
+                                                                        
+ END OPTÆL_MATCH_MELLEM_GS_OG_EVS;                                      
+ /********************************************************************* 
+ *       HENT INDEFRYSNINGSVALG   m.m.  LAC 2023                      * 
+ *********************************************************************/ 
+ HENT_GS_OPLYSNINGER:      PROC;                                        
+ DCL     IFR_UKENDT      BIT       (01);                                
+                                                                        
+         IFR_UKENDT     = NEJ;                                          
+                                                                        
+         /* Hent oplysninger om valg af Indefrysningslån .m.m.       */ 
+         /* BE64000T - GS baggrundstabel                             */ 
+         CALL SELECT_GS_OPLYSNINGER;                                    
+                                                                        
+        /* behandling vedr. indefrysning    */                          
+         IF GS_IFRVALG_FUNDET = JA                                      
+         THEN DO;                                                       
+            HJ_COPR_CINDEFRYS_VALG  = DCLBE64000T.COPR_CINDEFRYS_VALG;  
+                                                                        
+            IF DCLBE64000T.CINDEFRYS_VALG = '1'                         
+            THEN                                                        
+               HJ_INDEFRYS_VALG = '1';                                  
+            ELSE                                                        
+               IF DCLBE64000T.CINDEFRYS_VALG = '2'                      
+               THEN                                                     
+                  HJ_INDEFRYS_VALG = '2';                               
+               ELSE DO;                                                 
+                  IFR_UKENDT       = JA;                                
+                  HJ_INDEFRYS_VALG = DCLBE64000T.CINDEFRYS_VALG;        
+                  END;                                                  
+                                                                        
+            HJ_INDEFRYS_DATO = DCLBE64000T.DATO_CINDEFRYS_VALG;         
+                                                                        
+            IF HJ_INDEFRYS_VALG = '1'                                   
+            THEN                                                        
+               TV.LÆST_IFR_VALG_JA  = TV.LÆST_IFR_VALG_JA + 1;          
+            ELSE                                                        
+               IF HJ_INDEFRYS_VALG = '2'                                
+               THEN                                                     
+                  TV.LÆST_IFR_VALG_NEJ = TV.LÆST_IFR_VALG_NEJ + 1;      
+               ELSE                                                     
+                  TV.LÆST_IFR_VALG_UKENDT = TV.LÆST_IFR_VALG_UKENDT + 1;
+            END;                                                        
+         ELSE DO;                                                       
+            HJ_INDEFRYS_VALG        = ' ';                              
+            HJ_INDEFRYS_DATO        = 0;                                
+            IFR_UKENDT              = JA;                               
+            HJ_COPR_CINDEFRYS_VALG  = ' ';                              
+            TV.LÆST_IFR_VALG_UKENDT = TV.LÆST_IFR_VALG_UKENDT + 1;      
+            END;                                                        
+                                                                        
+        /* Der skal gives fejl 5620, hvis der ikke er et indefrys-    */
+        /* ningsvalg til bebygget grund                               */
+        /* 5620 Optælles, men skrives ikke til Fejlregister           */
+        IF IFR_UKENDT = JA                                              
+        THEN DO;                                                        
+           /* 5620: Indefrysningsvalg af GS i felt 651 ikke udfyldt.  */
+                                                                        
+           /* Sætter BEBYGGET_GRUND til JA eller NEJ                  */
+           CALL SELECT_ESR_OPLYSNINGER;                                 
+                                                                        
+           IF BEBYGGET_GRUND = JA                                       
+           THEN DO;                                                     
+           /* INDEX                   = 5620;                           
+              SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;    
+                                                                        
+              CALL SKRIV_TIL_BN04000T(5620);                            
+           */                                                           
+                                                                        
+              IF ESR_OPL_FUNDET = NEJ                                   
+              THEN                                                      
+                 TV.ANT_EJ_FUNDET_ESR = TV.ANT_EJ_FUNDET_ESR + 1;       
+              ELSE                                                      
+                 TV.ANT_BEBYGGET = TV.ANT_BEBYGGET + 1;                 
+              END;                                                      
+           ELSE                                                         
+              TV.ANT_EJ_BEBYGGET   = TV.ANT_EJ_BEBYGGET + 1;            
+           END;                                                         
+                                                                        
+                                                                        
+      /* Behandling vedr. p-lån   */                                    
+                                                                        
+         IF GS_PL_BEVILG_FUNDET  = JA                                   
+         THEN DO;                                                       
+               HJ_COPR_CPLÅN_TILSAGN = DCLBE64000T.COPR_CPLÅN_TILSAGN;  
+                                                                        
+               IF DCLBE64000T.CPLÅN_TILSAGN = '1'                       
+               THEN DO;                                                 
+                    HJ_PLÅN_TILSAGN  = '1';                             
+                    HJ_PLÅN_DATO     =  DCLBE64000T.DATO_CPLÅN_TILSAGN; 
+                    LÆST_PL_BEVILG_JA = LÆST_PL_BEVILG_JA + 1;          
+                    END;                                                
+               ELSE DO;                                                 
+                    IF DCLBE64000T.CPLÅN_TILSAGN = '2'                  
+                    THEN DO;                                            
+                        HJ_PLÅN_TILSAGN  = '2';                         
+                        HJ_PLÅN_DATO     =                              
+                                        DCLBE64000T.DATO_CPLÅN_TILSAGN; 
+                        LÆST_PL_BEVILG_NEJ = LÆST_PL_BEVILG_NEJ + 1;    
+                        END;                                            
+                    ELSE DO;                                            
+                         HJ_PLÅN_TILSAGN  = ' ';                        
+                         HJ_PLÅN_DATO     = 0;                          
+                         HJ_COPR_CPLÅN_TILSAGN = ' ';                   
+                         TV.LÆST_PL_BEVILG_NEJ  =                       
+                                         TV.LÆST_PL_BEVILG_NEJ  + 1;    
+                          END;                                          
+                   END;                                                 
+               END;                                                     
+          ELSE DO;                                                      
+               HJ_PLÅN_TILSAGN       = ' ';                             
+               HJ_PLÅN_DATO          = 0;                               
+               HJ_COPR_CPLÅN_TILSAGN = ' ';                             
+               TV.LÆST_PL_BEVILG_NEJ  = TV.LÆST_PL_BEVILG_NEJ  + 1;     
+               END;                                                     
+                                                                        
+ END HENT_GS_OPLYSNINGER;                                               
+ /********************************************************************* 
+ *       UDFYLD BEREGNINGSOPLYSNINGER                                 * 
+ *********************************************************************/ 
+ UDFYLD_BEREGNINGSOPLYSNINGER:     PROC;                                
+                                                                        
+         /* Ejerrelationen: Indkomstår, Personnr., kommunennr. og     */
+         /*                 Ejendomsnr.                               */
+         /* Ejerforhold   : Indkomstår, Personnr., kommunennr.,       */
+         /*                 Ejendomsnr. og Periodeløbebnr.            */
+                                                                        
+         /* For at beregne indefrysningslån, skal man bruge alle      */
+         /* Ejerforhold for en Ejerrelation                           */
+                                                                        
+         /* Optælling af valg pr. Ejerforhold                         */
+         IF HJ_INDEFRYS_VALG = '1'                                      
+         THEN                                                           
+            HJ_ANT_FH_JA  = HJ_ANT_FH_JA + 1;                           
+         ELSE                                                           
+            IF HJ_INDEFRYS_VALG = '2'                                   
+            THEN                                                        
+              HJ_ANT_FH_NEJ    = HJ_ANT_FH_NEJ + 1;                     
+            ELSE                                                        
+              HJ_ANT_FH_UKENDT = HJ_ANT_FH_UKENDT + 1;                  
+                                                                        
+         IF NY_EJERRELATION = JA                                        
+         THEN DO;                                                       
+            BT53000P                    = '';                           
+            BT53000P.DINDKAAR           = DCLBS03600T.DINDKAAR;         
+            BT53000P.EKOMNR             = DCLBS03600T.EKOMNR;           
+            BT53000P.EEJDNR             = DCLBS03600T.EEJDNR;           
+            BT53000P.PERSONNUMMER       = DCLBS03600T.PERSONNUMMER;     
+            BT53000P.CINDEFRYS_VALG     = HJ_INDEFRYS_VALG;             
+            BT53000P.CPLÅN_TILSAGN      = HJ_PLÅN_TILSAGN;              
+            BT53000P.AKTSAMLIGNAAR      = DCLBS04400T.AKTSAMLIGNAAR;    
+            BT53000P.GRUNDSKYLDEJENDOM  = DCLBS04300T.GRUNDSKYLDEJENDOM;
+                                                                        
+            BT53000P.ANT_EJERFH         = 0;                            
+            END;                                                        
+                                                                        
+         IF BT53000P.ANT_EJERFH < 15                                    
+         THEN DO;                                                       
+            /* Gem nyt Ejerforhold                                    */
+            BT53000P.ANT_EJERFH    = BT53000P.ANT_EJERFH + 1;           
+            J                      = BT53000P.ANT_EJERFH;               
+                                                                        
+            BT53000P.GR_EJERFH(J).EPLBNR              =                 
+                                       DCLBS03600T.EPLBNR;              
+            BT53000P.GR_EJERFH(J).DFRAGLD              =                
+                                       DCLBS03600T.DFRAGLD;             
+            BT53000P.GR_EJERFH(J).FEJLKODE_SW         =                 
+                                       BS036_SW.FEJLKODE_SW;            
+            BT53000P.GR_EJERFH(J).EP_EJERSTARTDATO    =                 
+                                       DCLBS03600T.EP_EJERSTARTDATO;    
+            IF BS036_SW.EP_EJERSLUTDATO_SW = 0                          
+            THEN                                                        
+               BT53000P.GR_EJERFH(J).EP_EJERSLUTDATO  =                 
+                                       DCLBS03600T.EP_EJERSLUTDATO;     
+            ELSE                                                        
+               BT53000P.GR_EJERFH(J).EP_EJERSLUTDATO  = 0;              
+            BT53000P.GR_EJERFH(J).EP_ANTALDAGE        =                 
+                                       DCLBS03600T.EP_ANTALDAGE;        
+            BT53000P.GR_EJERFH(J).EGS_OPKRPSKAT3112   =                 
+                                       DCLBS03600T.EGS_OPKRPSKAT3112;   
+            /*                     DEC (5,4)        DEC (5,0)         */
+            BT53000P.GR_EJERFH(J).EJERANDEL           =                 
+                                       DCLBS03600T.EJERANDEL / 10000;   
+            BT53000P.GR_EJERFH(J).EGS_BELØBEFTERRABAT =                 
+                                       DCLBS03600T.EGS_BELØBEFTERRABAT; 
+            END;                                                        
+         ELSE DO;                                                       
+            ABENDMEDD.ABENDTXT =                                        
+                               'Mere end 15 Perioder for Ejerrelation'; 
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+ END UDFYLD_BEREGNINGSOPLYSNINGER;                                      
+ /********************************************************************* 
+ *       BEHANDL FEJL                                                 * 
+ *********************************************************************/ 
+ BEHANDL_FEJL:      PROC;                                               
+                                                                        
+         /* Grundskyldsoplysninger med en E&E fejlkode skal ikke      */
+         /* anvendes og der skal oprettes en fejl (5410) på sags- og  */
+         /* fejlregisteret via en fejl fil                            */
+                                                                        
+         TV.LÆST_FEJL    = TV.LÆST_FEJL + 1;                            
+         FUNDET_FEJLKODE = NEJ;                                         
+                                                                        
+         IF ANT_FEJLKODE > 0                                            
+         THEN DO;                                                       
+            DO I = 1 TO ANT_FEJLKODE;                                   
+                                                                        
+               IF DCLBS03600T.FEJLKODE = FEJLKODE(I).KODE               
+               THEN DO;                                                 
+                  FUNDET_FEJLKODE   = JA;                               
+                  FEJLKODE(I).ANTAL = FEJLKODE(I).ANTAL + 1;            
+                  END;                                                  
+            END;                                                        
+            END;                                                        
+                                                                        
+         IF FUNDET_FEJLKODE = NEJ                                       
+          & ANT_FEJLKODE    < 200                                       
+         THEN DO;                                                       
+            ANT_FEJLKODE                 = ANT_FEJLKODE + 1;            
+            FEJLKODE(ANT_FEJLKODE).KODE  = DCLBS03600T.FEJLKODE;        
+            FEJLKODE(ANT_FEJLKODE).ANTAL = 1;                           
+            END;                                                        
+                                                                        
+ END BEHANDL_FEJL;                                                      
+ /********************************************************************* 
+ *       AFSLUT EJERRELATION                                          * 
+ *********************************************************************/ 
+ AFSLUT_EJERRELATION:         PROC;                                     
+                                                                        
+         /* For aktuel Ejerrelation har man nu samlet oplysninger     */
+         /* om alle ejerforhold og kan nu beregne Indefrysningslån    */
+         /* og Pensionist lån                                         */
+                                                                        
+         CALL BEREGN_INDEFRYSNINGS_OG_PLÅN;                             
+                                                                        
+         /* Gem GS Resultat - Ejerrelation (BS04100T)                 */
+         CALL SKRIV_GS_RES_EJERRELATION;                                
+                                                                        
+         /* Gem GS Resultat - Ejerforhold  (BS04200T)                 */
+         CALL SKRIV_GS_RES_EJERFORHOLD;                                 
+                                                                        
+      /* CALL TEST_UDSKRIV('EJENDOMSL'); */                             
+                                                                        
+         GS_EJERREL_BEH = GS_EJERREL_BEH + 1;                           
+         TV.ANT_COMM    = TV.ANT_COMM    + 1;                           
+                                                                        
+ END AFSLUT_EJERRELATION;                                               
+ /********************************************************************* 
+ *       BEREGN INDEFRYSNINGS- OG PENSIONISTLÅN                       * 
+ *********************************************************************/ 
+ BEREGN_INDEFRYSNINGS_OG_PLÅN:     PROC;                                
+                                                                        
+      /* CALL TEST_UDSKRIV('BEREGNIND'); */                             
+                                                                        
+         BT53000_PTR = ADDR(BT53000P);                                  
+                                                                        
+         CALL BT53000(BT53000_PTR);                                     
+                                                                        
+      /* CALL TEST_UDSKRIV('BEREGNUD');  */                             
+                                                                        
+         IF BT53000P.RETUR.KODE ^= 0                                    
+         THEN DO;                                                       
+            PUT SKIP LIST((57)'*');                                     
+            PUT SKIP EDIT                                               
+                      ('* Fejl fra BT53000 Beregn Indefrysningslån: ',  
+                        BT53000P.RETUR.KODE,'       *')                 
+                      (A,P'----9',A);                                   
+            PUT SKIP EDIT                                               
+                      ('* ',BT53000P.RETUR.TEKST)  (A,A);               
+            PUT SKIP EDIT                                               
+                    ('* Person: ',AKTUEL_PERSONNUMMER,(36)' ','*')      
+                    (A,P'9999999999',A,A);                              
+            PUT SKIP LIST((57)'*');                                     
+                                                                        
+            PUT STRING(ABENDMEDD.ABENDTXT)                              
+                  EDIT('101 Fejl fra Indefrysningslån BT53000 ') (A);   
+            CALL PROGRAM_FEJL;                                          
+            END;                                                        
+                                                                        
+         /* Optæl fejl - Skriv til fejldatasæt                        */
+         IF BT53000P.KONTROL.FEJLNR > 0                                 
+         THEN DO;                                                       
+            INDEX                   = BT53000P.KONTROL.FEJLNR;          
+            SKR_FEJLNR(INDEX).ANTAL = SKR_FEJLNR(INDEX).ANTAL + 1;      
+                                                                        
+            CALL SKRIV_TIL_BN04000T(BT53000P.KONTROL.FEJLNR);           
+            END;                                                        
+                                                                        
+         /* Dan Optællinger til totalliste                            */
+         CALL DAN_OPTÆLLINGER;                                          
+                                                                        
+ END BEREGN_INDEFRYSNINGS_OG_PLÅN;                                      
+ /********************************************************************* 
+ *       DAN OPTÆLLINGER TIL TOTALLISTE                               * 
+ *********************************************************************/ 
+ DAN_OPTÆLLINGER:        PROC;                                          
+                                                                        
+         /* Efter beregning af Ejerrelation dannes optællinger        */
+                                                                        
+         /* Optæl Oplysninger om Beregnet Pensionistlån               */
+         IF BT53000P.CPLÅN_TILSAGN = 'J'                                
+         THEN                                                           
+            TV.PLÅN_JA  = TV.PLÅN_JA + 1;                               
+         ELSE                                                           
+            TV.PLÅN_NEJ = TV.PLÅN_NEJ + 1;                              
+                                                                        
+         /* Optæl årsagskoder til, at der ikke er beregnet            */
+         BEREGNET_IFR = 'N';                                            
+                                                                        
+         SELECT(BT53000P.KONTROL.ÅRSAG_IFR);                            
+            WHEN('05410') TV.FEJLKODE     = TV.FEJLKODE + 1;            
+            WHEN('05618') TV.SAMLÅR_MGL   = TV.SAMLÅR_MGL + 1;          
+            WHEN('EFT24') TV.EJD_EFT2024 =  TV.EJD_EFT2024 + 1;         
+            WHEN('AFHÆN') TV.EJD_AFHÆNDET = TV.EJD_AFHÆNDET + 1;        
+            OTHERWISE DO;                                               
+               BEREGNET_IFR = 'J';                                      
+               END;                                                     
+         END;                                                           
+                                                                        
+         /* Optæl Ejerforhold                                         */
+         TV.ANT_BER_EJERFH  = TV.ANT_BER_EJERFH +                       
+                              BT53000P.ANT_EJERFH;                      
+                                                                        
+         BEREGNET_PLÅN = 'N';                                           
+                                                                        
+         SELECT(BT53000P.KONTROL.ÅRSAG_PLÅN);                           
+            WHEN('AFHÆN') TV.EJDP_AFHÆNDET = TV.EJDP_AFHÆNDET + 1;      
+            WHEN('FEIFR') TV.EJDP_FEJL_IFR = TV.EJDP_FEJL_IFR + 1;      
+            OTHERWISE DO;                                               
+               BEREGNET_PLÅN = 'J';                                     
+               END;                                                     
+         END;                                                           
+                                                                        
+         /* Optælling Ejerforhold.                                      
+         /* Indefrysningsvalg: 1 = Ja, 2 = Nej                        */
+         IF HJ_INDEFRYS_VALG = '1'                                      
+         THEN                                                           
+            IFR_VALG = 1;                                               
+         ELSE                                                           
+            IF HJ_INDEFRYS_VALG = '2'                                   
+            THEN                                                        
+               IFR_VALG = 2;                                            
+            ELSE                                                        
+               IFR_VALG = 3;                                            
+                                                                        
+         DO I = 1 TO BT53000P.ANT_EJERFH;                               
+                                                                        
+            IF IFR_VALG > 0                                             
+            THEN DO;                                                    
+               IF BEREGNET_IFR = 'N'                                    
+               THEN                                                     
+                  TV.TAB_EJER(IFR_VALG).ANT_EJ_BER =                    
+                                TV.TAB_EJER(IFR_VALG).ANT_EJ_BER + 1;   
+               ELSE                                                     
+               IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_NEG ^= 0       
+               THEN                                                     
+                  TV.TAB_EJER(IFR_VALG).ANT_IFR_NEG =                   
+                               TV.TAB_EJER(IFR_VALG).ANT_IFR_NEG + 1;   
+               ELSE                                                     
+               IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_MIN_SW = 0     
+                & BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_MIN   ^= 0     
+               THEN                                                     
+                  TV.TAB_EJER(IFR_VALG).ANT_IFR_MIN =                   
+                                TV.TAB_EJER(IFR_VALG).ANT_IFR_MIN + 1;  
+               ELSE                                                     
+               IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_SW = -1        
+               THEN DO;                                                 
+                  IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_POT ^= 0    
+                  THEN                                                  
+                     TV.TAB_EJER(IFR_VALG).ANT_IFR_POT =                
+                                  TV.TAB_EJER(IFR_VALG).ANT_IFR_POT + 1;
+                  ELSE                                                  
+                     TV.TAB_EJER(IFR_VALG).ANT_IFR_POT_NUL =            
+                            TV.TAB_EJER(IFR_VALG).ANT_IFR_POT_NUL + 1;  
+                  END;                                                  
+               ELSE                                                     
+               IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS_SW = 0         
+               THEN DO;                                                 
+                  IF BT53000P.GR_EJERFH(I).GS_RES.BINDEFRYS ^= 0        
+                  THEN                                                  
+                     TV.TAB_EJER(IFR_VALG).ANT_IFR_POS =                
+                                  TV.TAB_EJER(IFR_VALG).ANT_IFR_POS + 1;
+                  ELSE                                                  
+                     TV.TAB_EJER(IFR_VALG).ANT_IFR_NUL =                
+                                  TV.TAB_EJER(IFR_VALG).ANT_IFR_NUL + 1;
+                  END;                                                  
+               END;                                                     
+                                                                        
+            /* Optæl Pensionistlån pr. Ejerforhold                    */
+            IF BEREGNET_PLÅN = 'N'                                      
+            THEN                                                        
+               TV.ANT_PLÅN_EJ_BER = TV.ANT_PLÅN_EJ_BER + 1;             
+            ELSE                                                        
+               IF BT53000P.GR_EJERFH(I).GS_RES.BPENSIONISTLÅN > 0       
+               THEN                                                     
+                  TV.ANT_PLÅN_POS = TV.ANT_PLÅN_POS + 1;                
+               ELSE                                                     
+                  IF BT53000P.CPLÅN_TILSAGN = 'J'                       
+                  THEN                                                  
+                     TV.ANT_PLÅN_NUL = TV.ANT_PLÅN_NUL + 1;             
+         END;                                                           
+                                                                        
+         /* Summer                                                    */
+         IF BT53000P.GS_RES_EJERREL.BINDEFRYS_EJERREL ^= 0              
+         THEN DO;                                                       
+            SUM.IFR_LÅN_ANT = SUM.IFR_LÅN_ANT + 1;                      
+            SUM.IFR_LÅN_BEL = SUM.IFR_LÅN_BEL +                         
+                        BT53000P.GS_RES_EJERREL.BINDEFRYS_EJERREL;      
+            END;                                                        
+                                                                        
+         IF BT53000P.GS_RES_EJERREL.BPENSIONISTLÅN_EJERREL ^= 0         
+         THEN DO;                                                       
+            SUM.PLÅN_ANT   = SUM.PLÅN_ANT + 1;                          
+            SUM.PLÅN_BEL   = SUM.PLÅN_BEL +                             
+                        BT53000P.GS_RES_EJERREL.BPENSIONISTLÅN_EJERREL; 
+            END;                                                        
+                                                                        
+ END DAN_OPTÆLLINGER;                                                   
+ /********************************************************************* 
+ *       SKRIV BS04100T - GS Resultat Ejerrelation                    * 
+ *********************************************************************/ 
+ SKRIV_GS_RES_EJERRELATION:   PROC;                                     
+                                                                        
+         /* BS04100T GS Resultat Ejerrelation.                        */
+         DCLBS04100T.DINDKAAR        = AKTUEL_DINDKAAR;                 
+         DCLBS04100T.PERSONNUMMER    = AKTUEL_PERSONNUMMER;             
+         DCLBS04100T.EKOMNR          = AKTUEL_EKOMNR;                   
+         DCLBS04100T.EEJDNR          = AKTUEL_EEJDNR;                   
+         DCLBS04100T.DFRAGLD         = OPRET_TIDSSTEMPEL;               
+         DCLBS04100T.DTILGLD         = '9999-12-31-23.59.59.999999';    
+                                                                        
+         DCLBS04100T.CINDEFRYS_VALG              = HJ_INDEFRYS_VALG;    
+         DCLBS04100T.DATO_CINDEFRYS_VALG         = HJ_INDEFRYS_DATO;    
+         DCLBS04100T.COPR_CINDEFRYS_VALG         =                      
+                                               HJ_COPR_CINDEFRYS_VALG;  
+         DCLBS04100T.GS_INDEFRYSBELØB_EJERREL    =                      
+                       BT53000P.GS_RES_EJERREL.BINDEFRYS_EJERREL;       
+         DCLBS04100T.GS_INDEFRYS_MIN_EJERREL     =                      
+                       BT53000P.GS_RES_EJERREL.BMINIMUM_EJERREL;        
+                                                                        
+         DCLBS04100T.CPLÅN_TILSAGN               = HJ_PLÅN_TILSAGN;     
+         DCLBS04100T.DATO_CPLÅN_TILSAGN          = HJ_PLÅN_DATO;        
+         DCLBS04100T.COPR_CPLÅN_TILSAGN          =                      
+                                                 HJ_COPR_CPLÅN_TILSAGN; 
+         DCLBS04100T.PENSIONISTLÅN_BELØB_EJERREL =                      
+                       BT53000P.GS_RES_EJERREL.BPENSIONISTLÅN_EJERREL;  
+                                                                        
+         DCLBS04100T.NETTO_GS_EJENDOM            =                      
+                       BT53000P.GS_RES_EJERREL.BNETTO_GS_EJENDOM;       
+         DCLBS04100T.OPRET_AF                    = WS_PROGRAMNAVN;      
+                                                                        
+         CALL INSERT_GS_RES_EJERRELATION;                               
+                                                                        
+ END SKRIV_GS_RES_EJERRELATION;                                         
+ /********************************************************************* 
+ *       SKRIV BS04200T - GS Resultat Ejerforhold                     * 
+ *********************************************************************/ 
+ SKRIV_GS_RES_EJERFORHOLD:    PROC;                                     
+                                                                        
+         DO J = 1 TO BT53000P.ANT_EJERFH;                               
+                                                                        
+            DCLBS04200T              = '';                              
+            DCLBS04200T.DINDKAAR     = AKTUEL_DINDKAAR;                 
+            DCLBS04200T.PERSONNUMMER = AKTUEL_PERSONNUMMER;             
+            DCLBS04200T.EKOMNR       = AKTUEL_EKOMNR;                   
+            DCLBS04200T.EEJDNR       = AKTUEL_EEJDNR;                   
+            DCLBS04200T.EPLBNR       = BT53000P.GR_EJERFH(J).EPLBNR;    
+            DCLBS04200T.DFRAGLD      = OPRET_TIDSSTEMPEL;               
+            DCLBS04200T.DTILGLD      = '9999-12-31-23.59.59.999999';    
+            DCLBS04200T.CICSID       = '';                              
+                                                                        
+            DCLBS04200T.GS_INDEFRYS_BELØB     =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS;        
+            BS042_SW.GS_INDEFRYS_SW           =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_SW;     
+            DCLBS04200T.GS_INDEFRYS_BELØB_NEG =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_NEG;    
+            DCLBS04200T.GS_INDEFRYS_BELØB_POT =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_POT;    
+            DCLBS04200T.GS_INDEFRYS_BELØB_MIN =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_MIN;    
+            BS042_SW.GS_INDEFRYS_MIN_SW       =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_MIN_SW; 
+            DCLBS04200T.NETTO_GS_EFT_INDEFRYS =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BNETTO_EFT_INDEFR;
+                                                                        
+            DCLBS04200T.PENSIONISTLÅNEBELØB   =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BPENSIONISTLÅN;   
+            BS042_SW.PENSIONISTLÅN_SW         =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BPENSIONISTLÅN_SW;
+            DCLBS04200T.NETTO_GS_EFT_PLÅN     =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BNETTO_EFT_PLÅN;  
+                                                                        
+            DCLBS04200T.NETTO_GS_EJERFORHOLD  =                         
+                         BT53000P.GR_EJERFH(J).GS_RES.BNETTO_GS_EJERFH; 
+                                                                        
+            DCLBS04200T.DFRAGLD_GSG           = AKTUEL_DFRAGLD;         
+            DCLBS04200T.OPRET_AF              = WS_PROGRAMNAVN;         
+                                                                        
+            CALL INSERT_GS_RES_EJERFORHOLD;                             
+         END;                                                           
+                                                                        
+ END SKRIV_GS_RES_EJERFORHOLD;                                          
+ /********************************************************************* 
+ *       OPTÆLLINGER                                                  * 
+ *********************************************************************/ 
+ DAN_OPTÆLLINGER_EVS_OG_GS:     PROC;                                   
+                                                                        
+         /* Optæl EVS uden match I GS                                 */
+         /* Kommunenummer 999 - Udenlandsk ejendom - optælles ikke    */
+         EXEC SQL SELECT COUNT(*)                                       
+                    INTO :HJ_ANTAL                                      
+                    FROM BS01600T BS016                                 
+                   WHERE BS016.DINDKAAR  = :WS_TIL_EVS_AAR              
+                     AND BS016.EKOMNR   ^= 999                          
+                     AND BS016.DTILGLD   = '9999-12-31-23.59.59.999999' 
+                     AND NOT EXISTS                                     
+                        (SELECT ''                                      
+                           FROM BS03600T BS036                          
+                          WHERE BS036.DINDKAAR     = BS016.DINDKAAR     
+                            AND BS036.PERSONNUMMER = BS016.PERSONNUMMER 
+                            AND BS036.EKOMNR       = BS016.EKOMNR       
+                            AND BS036.EEJDNR       = BS016.EEJDNR       
+                            AND BS036.DTILGLD      =                    
+                                         '9999-12-31-23.59.59.999999'); 
+                                                                        
+         IF SQLCODE = 0                                                 
+         THEN DO;                                                       
+            TV.ANT_EJ_MATCH_EVS_GS = HJ_ANTAL;                          
+            END;                                                        
+         ELSE                                                           
+            IF SQLCODE = 100                                            
+            THEN                                                        
+               TV.ANT_EJ_MATCH_EVS_GS = 0;                              
+            ELSE                                                        
+               IF SQLCODE < 0                                           
+               THEN DO;                                                 
+                  AKTUEL_PERSONNUMMER = 0;                              
+                  AKTUEL_EKOMNR       = 0;                              
+                  AKTUEL_EEJDNR       = 0;                              
+                                                                        
+                  ABENDTXT =                                            
+                           '101 FETCH ANTAL EVS U. MATCH GS  BS01600T'; 
+                  CALL SQL_FEJL;                                        
+                  END;                                                  
+                                                                        
+         /* Antal Indefrysningsvalg uden GS opl.                     */ 
+     /*   LAC 2023 ændret til opslag på BE64000T                        
+            EXEC SQL SELECT COUNT(*)                                    
+                    INTO :HJ_ANTAL                                      
+                    FROM BS04600T BS046                                 
+                   WHERE NOT EXISTS                                     
+                        (SELECT ''                                      
+                           FROM BS03600T BS036                          
+                          WHERE BS036.DINDKAAR     = :WS_TIL_EVS_AAR    
+                            AND BS036.PERSONNUMMER = BS046.PERSONNUMMER 
+                            AND BS036.EKOMNR       = BS046.EKOMNR       
+                            AND BS036.EEJDNR       = BS046.EEJDNR       
+                            AND BS036.DTILGLD                           
+                                      = '9999-12-31-23.59.59.999999');  
+                           */                                           
+           EXEC SQL SELECT COUNT(*)                                     
+                 INTO :HJ_ANTAL                                         
+                 FROM BE64000T BE640                                    
+                 WHERE BE640.TIL_EVS_AAR    = :WS_FORRIGE_EVS_AAR       
+                  AND  BE640.AFVIKLINGS_ID  = :WS_FORSKUD_SLUT_TXT      
+                  AND  BE640.CINDEFRYS_VALG = '1'                       
+                  AND NOT EXISTS                                        
+                        (SELECT ''                                      
+                           FROM BS03600T BS036                          
+                          WHERE BS036.DINDKAAR     = :WS_TIL_EVS_AAR    
+                            AND BS036.PERSONNUMMER = BE640.DCPRN        
+                            AND BS036.EKOMNR       = BE640.EKOMNR       
+                            AND BS036.EEJDNR       = BE640.EEJDNR       
+                            AND BS036.DTILGLD                           
+                                      = '9999-12-31-23.59.59.999999');  
+                                                                        
+                                                                        
+         IF SQLCODE = 0                                                 
+         THEN                                                           
+            TV.LÆST_IFR_VALG_U_GS = HJ_ANTAL;                           
+         ELSE                                                           
+            IF SQLCODE = 100                                            
+            THEN                                                        
+               TV.LÆST_IFR_VALG_U_GS = 0;                               
+            ELSE                                                        
+               IF SQLCODE < 0                                           
+               THEN DO;                                                 
+                  AKTUEL_PERSONNUMMER = 0;                              
+                  AKTUEL_EKOMNR       = 0;                              
+                  AKTUEL_EEJDNR       = 0;                              
+                                                                        
+                  ABENDTXT =                                            
+                           '101 FETCH ANTAL IFR.VALG UDEN GS BS04600T'; 
+                  CALL SQL_FEJL;                                        
+                  END;                                                  
+                                                                        
+ END DAN_OPTÆLLINGER_EVS_OG_GS;                                         
+ /********************************************************************* 
+ *       SKRIV FEJLNUMRE TIL BN04000T PR. PERSON                      * 
+ *********************************************************************/ 
+ SKRIV_TIL_BN04000T:     PROC(INP_FEJL);                                
+ DCL     INP_FEJL        BIN FIXED (15);                                
+                                                                        
+         BE8561.INDKOMSTÅR  = WS_TIL_EVS_AAR;                           
+         BE8561.DCPRN       = AKTUEL_PERSONNUMMER;                      
+         BE8561.FEJLNR      = INP_FEJL;                                 
+         IF ADVIS_OK(BE8561.FEJLNR)                                     
+         THEN                                                           
+            BE8561.FTYPE = 'A';                                         
+         ELSE                                                           
+            BE8561.FTYPE = 'B';                                         
+         WRITE FILE (BE8561O) FROM (BE8561);                            
+                                                                        
+         TV.SKRFEJL = TV.SKRFEJL + 1;                                   
+                                                                        
+ END SKRIV_TIL_BN04000T;                                                
+ /********************************************************************* 
+ *                       TOTALER UDSKRIVES.                           * 
+ *********************************************************************/ 
+ TOTALLISTE: PROC;                                                      
+                                                                        
+         CALL ZZ20300(SIDELIN,'01');                                    
+         CALL ZZ20300(OVERLIN1,'01');                                   
+         CALL ZZ20300(OVERLIN2,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_GSGR_EJERREL;                          
+         DETLIN1.TEKST =                                                
+                   'ANTAL LÆSTE GS GRUNDLAG EJERRELATION     BS03600T'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_GSGR_EJERFH;                           
+         DETLIN1.TEKST =                                                
+                   'ANTAL LÆSTE GS GRUNDLAG EJERFORHOLD      BS03600T'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 1 TO ANT_FEJLKODE;                                  
+                                                                        
+            DETLIN1.CCA   = ZZWS1;                                      
+            DETLIN1.TEKST = '     HERAF MED FEJLKODE: ' !!              
+                            FEJLKODE(INDEX).KODE;                       
+            DETLIN1.ANTAL = FEJLKODE(INDEX).ANTAL;                      
+            CALL ZZ20300 (DETLIN1,'01');                                
+         END;                                                           
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_IFR_VALG_JA;                           
+         DETLIN1.TEKST =                                                
+                    'ANTAL INDEFRYSNINGSVALG JA               BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_IFR_VALG_NEJ;                          
+         DETLIN1.TEKST =                                                
+                    'ANTAL INDEFRYSNINGSVALG NEJ              BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_IFR_VALG_UKENDT;                       
+         DETLIN1.TEKST =                                                
+                    'ANTAL INDEFRYSNINGSVALG UKENDT           BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_IFR_VALG_UKENDT;                       
+         DETLIN1.TEKST =                                                
+                    'FOR INDEFRYSNINGSVALG UKENDT             BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_PL_BEVILG_JA;                          
+         DETLIN1.TEKST =                                                
+                    'ANTAL PENSIONISTLÅN BEVILG JA            BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_PL_BEVILG_NEJ;                         
+         DETLIN1.TEKST =                                                
+                    'ANTAL PENSIONISTLÅN BEVILG NEJ           BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_PL_BEVILG_UKENDT;                      
+         DETLIN1.TEKST =                                                
+                    'ANTAL PENSIONISTLÅN BEVILG UKENDT        BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_EJ_FUNDET_ESR;                          
+         DETLIN1.TEKST =                                                
+                    ' ANTAL IKKE FUNDET I ESR                 BE65000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_BEBYGGET;                               
+         DETLIN1.TEKST =                                                
+                    ' ANTAL BEBYGGET                          BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_EJ_BEBYGGET;                            
+         DETLIN1.TEKST =                                                
+                    ' ANTAL IKKE BEBYGGET                     BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_IFR_VALG_U_GS;                         
+         DETLIN1.TEKST =                                                
+                    'ANTAL INDEFRYSNINGSVALG UDEN GS          BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.PLÅN_JA;                                    
+         DETLIN1.TEKST =                                                
+                    'ANTAL PENSIONISTLÅN TILSAGN JA           BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.PLÅN_NEJ;                                   
+         DETLIN1.TEKST =                                                
+                    'ANTAL PENSIONISTLÅN TILSAGN NEJ          BE64000T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_GSGR_SAMLÅR;                           
+         DETLIN1.TEKST =                                                
+                    'ANTAL LÆSTE SAMMENLIGNINGSÅR             BS04400T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_GSGR_GSEJENDOM;                        
+         DETLIN1.TEKST =                                                
+                    'ANTAL LÆSTE GRUNDSKYLD EJENDOM           BS04300T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = 0;                                             
+         DETLIN1.TEKST =                                                
+                    'FRA BEREGNING INDEFRYSNINGSLÅN:          BT53000 ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.FEJLKODE;                                   
+         DETLIN1.TEKST =                                                
+                    ' ANTAL FEJLKODE FRA E&E                  BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.SAMLÅR_MGL;                                 
+         DETLIN1.TEKST =                                                
+                    ' ANTAL HVOR SAMMENLIGNINGSÅR MANGLER     BS04400T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.EJD_EFT2024;                                
+         DETLIN1.TEKST =                                                
+                    ' INGEN IFR - IKKE EJET FØR 1/1 2024      BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.EJD_AFHÆNDET;                               
+         DETLIN1.TEKST =                                                
+                    ' INGEN IFR - EJENDOM AFHÆNDET I ÅRET     BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_BER_EJERFH;                             
+         DETLIN1.TEKST =                                                
+                    ' RESULTAT FOR EJERFORHOLD:               BT53000 ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         /* Indefrysningsvalg: 1 = J, 2 = N, 3 = Ukendt               */
+         DO I = 1 TO 3;                                                 
+                                                                        
+            SELECT (I);                                                 
+               WHEN(1) DO;                                              
+                  DETLIN1.ANTAL = HJ_ANT_FH_JA;                         
+                  DETLIN1.TEKST =                                       
+                    '  INDEFRYSNINGSVALG JA    :              BS04200T';
+                  END;                                                  
+               WHEN(2) DO;                                              
+                  DETLIN1.ANTAL = HJ_ANT_FH_NEJ;                        
+                  DETLIN1.TEKST =                                       
+                    '  INDEFRYSNINGSVALG NEJ   :              BS04200T';
+                  END;                                                  
+               WHEN(3) DO;                                              
+                  DETLIN1.ANTAL = HJ_ANT_FH_UKENDT;                     
+                  DETLIN1.TEKST =                                       
+                    '  INDEFRYSNINGSVALG UKENDT:              BS04200T';
+                  END;                                                  
+               OTHERWISE;                                               
+            END;                                                        
+            DETLIN1.CCA   = ZZWS1;                                      
+            CALL ZZ20300 (DETLIN1,'01');                                
+                                                                        
+            DETLIN1.CCA   = ZZWS1;                                      
+            DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_EJ_BER;                  
+            DETLIN1.TEKST =                                             
+                 '   ANTAL IKKE BEREGNET                   BS04200T';   
+            CALL ZZ20300 (DETLIN1,'01');                                
+                                                                        
+            IF I = 1 /* Indefrysningsvalg = JA  */                      
+            THEN DO;                                                    
+               DETLIN1.CCA   = ZZWS1;                                   
+               DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_POS;              
+               DETLIN1.TEKST =                                          
+                 '   ANTAL MED INDEFRYSNING > 0            BS04200T';   
+               CALL ZZ20300 (DETLIN1,'01');                             
+                                                                        
+               DETLIN1.CCA   = ZZWS1;                                   
+               DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_NUL;              
+               DETLIN1.TEKST =                                          
+                 '   ANTAL MED INDEFRYSNING = 0            BS04200T';   
+               CALL ZZ20300 (DETLIN1,'01');                             
+               END;                                                     
+            ELSE DO;  /* Indefrysningsvalg = NEJ/UKENDT */              
+               DETLIN1.CCA   = ZZWS1;                                   
+               DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_POT;              
+               DETLIN1.TEKST =                                          
+                 '   ANTAL MED INDEFRYSNING POTENTIELT > 0 BS04200T';   
+               CALL ZZ20300 (DETLIN1,'01');                             
+                                                                        
+               DETLIN1.CCA   = ZZWS1;                                   
+               DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_POT_NUL;          
+               DETLIN1.TEKST =                                          
+                 '   ANTAL MED INDEFRYSNING POTENTIELT = 0 BS04200T';   
+               CALL ZZ20300 (DETLIN1,'01');                             
+               END;                                                     
+                                                                        
+            DETLIN1.CCA   = ZZWS1;                                      
+            DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_NEG;                 
+            DETLIN1.TEKST =                                             
+                 '   ANTAL MED INDEFRYSNING NEGATIVT RES.  BS04200T';   
+            CALL ZZ20300 (DETLIN1,'01');                                
+                                                                        
+            DETLIN1.CCA   = ZZWS1;                                      
+            DETLIN1.ANTAL = TV.TAB_EJER(I).ANT_IFR_MIN;                 
+            DETLIN1.TEKST =                                             
+                 '   ANTAL MED INDEFRYSNING UNDER MINIMUM  BS04200T';   
+            CALL ZZ20300 (DETLIN1,'01');                                
+         END;                                                           
+                                                                        
+         /* Indefrysningsvalg ukendt                                  */
+      /* DETLIN1.ANTAL = HJ_ANT_FH_UKENDT;                              
+         DETLIN1.TEKST =                                                
+                    '  INDEFRYSNINGSVALG UKENDT:              BS04200T';
+         DETLIN1.CCA   = ZZWS1;                                         
+         CALL ZZ20300 (DETLIN1,'01'); */                                
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = 0;                                             
+         DETLIN1.TEKST =                                                
+                    'FRA BEREGNING PENSIONISTLÅN:             BT53000'; 
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.EJDP_AFHÆNDET;                              
+         DETLIN1.TEKST =                                                
+                    ' INGEN PLÅN - EJENDOM AFHÆNDET I ÅRET    BS03600T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.EJDP_FEJL_IFR;                              
+         DETLIN1.TEKST =                                                
+                    ' INGEN PLÅN - FEJL FRA INDEFRYSNINGSLÅN  BS04200T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_PLÅN_POS;                               
+         DETLIN1.TEKST =                                                
+                    ' EJERFORHOLD MED PENSIONISTLÅN  > 0      BS04200T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_PLÅN_NUL;                               
+         DETLIN1.TEKST =                                                
+                    ' EJERFORHOLD MED PENSIONISTLÅN  = 0      BS04200T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.LÆST_GSGR_EJERREL;                          
+         DETLIN1.TEKST =                                                
+                    'RESULTAT FOR EJERRELATIONER:             BS04100T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN3.CCA   = ZZWS1;                                         
+         DETLIN3.ANTAL = SUM.IFR_LÅN_ANT;                               
+         DETLIN3.BELØB = SUM.IFR_LÅN_BEL;                               
+         DETLIN3.TEKST =                                                
+                    ' DER ER YDET INDEFRYSNINGSLÅN FOR           ANTAL';
+         CALL ZZ20300 (DETLIN3,'01');                                   
+                                                                        
+         DETLIN3.CCA   = ZZWS1;                                         
+         DETLIN3.ANTAL = SUM.PLÅN_ANT;                                  
+         DETLIN3.BELØB = SUM.PLÅN_BEL;                                  
+         DETLIN3.TEKST =                                                
+                    ' DER ER YDET PENSIONISTLÅN FOR              ANTAL';
+         CALL ZZ20300 (DETLIN3,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = 0;                                             
+         DETLIN1.TEKST =                                                
+                    'OPTÆLLINGER VEDRØRENDE MATCH:                    ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = 0;                                             
+         DETLIN1.TEKST =                                                
+                    '                (EJERRELATION BS03600T/BS01600T) ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_MATCH_GS_EVS;                           
+         DETLIN1.TEKST =                                                
+                    ' ANTAL MATCH GS MED EVS                          ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_EJ_MATCH_GS_EVS;                        
+         DETLIN1.TEKST =                                                
+                    ' ANTAL INGEN MATCH GS MED EVS                    ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_MATCH_EVS_GS_REL;                       
+         DETLIN1.TEKST =                                                
+                    ' ANTAL MATCH EVS MED GS                          ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = ANT_MATCH_EVS_GS_OV0;                          
+         DETLIN1.TEKST =                                                
+                    '    MED EVS ENHEDER > 1                          ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.ANT_EJ_MATCH_EVS_GS;                        
+         DETLIN1.TEKST =                                                
+                    ' ANTAL EVS HVOR EJ MATCH MED GS                  ';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.SKRIV_GSRES_EJERRL;                         
+         DETLIN1.TEKST =                                                
+                    'ANTAL SKREVET GS RESULTAT EJERRELATION   BS04100T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.SKRIV_GSRES_EJERFH;                         
+         DETLIN1.TEKST =                                                
+                    'ANTAL SKREVET GS RESULTAT EJERFORHOLD    BS04200T';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DETLIN1.CCA   = ZZWS1;                                         
+         DETLIN1.ANTAL = TV.SKRFEJL;                                    
+         DETLIN1.TEKST =                                                
+                    'ANTAL SKREVET TIL FEJLDATASÆT            BE85610O';
+         CALL ZZ20300 (DETLIN1,'01');                                   
+                                                                        
+         DO INDEX = 5000 TO 6000;                                       
+                                                                        
+            IF SKR_FEJLNR(INDEX).ANTAL > 0                              
+            THEN DO;                                                    
+               DETLIN1.CCA   = ZZWS1;                                   
+               HJ_PIC4       = INDEX;                                   
+               DETLIN1.TEKST = '      HERAF MED FEJLNR. ' !! HJ_CHAR4;  
+               DETLIN1.ANTAL = SKR_FEJLNR(INDEX).ANTAL;                 
+               CALL ZZ20300 (DETLIN1,'01');                             
+               END;                                                     
+         END;                                                           
+                                                                        
+ END TOTALLISTE;                                                        
+ /*********************************************************************/
+ /* TEST - PUT SKIP                                                   */
+ /*********************************************************************/
+ TEST_UDSKRIV: PROC(FUNKTION);                                          
+ DCL     FUNKTION        CHAR      (10);                                
+                                                                        
+       /* IF  (AKTUEL_PERSONNUMMER  = xxxxxxxxxx                        
+           &   AKTUEL_EKOMNR        = yyy                               
+           &   AKTUEL_EEJDNR        = zzz)                              
+          THEN;                                                         
+          ELSE */                                                       
+             RETURN;                                                    
+                                                                        
+         SELECT(FUNKTION);                                              
+           WHEN('EJENDOMST') DO;                                        
+              PUT SKIP EDIT('************ Start ','*************')      
+                           (A,A);                                       
+              PUT SKIP EDIT('Ejendom: År: ',                            
+                             DCLBS03600T.DINDKAAR,' Pnr.: ',            
+                             DCLBS03600T.PERSONNUMMER,' Komnr: ',       
+                             DCLBS03600T.EKOMNR,' Ejd.: ',              
+                             DCLBS03600T.EEJDNR)                        
+                           (A,P'9999',A,P'9999999999',A,P'Z999',A,      
+                            P'ZZ9999');                                 
+              END;                                                      
+           WHEN('EJENDOMSL') DO;                                        
+              PUT SKIP EDIT('************ Slut  ','*************')      
+                           (A,A);                                       
+              PUT SKIP LIST(' ');                                       
+              END;                                                      
+           WHEN('BEREGNIND') DO;                                        
+              PUT SKIP EDIT(' Beregn Indefrysning : Valg: ',            
+                              BT53000P.CINDEFRYS_VALG,' P.Lån: ',       
+                              BT53000P.CPLÅN_TILSAGN,' Saml.år: ',      
+                              BT53000P.AKTSAMLIGNAAR,' Grundskyld: ',   
+                              BT53000P.GRUNDSKYLDEJENDOM )              
+                           (A,A,A,A,A,P'9999',A,P'---.---.---.--9V,99');
+                                                                        
+              DO J = 1 TO BT53000P.ANT_EJERFH;                          
+                                                                        
+                PUT SKIP EDIT('  Ejerforhold: ',                        
+                            BT53000P.GR_EJERFH(J).EPLBNR,'    Fejlkd: ',
+                            BT53000P.GR_EJERFH(J).FEJLKODE_SW,          
+                            ' Periode: ',                               
+                            BT53000P.GR_EJERFH(J).EP_EJERSTARTDATO,' ', 
+                            BT53000P.GR_EJERFH(J).EP_EJERSLUTDATO,' ',  
+                            BT53000P.GR_EJERFH(J).EP_ANTALDAGE,' ',     
+                            BT53000P.GR_EJERFH(J).EGS_OPKRPSKAT3112)    
+                           (A,P'999',A,P'-9',A,P'99999999',A,           
+                            P'99999999',A,P'999',A,A);                  
+                PUT SKIP EDIT('  Ejerandel  : ',                        
+                            BT53000P.GR_EJERFH(J).EJERANDEL,'     GS: ',
+                            BT53000P.GR_EJERFH(J).EGS_BELØBEFTERRABAT)  
+                           (A,P'9V,9999',A,P'---.---.---.--9V,99');     
+              END;                                                      
+              END;                                                      
+           WHEN('BEREGNUD') DO;                                         
+              PUT SKIP EDIT(' Resultat fra Beregning: ') (A);           
+              PUT SKIP EDIT('   Returkode              : ',             
+                                BT53000P.RETUR.KODE,' ',                
+                                SUBSTR(BT53000P.RETUR.TEKST,1,30))      
+                           (A,P'----9',A,A);                            
+              PUT SKIP EDIT('   Kontrol                : ',             
+                                BT53000P.KONTROL.FEJLNR,' IFR: ',       
+                                BT53000P.KONTROL.ÅRSAG_IFR,' PLÅN: ',   
+                                BT53000P.KONTROL.ÅRSAG_PLÅN)            
+                           (A,P'----9',A,A,A,A);                        
+                                                                        
+              DO J = 1 TO BT53000P.ANT_EJERFH;                          
+                 PUT SKIP EDIT ('   Resultat for P.lbnr: ',             
+                                    BT53000P.GR_EJERFH(J).EPLBNR)       
+                               (A,P'999');                              
+                                                                        
+                 PUT SKIP EDIT('    GS_INDEFRYS_BELØB      : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS,' ',          
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_SW)           
+                  (A,P'---.---.---.--9V,99',A,P'-9');                   
+                 PUT SKIP EDIT('    GS_INDEFRYS_BELØB_NEG  : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_NEG)          
+                  (A,P'---.---.---.--9V,99');                           
+                 PUT SKIP EDIT('    GS_INDEFRYS_BELØB_POT  : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_POT)          
+                  (A,P'---.---.---.--9V,99');                           
+                 PUT SKIP EDIT('    GS_INDEFRYS_BELØB_MIN  : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_MIN,' ',      
+                   BT53000P.GR_EJERFH(J).GS_RES.BINDEFRYS_MIN_SW)       
+                  (A,P'---.---.---.--9V,99',A,P'-9');                   
+                 PUT SKIP EDIT('    NETTO_GS_EFT_INDEFRYS  : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BNETTO_EFT_INDEFR)      
+                  (A,P'---.---.---.--9V,99');                           
+                 PUT SKIP EDIT('    PENSIONISTLÅNEBELØB    : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BPENSIONISTLÅN,' ',     
+                   BT53000P.GR_EJERFH(J).GS_RES.BPENSIONISTLÅN_SW)      
+                  (A,P'---.---.---.--9V,99',A,P'-9');                   
+                 PUT SKIP EDIT('    NETTO_GS_EFT_PLÅN      : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BNETTO_EFT_PLÅN)        
+                  (A,P'---.---.---.--9V,99');                           
+                 PUT SKIP EDIT('    NETTO_GS_EJERFORHOLD   : ',         
+                   BT53000P.GR_EJERFH(J).GS_RES.BNETTO_GS_EJERFH)       
+                  (A,P'---.---.---.--9V,99');                           
+              END;                                                      
+                                                                        
+              PUT SKIP EDIT('   Sum til Ejerrelation: Indefrys: ',      
+                   BT53000P.GS_RES_EJERREL.BINDEFRYS_EJERREL,' P.LÅN: ',
+                   BT53000P.GS_RES_EJERREL.BPENSIONISTLÅN_EJERREL)      
+                   (A,P'---.---.---.--9V,99',A,P'---.---.---.--9V,99'); 
+              PUT SKIP EDIT('   Sum til Ejerrelation: Minimum : ',      
+                            BT53000P.GS_RES_EJERREL.BMINIMUM_EJERREL)   
+                           (A,P'---.---.---.--9V,99');                  
+              PUT SKIP EDIT('   Sum til Ejerrelation: Netto GS: ',      
+                            BT53000P.GS_RES_EJERREL.BNETTO_GS_EJENDOM)  
+                           (A,P'---.---.---.--9V,99');                  
+              END;                                                      
+           OTHERWISE;                                                   
+         END;                                                           
+                                                                        
+ END TEST_UDSKRIV;                                                      
+ /*********************************************************************/
+ /*      TERMINER LISTE                                               */
+ /*********************************************************************/
+ TERMINER_LISTE:  PROCEDURE (TEKST);                                    
+ DCL     TEKST            CHAR      (45);                               
+                                               /* Medd. til termine-  */
+ DCL     1 MEDDELELSE     STATIC,              /* ringslisten         */
+           3 MODULNAVN    CHAR      (07)    INIT ('BE85600'),           
+           3 FILLER1      CHAR      (01)    INIT (' '),                 
+           3 MEDDNR       PIC       '999'   INIT (6),                   
+           3 DATA         CHAR      (45)    INIT (' ');                 
+ DCL     MEDDELELSEN      CHAR      (56)    DEF MEDDELELSE;             
+                                                                        
+         MEDDELELSE.MEDDNR = MEDDELELSE.MEDDNR + 1;                     
+         MEDDELELSE.DATA   = TEKST;                                     
+                                                                        
+         CALL ZS30101 (2,                                               
+                       MEDDELELSEN,                                     
+                       2);                                              
+                                                                        
+ END TERMINER_LISTE;                                                    
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC;                                                        
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED SQLCODE: ' !! SQLCA.SQLCODE);  
+         PUT SKIP LIST ('ABENDTXT:                ' !! ABENDTXT);       
+         PUT SKIP LIST ('PERSON  :               ' !!                   
+                                            AKTUEL_PERSONNUMMER);       
+         PUT SKIP LIST ('KOMMUNE :               ' !!                   
+                                            AKTUEL_EKOMNR);             
+         PUT SKIP LIST ('EJENDOM :               ' !!                   
+                                            AKTUEL_EEJDNR);             
+         PUT SKIP LIST ('*****************************************');   
+                                                                        
+         CALL ZS67000(SQLCA);                                           
+                                                                        
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* HER UDSKRIVES ØVRIGE FEJL                                  RUTINE */
+ /*********************************************************************/
+ PROGRAM_FEJL: PROC;                                                    
+                                                                        
+         PUT SKIP LIST ('*****************************************');   
+         PUT SKIP LIST ('DER ABENDES MED PROGRAMFEJL');                 
+         PUT SKIP LIST ('ABENDTXT:               ' !! ABENDTXT);        
+         PUT SKIP LIST ('PERSON  :               ' !!                   
+                                            AKTUEL_PERSONNUMMER);       
+         PUT SKIP LIST ('KOMMUNE :               ' !!                   
+                                            AKTUEL_EKOMNR);             
+         PUT SKIP LIST ('EJENDOM :               ' !!                   
+                                            AKTUEL_EEJDNR);             
+         PUT SKIP LIST ('*****************************************');   
+         CALL ZS30101(ABENDKODE,ABENDMEDD,ABENDRTKODE);                 
+                                                                        
+ END PROGRAM_FEJL;                                                      
+ /********************************************************************* 
+ *       AFSLUT PROGRAM                                               * 
+ *********************************************************************/ 
+ AFSLUT:                                                                
+         PROC;                                                          
+                                                                        
+         CALL TOTALLISTE;                                               
+         CALL ZZ20300((133)' ','99');                                   
+                                                                        
+ END AFSLUT;                                                            
+          %INCLUDE BE85601M; /* Indlæsning/Opdatering af data         */
+                             /* OPEN_GS_EJERFORHOLD         (BS03600T)*/
+                             /* FETCH_GS_EJERFORHOLD        (BS03600T)*/
+                             /* CLOSE_GS_EJERFORHOLD        (BS03600T)*/
+                             /* SELECT_GS_SAMMENLIGNINGSÅR  (BS04400T)*/
+                             /*                             (BS04300T)*/
+                             /* SELECT_INDEFRYSNINGSVALG    (BS04600T)*/
+                             /* INSERT_GS_RES_EJERRELATION  (BS04100T)*/
+                             /* INSERT_GS_RES_EJERFORHOLD   (BS04200T)*/
+                             /* SELECT_GS_OPLYSNINGER       (BE64000T)*/
+          %INCLUDE BE95100M; /* ADVIS_OK                              */
+                             /* Tjek om Fejlnummer er et advis        */
+                                                                        
+ END  BE85600;                                                          

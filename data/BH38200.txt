@@ -1,0 +1,622 @@
+ BH38200: PROCEDURE OPTIONS (MAIN);                                     
+ /**********************************************************************
+ * PROJEKT:     EVS SLUT 2013                                         **
+ * PROGRAMNAVN: BH38200.                                               *
+ * PROGRAMTYPE: BATCH.                                                 *
+ * FUNKTION:    OPSÆTNING AF FELT 758 I EVS FORSKUD NÅR DET IKKE FINDES*
+ * INDDATA:     BQ30000T/BQ31000T - EVS PERSONTABEL.                   *
+ *              BN00600T          - EVS PERSON EJERSKAB FORSKUD        *
+ *              BG41100T          - LIGNINGSSYSTEM                     *
+ * UDDATA:      BN00600T          - EVS PERSON EJERSKAB FORSKUD        *
+ *              BH38201Y          - KONTROLLISTE.                      *
+ * KONSTRUKTØR: JØRGEN SAUGMANN  SAU,         PKF BALLERUP 13.11.2014. *
+ **********************************************************************/
+                                                                        
+ DEFAULT RANGE (*) STATIC; /* LAGERTYPE AHT. KALD AF EKSTERNE MODULER */
+                                                                        
+ DCL     COPYRIGHT      CHAR (30) INIT ('(C) KMD A/S 2006');            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DB2                                                    */
+ /*********************************************************************/
+                                                                        
+ EXEC SQL INCLUDE SQLCA;        /* SQL KOMMUNIKATIONSAREAL            */
+ EXEC SQL INCLUDE BN00600T;                                             
+ EXEC SQL INCLUDE BQ31000T;                                             
+ DCL  AARSTAL                FIXED BIN(15)    INIT(0);                  
+ DCL 1 BQ31000N,                                                        
+ %INCLUDE BQ31000N;;                                                    
+                                                                        
+ DCL  HJ_DINDKAAR     BIN FIXED(15)      INIT(0);                       
+ DCL  HJ_EKOMNR       BIN FIXED(15)      INIT(0);                       
+ DCL  HJ_EEJDNR       BIN FIXED(31)      INIT(0);                       
+ DCL  HJ_PERSONNUMMER DEC FIXED(11,0)    INIT(0);                       
+ DCL  HJ_ELBNR        BIN FIXED(15)      INIT(0);                       
+                                                                        
+ EXEC SQL DECLARE CUR1 CURSOR FOR                                       
+ SELECT T1.PERSONNUMMER, T1.ELBNR, T1.DINDKAAR, T1.EKOMNR, T1.EEJDNR    
+   FROM  BN00600T T1                                                    
+   WHERE T1.DINDKAAR = :AARSTAL                                         
+     AND T1.ELBNR    = (SELECT MAX(ELBNR)                               
+                          FROM BN00600T T2                              
+                          WHERE T2.DINDKAAR     = T1.DINDKAAR           
+                            AND T2.PERSONNUMMER = T1.PERSONNUMMER       
+                            AND T2.EKOMNR       = T1.EKOMNR             
+                            AND T2.EEJDNR       = T1.EEJDNR)            
+     AND (T1.CTYPSLUT = ' ' OR T1.CTYPSLUT = '0')                       
+ WITH UR;                                                               
+                                                                        
+ /**********************************************************************
+ * DECLARE AF ABEND RUTINE                                             *
+ **********************************************************************/
+                                                                        
+ DCL ZS30101        ENTRY;                                              
+ DCL ZS67000        ENTRY;                                              
+ DCL ZS61900        ENTRY;                        /* KST/SSI INFO */    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF DIVERSE                                                */
+ /*********************************************************************/
+ DCL JA                  BIT(1)           INIT('1'B);                   
+ DCL NEJ                 BIT(1)           INIT('0'B);                   
+ DCL CUR_EOF             BIT(1)           INIT('0'B);                   
+ DCL FORTSÆT             BIT(1)           INIT('1'B);                   
+ DCL PULS_COUNT          FIXED DEC(11,0)  INIT(0);                      
+ DCL PARM_EOF            BIT(1)           INIT('0'B);                   
+ DCL OPDAT_SW            BIT(1)           INIT('0'B);                   
+ DCL KONTROL_SW          BIT(1)           INIT('0'B);                   
+                                                                        
+ DCL FEJLTEKST           CHAR (20)        INIT(' ');                    
+ DCL ABENDMEDD           CHAR (56)        INIT(' ');                    
+                                                                        
+ DCL DINDKAAR_UD         PIC '(4)9'       INIT(0);                      
+ DCL EKOMNR_UD           PIC 'ZZZ9'       INIT(0);                      
+ DCL EEJDNR_UD           PIC 'ZZZZZZ9'    INIT(0);                      
+ DCL PERSONNUMMER_UD     PIC '(10)9'      INIT(0);                      
+ DCL ELBNR_UD            PIC 'ZZ9'        INIT(0);                      
+ DCL TALLER              FIXED BIN(15,0)  INIT(0);                      
+ DCL PUTSKIP             BIT(1)           INIT('0'B);                   
+ DCL TAL_SLUT            FIXED DEC(11,0)  INIT(0);                      
+ DCL TAL_FORSKUDS        FIXED DEC(11,0)  INIT(0);                      
+ DCL TAL_FORSKUDF        FIXED DEC(11,0)  INIT(0);                      
+ DCL TAL_SYSFEJL         FIXED DEC(11,0)  INIT(0);                      
+                                                                        
+ /*********************************************************************/
+ /*      DECLARE AF PARAMETER                                         */
+ /*********************************************************************/
+ DCL     IPARM    FILE  RECORD  INPUT;                                  
+ DCL     1 PARMI,                                                       
+          2 KØRSW    CHAR(1),                                           
+          2 ÅRSTAL   PIC '9999',                                        
+          2 FILLER   CHAR(75);                                          
+                                                                        
+ /*********************************************************************/
+ /* DECLARE DATASÆT                                                   */
+ /*********************************************************************/
+ DCL     SYSPRINT FILE STREAM PRINT;                                    
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF BUILTIN                                                */
+ /*********************************************************************/
+ DCL     (ADDR,DATETIME,VERIFY,NULL,MOD,SUBSTR,PLIDUMP,DEC,             
+          PROCNAME) BUILTIN;                                            
+                                                                        
+ /*********************************************************************/
+ /* DECLARE AF TÆLLERE                                                */
+ /*********************************************************************/
+ DCL   ANTLÆS            FIXED DEC(11,0) INIT(0);/* LÆSTE RÆKKER      */
+ DCL   ANTOPDAT          FIXED DEC(11,0) INIT(0);/* OPDATEREDE RÆKKER */
+ /*********************************************************************/
+ /* PRINTLINIER TIL SPOOL                                             */
+ /*********************************************************************/
+ DCL     LINIE           CHAR (133);                                    
+ DCL     1 LIN1          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR (1),                                      
+           2 TEKST       CHAR (56),                                     
+           2 ANT         PIC  '---------9',                             
+           2 FIL1        CHAR (66);                                     
+ DCL     1 LIN2          BASED(ADDR(LINIE)),                            
+           2 CC          CHAR(1),                                       
+           2 CPRNR       CHAR(10),                                      
+           2 FIL1        CHAR(5),                                       
+           2 KOMNR       CHAR(4),                                       
+           2 FIL2        CHAR(5),                                       
+           2 EEJDNR      CHAR(7),                                       
+           2 FIL3        CHAR(5),                                       
+           2 ELBNR       CHAR(3),                                       
+           2 FIL4        CHAR(5),                                       
+           2 TEXT        CHAR(88);                                      
+                                                                        
+ %INCLUDE ZZ20301M;                          /* PRINT STYREKARAKTERER */
+                                                                        
+ /*********************************************************************/
+ /* ON - CONDITIONS                                                   */
+ /*********************************************************************/
+    ON ENDFILE (IPARM)                                                  
+       PARM_EOF = '1'B;                                                 
+    ON ERROR                                                            
+       BEGIN;                                                           
+          ON ERROR SYSTEM;                                              
+          PUT SKIP LIST ('PROGRAMFEJL');                                
+          CALL PLIDUMP  ('SBHO','MODUL BH38200');                       
+       END;                                                             
+                                                                        
+ /*********************************************************************/
+ /* HOUSEKEEPING                                                      */
+ /*********************************************************************/
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('***** START BH38200 *****');         
+    CALL SKAF_PARM();                                                   
+    IF FORTSÆT THEN DO;                                                 
+       CALL ZZ20390('*OPEN','BH38201Y');       /* ÅBEN KONTROLLISTE */  
+       LINIE = ZZWS3 !! ' KONTROL- & AFSTEMNINGSTOTAL FOR'              
+                     !! ' OPDATERING AF BQ31000T    ' !! 'DATO: '       
+                     !!   DATETIME('YYYY-MM-DD');                       
+       CALL ZZ20300(LINIE,'01');                                        
+       LINIE = ZZWS3 !! ' PROGRAMID: BH38200 ';                         
+       CALL ZZ20300(LINIE,'01');                                        
+       CALL ZS61900;                              /* KST/SSI INFO   */  
+                                                                        
+ /*********************************************************************/
+ /* PROCES                                                            */
+ /*********************************************************************/
+       CALL OPEN_CURSOR();                                              
+       CALL FETCH_CURSOR();                                             
+       DO WHILE(FORTSÆT & ^CUR_EOF);                                    
+          CALL DAN_KODE();                                              
+          IF FORTSÆT THEN                                               
+             CALL OPDATER_BN00600T;                                     
+          IF FORTSÆT THEN                                               
+             CALL FETCH_CURSOR();                                       
+       END;                                                             
+       CALL CLOSE_CURSOR;                                               
+       IF OPDAT_SW THEN                                                 
+          EXEC SQL COMMIT;                                              
+       LINIE = '';                                                      
+       CALL AFSLUT();                                                   
+    END;                                                                
+    IF PUTSKIP THEN PUT SKIP LIST('***** SLUT  BH38200 *****');         
+                                                                        
+ /*********************************************************************/
+ /* OPEN CURSOR                                                RUTINE */
+ /*********************************************************************/
+ OPEN_CURSOR: PROC;                                                     
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    EXEC SQL OPEN CUR1;                                                 
+    IF SQLCA.SQLCODE ^= 0 THEN                                          
+       CALL SQL_FEJL('001');                                            
+                                                                        
+ END OPEN_CURSOR;                                                       
+                                                                        
+ /*********************************************************************/
+ /* FETCH CURSOR                                               RUTINE */
+ /*********************************************************************/
+ FETCH_CURSOR: PROC;                                                    
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    EXEC SQL FETCH CUR1                                                 
+              INTO :PERSONEJENDOMSOPL.PERSONNUMMER                      
+                  ,:PERSONEJENDOMSOPL.ELBNR                             
+                  ,:PERSONEJENDOMSOPL.DINDKAAR                          
+                  ,:PERSONEJENDOMSOPL.EKOMNR                            
+                  ,:PERSONEJENDOMSOPL.EEJDNR                            
+    ;                                                                   
+    SELECT(SQLCA.SQLCODE);                                              
+       WHEN(0) DO;                                                      
+          IF PULS_COUNT > 9999 THEN DO;                                 
+             PUT SKIP LIST('PULS: LÆST = '!!ANTLÆS!!                    
+                           '    OPDATERET = '!!ANTOPDAT);               
+             PULS_COUNT = 1;                                            
+          END;                                                          
+          ELSE                                                          
+             PULS_COUNT = PULS_COUNT + 1;                               
+          ANTLÆS          = ANTLÆS + 1;                                 
+          HJ_PERSONNUMMER = PERSONEJENDOMSOPL.PERSONNUMMER;             
+          HJ_ELBNR        = PERSONEJENDOMSOPL.ELBNR;                    
+          HJ_DINDKAAR     = PERSONEJENDOMSOPL.DINDKAAR;                 
+          HJ_EKOMNR       = PERSONEJENDOMSOPL.EKOMNR;                   
+          HJ_EEJDNR       = PERSONEJENDOMSOPL.EEJDNR;                   
+          PERSONNUMMER_UD = PERSONEJENDOMSOPL.PERSONNUMMER;             
+          ELBNR_UD        = PERSONEJENDOMSOPL.ELBNR;                    
+          DINDKAAR_UD     = PERSONEJENDOMSOPL.DINDKAAR;                 
+          EKOMNR_UD       = PERSONEJENDOMSOPL.EKOMNR;                   
+          EEJDNR_UD       = PERSONEJENDOMSOPL.EEJDNR;                   
+          IF PUTSKIP THEN DO;                                           
+             PUT SKIP LIST(PERSONNUMMER_UD!!'  '!!EKOMNR_UD!!'  '!!     
+                           EEJDNR_UD!!'  '!!ELBNR_UD!!'  '!!            
+                           DINDKAAR_UD);                                
+          END;                                                          
+       END;                                                             
+       WHEN(100)                                                        
+          CUR_EOF = JA;                                                 
+       OTHERWISE                                                        
+          CALL SQL_FEJL('002');                                         
+    END;                                                                
+                                                                        
+ END FETCH_CURSOR;                                                      
+                                                                        
+ /*********************************************************************/
+ /*      DAN KODE                                                     */
+ /*********************************************************************/
+ DAN_KODE: PROC;                                                        
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    IF PUTSKIP THEN DO;                                                 
+       PUT SKIP LIST('DCPRN  = '    !!PERSONEJENDOMSOPL.PERSONNUMMER!!  
+                     '  ELBNR = '   !!PERSONEJENDOMSOPL.ELBNR!!         
+                     '  DINDKAAR = '!!PERSONEJENDOMSOPL.DINDKAAR!!      
+                     '  EKOMNR = '  !!PERSONEJENDOMSOPL.EKOMNR!!        
+                     '  EEJDNR = '  !!PERSONEJENDOMSOPL.EEJDNR);        
+    END;                                                                
+                                                                        
+    PERSONEJENDOMSOPL.CTYPSLUT = SKAF_CPTYPSLUT(                        
+                                      PERSONEJENDOMSOPL.DINDKAAR,       
+                                      PERSONEJENDOMSOPL.PERSONNUMMER,   
+                                      PERSONEJENDOMSOPL.EKOMNR,         
+                                      PERSONEJENDOMSOPL.EEJDNR);        
+                                                                        
+ END DAN_KODE;                                                          
+                                                                        
+ /*********************************************************************/
+ /*      LÆS EVS SLUT                                                 */
+ /*********************************************************************/
+ SKAF_CPTYPSLUT: PROC(SC_DINDKAAR,SC_DCPRN,SC_EKOMNR,SC_EEJDNR)         
+                 RETURNS(CHAR(1));                                      
+ DCL SC_DINDKAAR      FIXED BIN(15,0);                                  
+ DCL SC_DCPRN         FIXED DEC(11,0);                                  
+ DCL SC_EKOMNR        FIXED BIN(15,0);                                  
+ DCL SC_EEJDNR        FIXED BIN(31,0);                                  
+ DCL SC_RTC           CHAR(1)             INIT('');                     
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    BQ31000N.DINDKAAR = SC_DINDKAAR - 2;                                
+    IF PUTSKIP THEN PUT SKIP LIST('ÅRSTAL = '!!BQ31000N.DINDKAAR);      
+    BQ31000N.EKOMNR   = SC_EKOMNR;                                      
+    BQ31000N.EEJDNR   = SC_EEJDNR;                                      
+    BQ31000N.DCPRN    = SC_DCPRN;                                       
+                                                                        
+    EXEC SQL                                                            
+       SELECT T1.INDHOLD_C                                              
+         INTO :BQ31000N.INDHOLD_C                                       
+         FROM BQ31000T T1                                               
+         WHERE T1.DINDKAAR = :BQ31000N.DINDKAAR                         
+           AND T1.EKOMNR   = :BQ31000N.EKOMNR                           
+           AND T1.EEJDNR   = :BQ31000N.EEJDNR                           
+           AND T1.DCPRN    = :BQ31000N.DCPRN                            
+           AND T1.ELBNR    = (SELECT MAX(T2.ELBNR)                      
+                                FROM BQ31000T T2                        
+                                WHERE T2.DINDKAAR = T1.DINDKAAR         
+                                  AND T2.EKOMNR   = T1.EKOMNR           
+                                  AND T2.EEJDNR   = T1.EEJDNR           
+                                  AND T2.DCPRN    = T1.DCPRN)           
+           AND T1.EGENNR   = (SELECT MAX(T3.EGENNR)                     
+                                FROM BQ31000T T3                        
+                                WHERE T3.DINDKAAR = T1.DINDKAAR         
+                                  AND T3.EKOMNR   = T1.EKOMNR           
+                                  AND T3.EEJDNR   = T1.EEJDNR           
+                                  AND T3.DCPRN    = T1.DCPRN            
+                                  AND T3.ELBNR    = T1.ELBNR)           
+           AND T1.FELTKODE = 86                                         
+    ;                                                                   
+    SELECT(SQLCA.SQLCODE);                                              
+       WHEN(0)   DO;                                                    
+          SC_RTC = BQ31000N.INDHOLD_C;                                  
+          CALL SKRIV_KONTROL('758 = '!!SC_RTC!!' KODEN SKAFFET FRA '!!  
+                             'EVS SLUT');                               
+          TAL_SLUT = TAL_SLUT + 1;                                      
+       END;                                                             
+       WHEN(100) SC_RTC = LÆS_EVS_FORSKUD(SC_DCPRN,SC_DINDKAAR,         
+                                          SC_EKOMNR,SC_EEJDNR);         
+       OTHER     DO;                                                    
+          PUT SKIP LIST('FEJL SELECT SLUT EVS SQLKODE = '!!             
+                         SQLCA.SQLCODE!!'  NØGLE: '!!SC_DCPRN!!'  '!!   
+                         SC_DINDKAAR!!'  '!!SC_EKOMNR!!'  '!!SC_EEJDNR);
+          SC_RTC = '1';                                                 
+          CALL SKRIV_KONTROL('758 = '!!SC_RTC!!' KODEN OPSAT '!!        
+                             'DEFAULT, SYSTEMFEJL VED FREMFINDING');    
+          TAL_SYSFEJL = TAL_SYSFEJL + 1;                                
+        END;                                                            
+    END;                                                                
+    RETURN(SC_RTC);                                                     
+                                                                        
+ END SKAF_CPTYPSLUT;                                                    
+                                                                        
+ /*********************************************************************/
+ /*      LÆS EVS FORSKUD                                              */
+ /*********************************************************************/
+ LÆS_EVS_FORSKUD: PROC(LEF_PERSONNUMMER,LEF_DINDKAAR,LEF_EKOMNR,        
+                       LEF_EEJDNR)                                      
+                  RETURNS(CHAR(1));                                     
+ DCL LEF_DINDKAAR     FIXED BIN(15,0);                                  
+ DCL LEF_PERSONNUMMER FIXED DEC(11,0);                                  
+ DCL LEF_EKOMNR       FIXED BIN(15,0);                                  
+ DCL LEF_EEJDNR       FIXED BIN(31,0);                                  
+ DCL LEF_RTC          CHAR(1)             INIT('');                     
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    PERSONEJENDOMSOPL.DINDKAAR     = LEF_DINDKAAR - 1;                  
+    IF PUTSKIP THEN PUT SKIP LIST('ÅRSTAL = '!!                         
+                                            PERSONEJENDOMSOPL.DINDKAAR);
+    PERSONEJENDOMSOPL.EKOMNR       = LEF_EKOMNR;                        
+    PERSONEJENDOMSOPL.EEJDNR       = LEF_EEJDNR;                        
+    PERSONEJENDOMSOPL.PERSONNUMMER = LEF_PERSONNUMMER;                  
+    EXEC SQL                                                            
+       SELECT T1.CTYPSLUT                                               
+         INTO :PERSONEJENDOMSOPL.CTYPSLUT                               
+         FROM BN00600T T1                                               
+         WHERE T1.PERSONNUMMER = :PERSONEJENDOMSOPL.PERSONNUMMER        
+           AND T1.DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR            
+           AND T1.EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR              
+           AND T1.EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR              
+           AND T1.ELBNR        = (SELECT MAX(T2.ELBNR)                  
+                                    FROM BN00600T T2                    
+                                    WHERE T2.PERSONNUMMER =             
+                                                         T1.PERSONNUMMER
+                                      AND T2.DINDKAAR     = T1.DINDKAAR 
+                                      AND T2.EKOMNR       = T1.EKOMNR   
+                                      AND T2.EEJDNR       = T1.EEJDNR)  
+          AND T1.DFRAGLD       = (SELECT MAX(T3.DFRAGLD)                
+                                    FROM BN00600T T3                    
+                                    WHERE T3.PERSONNUMMER =             
+                                                         T1.PERSONNUMMER
+                                      AND T3.DINDKAAR     = T1.DINDKAAR 
+                                      AND T3.EKOMNR       = T1.EKOMNR   
+                                      AND T3.EEJDNR       = T1.EEJDNR   
+                                      AND T3.ELBNR        = T1.ELBNR)   
+                                                                        
+    ;                                                                   
+    SELECT(SQLCA.SQLCODE);                                              
+       WHEN(0)   DO;                                                    
+          LEF_RTC = PERSONEJENDOMSOPL.CTYPSLUT;                         
+          CALL SKRIV_KONTROL('758 = '!!LEF_RTC!!' KODEN SKAFFET FRA '!! 
+                             'EVS FORSKUD/CTYPSLUT');                   
+          TAL_FORSKUDS = TAL_FORSKUDS + 1;                              
+       END;                                                             
+       WHEN(100) DO;                                                    
+          LEF_RTC = LÆS_EVS_FORSKUD_DEFAULT(LEF_PERSONNUMMER,           
+                                            LEF_EKOMNR,LEF_EEJDNR);     
+       END;                                                             
+       OTHER     DO;                                                    
+          PUT SKIP LIST('FEJL SELECT FORSKUD EVS SQLKODE = '!!          
+                         SQLCA.SQLCODE!!'  NØGLE: '!!LEF_PERSONNUMMER!! 
+                         '  '!!LEF_DINDKAAR!!'  '!!LEF_EKOMNR!!'  '!!   
+                         LEF_EEJDNR);                                   
+          LEF_RTC = '1';                                                
+          CALL SKRIV_KONTROL('758 = '!!LEF_RTC!!' KODEN OPSAT '!!       
+                             'DEAFULT, SYSTEM FEJL VED FREMFINDING');   
+          TAL_SYSFEJL = TAL_SYSFEJL + 1;                                
+        END;                                                            
+    END;                                                                
+    RETURN(LEF_RTC);                                                    
+                                                                        
+ END LÆS_EVS_FORSKUD;                                                   
+                                                                        
+ /*********************************************************************/
+ /*      LÆS EVS FORSKUD DEFAULT                                      */
+ /*********************************************************************/
+ LÆS_EVS_FORSKUD_DEFAULT: PROC(LEFD_PERSONNUMMER,LEFD_EKOMNR,           
+                               LEFD_EEJDNR)                             
+                          RETURNS(CHAR(1));                             
+ DCL LEFD_PERSONNUMMER FIXED DEC(11,0);                                 
+ DCL LEFD_EKOMNR       FIXED BIN(15,0);                                 
+ DCL LEFD_EEJDNR       FIXED BIN(31,0);                                 
+ DCL LEFD_RTC          CHAR(1)             INIT('');                    
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    PERSONEJENDOMSOPL.DINDKAAR     = AARSTAL;                           
+    IF PUTSKIP THEN PUT SKIP LIST('ÅRSTAL = '!!                         
+                                            PERSONEJENDOMSOPL.DINDKAAR);
+    PERSONEJENDOMSOPL.EKOMNR       = LEFD_EKOMNR;                       
+    PERSONEJENDOMSOPL.EEJDNR       = LEFD_EEJDNR;                       
+    PERSONEJENDOMSOPL.PERSONNUMMER = LEFD_PERSONNUMMER;                 
+    EXEC SQL                                                            
+       SELECT T1.CTYPFOR                                                
+         INTO :PERSONEJENDOMSOPL.CTYPFOR                                
+         FROM BN00600T T1                                               
+         WHERE T1.PERSONNUMMER = :PERSONEJENDOMSOPL.PERSONNUMMER        
+           AND T1.DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR            
+           AND T1.EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR              
+           AND T1.EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR              
+           AND T1.ELBNR        = (SELECT MAX(T2.ELBNR)                  
+                                    FROM BN00600T T2                    
+                                    WHERE T2.PERSONNUMMER =             
+                                                         T1.PERSONNUMMER
+                                      AND T2.DINDKAAR     = T1.DINDKAAR 
+                                      AND T2.EKOMNR       = T1.EKOMNR   
+                                      AND T2.EEJDNR       = T1.EEJDNR)  
+          AND T1.DFRAGLD       = (SELECT MAX(T3.DFRAGLD)                
+                                    FROM BN00600T T3                    
+                                    WHERE T3.PERSONNUMMER =             
+                                                         T1.PERSONNUMMER
+                                      AND T3.DINDKAAR     = T1.DINDKAAR 
+                                      AND T3.EKOMNR       = T1.EKOMNR   
+                                      AND T3.EEJDNR       = T1.EEJDNR   
+                                      AND T3.ELBNR        = T1.ELBNR)   
+                                                                        
+    ;                                                                   
+    SELECT(SQLCA.SQLCODE);                                              
+       WHEN(0)   DO;                                                    
+          LEFD_RTC = PERSONEJENDOMSOPL.CTYPFOR;                         
+          CALL SKRIV_KONTROL('758 = '!!LEFD_RTC!!' KODEN SKAFFET FRA '!!
+                             'EVS FORSKUD/TYPFOR');                     
+          TAL_FORSKUDF = TAL_FORSKUDF + 1;                              
+       END;                                                             
+       WHEN(100) DO;                                                    
+          LEFD_RTC = '1';                                               
+          CALL SKRIV_KONTROL('758 = '!!LEFD_RTC!!' KODEN OPSAT '!!      
+                             'DEAFULT, INGEN 756 I EVS/FORSKUD');       
+       END;                                                             
+       OTHER     DO;                                                    
+          PUT SKIP LIST('FEJL SELECT FORSKUD EVS SQLKODE = '!!          
+                         SQLCA.SQLCODE!!'  NØGLE: '!!LEFD_PERSONNUMMER!!
+                         '  '!!AARSTAL!!'  '!!LEFD_EKOMNR!!'  '!!       
+                         LEFD_EEJDNR);                                  
+          LEFD_RTC = '1';                                               
+          CALL SKRIV_KONTROL('758 = '!!LEFD_RTC!!' KODEN OPSAT '!!      
+                             'DEAFULT, SYSTEM FEJL VED FREMFINDING');   
+          TAL_SYSFEJL = TAL_SYSFEJL + 1;                                
+        END;                                                            
+    END;                                                                
+    RETURN(LEFD_RTC);                                                   
+                                                                        
+ END LÆS_EVS_FORSKUD_DEFAULT;                                           
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /* OPDATER BN00600T                                                  */
+ /*********************************************************************/
+ OPDATER_BN00600T: PROC;                                                
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    IF ^OPDAT_SW THEN                                                   
+       ANTOPDAT = ANTOPDAT + 1;                                         
+    ELSE DO;                                                            
+       PERSONEJENDOMSOPL.PERSONNUMMER = HJ_PERSONNUMMER;                
+       PERSONEJENDOMSOPL.ELBNR        = HJ_ELBNR;                       
+       PERSONEJENDOMSOPL.DINDKAAR     = HJ_DINDKAAR;                    
+       PERSONEJENDOMSOPL.EKOMNR       = HJ_EKOMNR;                      
+       PERSONEJENDOMSOPL.EEJDNR       = HJ_EEJDNR;                      
+       EXEC SQL                                                         
+          UPDATE   BN00600T A                                           
+             SET   CTYPSLUT = :PERSONEJENDOMSOPL.CTYPSLUT               
+             WHERE A.PERSONNUMMER = :PERSONEJENDOMSOPL.PERSONNUMMER     
+               AND A.ELBNR        = :PERSONEJENDOMSOPL.ELBNR            
+               AND A.DINDKAAR     = :PERSONEJENDOMSOPL.DINDKAAR         
+               AND A.EKOMNR       = :PERSONEJENDOMSOPL.EKOMNR           
+               AND A.EEJDNR       = :PERSONEJENDOMSOPL.EEJDNR           
+       ;                                                                
+                                                                        
+       SELECT(SQLCA.SQLCODE);                                           
+          WHEN(0) ANTOPDAT = ANTOPDAT + 1;                              
+          OTHERWISE                                                     
+             CALL SQL_FEJL('003');                                      
+       END;                                                             
+    END;                                                                
+                                                                        
+ END OPDATER_BN00600T;                                                  
+                                                                        
+ /*********************************************************************/
+ /*      SKRIV KONTROL                                                */
+ /*********************************************************************/
+ SKRIV_KONTROL: PROC(SK_TEXT);                                          
+ DCL SK_TEXT         CHAR(88);                                          
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    LINIE        = ZZWS2;                                               
+    LIN2.CPRNR   = PERSONNUMMER_UD;                                     
+    LIN2.KOMNR   = EKOMNR_UD;                                           
+    LIN2.EEJDNR  = EEJDNR_UD;                                           
+    LIN2.ELBNR   = ELBNR_UD;                                            
+    LIN2.TEXT    = SK_TEXT;                                             
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE        = ' ';                                                 
+                                                                        
+ END SKRIV_KONTROL;                                                     
+                                                                        
+                                                                        
+ /*********************************************************************/
+ /*      SKAF PARM                                                    */
+ /*********************************************************************/
+ SKAF_PARM: PROC;                                                       
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    OPEN FILE(IPARM) TITLE('BH38200I');                                 
+    READ FILE(IPARM) INTO(PARMI);                                       
+    IF ^PARM_EOF THEN DO;                                               
+       IF PARMI.KØRSW ^= ' ' THEN                                       
+          OPDAT_SW = JA;                                                
+       ELSE                                                             
+          OPDAT_SW = NEJ;                                               
+       IF VERIFY(PARMI.ÅRSTAL,'0123456789') = 0 THEN DO;                
+          AARSTAL = PARMI.ÅRSTAL;                                       
+          PUT SKIP LIST('EVS-SLUT:    LÆS ÅRSTAL '!!AARSTAL - 2);       
+          PUT SKIP LIST('EVS-FORSKUD: LÆS ÅRSTAL '!!AARSTAL - 1);       
+       END;                                                             
+       ELSE DO;                                                         
+          PUT SKIP LIST('ÅRTAL IKKE KORREKT ANGIVET - '!!               
+                        'PROGRAMMET IKKE KØRT');                        
+          FORTSÆT = NEJ;                                                
+       END;                                                             
+    END;                                                                
+    ELSE DO;                                                            
+       PUT SKIP LIST('INGEN PARAMETRE - PROGRMMAT IKKE KØRT');          
+       FORTSÆT = NEJ;                                                   
+    END;                                                                
+                                                                        
+    PUT SKIP LIST('Der er eksekveret med årstal:             '!!        
+                   AARSTAL);                                            
+    IF OPDAT_SW THEN                                                    
+       PUT SKIP LIST('Der sker opdatering af BN00600T');                
+    ELSE                                                                
+       PUT SKIP LIST('Ingen opdatering af BN00600T');                   
+                                                                        
+ END SKAF_PARM;                                                         
+                                                                        
+ /*********************************************************************/
+ /* HER UDSKRIVES SQL FEJL                                     RUTINE */
+ /*********************************************************************/
+ SQL_FEJL: PROC(SF_SEQNR);                                              
+ DCL SF_SEQNR            CHAR(3);                                       
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    FORTSÆT = NEJ;                                                      
+    PUT SKIP LIST('SQL_FEJL I SQL-STATEMENT: '!!SF_SEQNR);              
+    PUT SKIP LIST('SQLCA',SQLCA);                                       
+    CALL ZS67000(SQLCA);                                                
+    ABENDMEDD =  FEJLTEKST;                                             
+    CALL ZS30101 (5, ABENDMEDD, 2);                                     
+                                                                        
+ END SQL_FEJL;                                                          
+ /*********************************************************************/
+ /* LUK FILER, CURSOR OG UDSKRIV AFSTEMNINGS- OG KONTROLLISTE  RUTINE */
+ /*********************************************************************/
+ AFSLUT: PROC;                                                          
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    CALL CLOSE_CURSOR;                                                  
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = ZZWS2;                                                      
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL LÆSTE ...................................';     
+    LIN1.ANT   = ANTLÆS;                                                
+    CALL ZZ20300(LINIE,'01');                                           
+    LIN1.TEKST = 'ANTAL OPDATEREDE ..............................';     
+    LIN1.ANT   = ANTOPDAT;                                              
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = '';                                                         
+    LIN1.TEKST = 'ANTAL FRA SLUT ................................';     
+    LIN1.ANT   = TAL_SLUT;                                              
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = '';                                                         
+    LIN1.TEKST = 'ANTAL FRA FORSKUD/CTYPSLUT ....................';     
+    LIN1.ANT   = TAL_FORSKUDS;                                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = '';                                                         
+    LIN1.TEKST = 'ANTAL FRA FORSKUD/CTYPFOR .....................';     
+    LIN1.ANT   = TAL_FORSKUDF;                                          
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = '';                                                         
+    LIN1.TEKST = 'ANTAL SYSTEMFEJL .............................';      
+    LIN1.ANT   = TAL_SYSFEJL;                                           
+    CALL ZZ20300(LINIE,'01');                                           
+    LINIE = '';                                                         
+    CALL ZZ20300(LINIE,'01');                                           
+    CALL ZZ20300(' ','99');                      /* LUK KMDSPOOL */     
+                                                                        
+ END AFSLUT;                                                            
+                                                                        
+ /*********************************************************************/
+ /* CLOSE CURSOR                                               RUTINE */
+ /*********************************************************************/
+ CLOSE_CURSOR: PROC;                                                    
+                                                                        
+    IF PUTSKIP THEN PUT SKIP LIST('*** '!!PROCNAME!!' ***');            
+    EXEC SQL CLOSE CUR1;                                                
+                                                                        
+ END CLOSE_CURSOR;                                                      
+                                                                        
+ %INCLUDE BH65500M;     /* UNDERSØG/BEREGN EN PERSON'S ALDER         */ 
+                                                                        
+ END BH38200;                                                           
