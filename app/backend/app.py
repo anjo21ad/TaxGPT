@@ -123,7 +123,7 @@ async def redirect():
 
 @bp.route("/favicon.ico")
 async def favicon():
-    return await bp.send_static_file("favicon.ico")
+    return await bp.send_static_file("favicon_kmd-refresh.ico")
 
 
 @bp.route("/assets/<path:path>")
